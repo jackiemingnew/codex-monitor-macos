@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/codex-notch-regression.XXXXXX")"
+trap 'rm -rf "${BUILD_DIR}"' EXIT
+
+if [[ ! -x /usr/bin/sqlite3 ]]; then
+  echo "Missing /usr/bin/sqlite3, cannot run Codex Notch regression tests" >&2
+  exit 1
+fi
+
+swift build -c release --build-path "${BUILD_DIR}/package-build"
+
+swiftc \
+  -swift-version 6 \
+  "${ROOT_DIR}/Sources/CodexNotch/Models.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/Formatters.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/Shell.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/KeychainStore.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/CodexNotchSettings.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/CodexUsageStore.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/RemoteMonitorModels.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/CLIProxyAPIClient.swift" \
+  "${ROOT_DIR}/Tests/CodexNotchRegressionTests/main.swift" \
+  -o "${BUILD_DIR}/CodexNotchRegressionTests"
+
+"${BUILD_DIR}/CodexNotchRegressionTests"

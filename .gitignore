@@ -1,0 +1,11 @@
+.build/
+.swiftpm/
+dist/
+.superpowers/
+.DS_Store
+*.dSYM/
+*.log
+DerivedData/
+*.xcuserdata/
+*.xcworkspace/
+*.xcodeproj/
