@@ -2,24 +2,39 @@ import AppKit
 import SwiftUI
 
 private enum DetailPage: String, CaseIterable, Identifiable {
-    case local
-    case remote
+    case codex
+    case remoteCodex
+    case newAPI
+    case subAPI
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .local:
+        case .codex:
             "本机"
-        case .remote:
+        case .remoteCodex:
             "远程"
+        case .newAPI:
+            "NewAPI"
+        case .subAPI:
+            "SubAPI"
         }
     }
+}
+
+private struct CollapsedMetric: Identifiable {
+    let id: String
+    let label: String
+    let value: String
+    let color: Color
 }
 
 struct NotchIslandView: View {
     @ObservedObject var viewModel: UsageViewModel
     @ObservedObject var remoteViewModel: RemoteMonitorViewModel
+    @ObservedObject var newAPIViewModel: BalanceMonitorViewModel
+    @ObservedObject var subAPIViewModel: BalanceMonitorViewModel
     @ObservedObject var overlayState: OverlayState
     @ObservedObject var settings: CodexNotchSettings
     let onSettings: () -> Void
@@ -98,11 +113,16 @@ struct NotchIslandView: View {
 
     private var statusBlock: some View {
         HStack(spacing: 5) {
-            RemoteAlertBadge(severity: remoteViewModel.snapshot.panelSeverity)
-            StatusDot(isRunning: snapshot.isRunning, pulse: pulse, enablePulse: settings.enablePulse)
-            Text("Codex")
+            if effectiveDisplaySource == .codex {
+                StatusDot(isRunning: snapshot.isRunning, pulse: pulse, enablePulse: settings.enablePulse)
+            } else {
+                SeverityDot(severity: collapsedSeverity, pulse: pulse, enablePulse: settings.enablePulse)
+            }
+            Text(collapsedTitle)
                 .font(.system(size: 10.2, weight: .bold))
-                .foregroundStyle(snapshot.isRunning ? .white.opacity(0.94) : .white.opacity(0.74))
+                .foregroundStyle(collapsedTitleColor)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
         }
         .frame(maxWidth: .infinity, alignment: .trailing)
         .padding(.trailing, 4)
@@ -110,64 +130,160 @@ struct NotchIslandView: View {
 
     private var rateLimitBlock: some View {
         VStack(alignment: .leading, spacing: 1) {
-            RateLimitRow(
-                label: "5h",
-                percent: snapshot.primaryPercent,
-                color: Color(red: 0.61, green: 0.95, blue: 0.68)
-            )
-            RateLimitRow(
-                label: "7d",
-                percent: snapshot.secondaryPercent,
-                color: Color(red: 0.50, green: 0.78, blue: 1.00)
-            )
+            ForEach(collapsedMetrics) { metric in
+                CollapsedMetricRow(metric: metric)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.leading, 4)
     }
+
+    private var effectiveDisplaySource: NotchDisplaySource {
+        let selected = settings.notchDisplaySource
+        if selected == .automatic {
+            let externalSources: [(NotchDisplaySource, RemoteAlertSeverity)] = [
+                settings.remoteMonitorEnabled ? (.remoteCodex, remoteViewModel.snapshot.panelSeverity) : nil,
+                settings.newAPIMonitorEnabled ? (.newAPI, newAPIViewModel.snapshot.panelSeverity) : nil,
+                settings.subAPIMonitorEnabled ? (.subAPI, subAPIViewModel.snapshot.panelSeverity) : nil
+            ].compactMap { $0 }
+            if let alert = externalSources
+                .filter({ $0.1 != .none })
+                .sorted(by: { $0.1 > $1.1 })
+                .first {
+                return alert.0
+            }
+            return .codex
+        }
+        return isDisplaySourceEnabled(selected) ? selected : .codex
+    }
+
+    private func isDisplaySourceEnabled(_ source: NotchDisplaySource) -> Bool {
+        switch source {
+        case .automatic, .codex:
+            true
+        case .remoteCodex:
+            settings.remoteMonitorEnabled
+        case .newAPI:
+            settings.newAPIMonitorEnabled
+        case .subAPI:
+            settings.subAPIMonitorEnabled
+        }
+    }
+
+    private var collapsedTitle: String {
+        switch effectiveDisplaySource {
+        case .automatic, .codex:
+            "Codex"
+        case .remoteCodex:
+            "远程"
+        case .newAPI:
+            "NewAPI"
+        case .subAPI:
+            "SubAPI"
+        }
+    }
+
+    private var collapsedTitleColor: Color {
+        if effectiveDisplaySource == .codex {
+            return snapshot.isRunning ? .white.opacity(0.94) : .white.opacity(0.74)
+        }
+        switch collapsedSeverity {
+        case .none:
+            return .white.opacity(0.80)
+        case .warning:
+            return Color(red: 1.0, green: 0.75, blue: 0.42)
+        case .error:
+            return Color(red: 1.0, green: 0.48, blue: 0.50)
+        }
+    }
+
+    private var collapsedSeverity: RemoteAlertSeverity {
+        switch effectiveDisplaySource {
+        case .automatic, .codex:
+            .none
+        case .remoteCodex:
+            remoteViewModel.snapshot.panelSeverity
+        case .newAPI:
+            newAPIViewModel.snapshot.panelSeverity
+        case .subAPI:
+            subAPIViewModel.snapshot.panelSeverity
+        }
+    }
+
+    private var collapsedMetrics: [CollapsedMetric] {
+        switch effectiveDisplaySource {
+        case .automatic, .codex:
+            return [
+                CollapsedMetric(
+                    id: "5h",
+                    label: "5h",
+                    value: Formatters.percent(snapshot.primaryPercent),
+                    color: Color(red: 0.61, green: 0.95, blue: 0.68)
+                ),
+                CollapsedMetric(
+                    id: "7d",
+                    label: "7d",
+                    value: Formatters.percent(snapshot.secondaryPercent),
+                    color: Color(red: 0.50, green: 0.78, blue: 1.00)
+                )
+            ]
+        case .remoteCodex:
+            let remote = remoteViewModel.snapshot
+            return [
+                CollapsedMetric(id: "ok", label: "正", value: "\(remote.healthyCount)", color: Color(red: 0.61, green: 0.95, blue: 0.68)),
+                CollapsedMetric(id: "bad", label: "异", value: "\(remote.quotaCount + remote.abnormalCount)", color: collapsedSeverity == .error ? Color(red: 1.0, green: 0.28, blue: 0.30) : Color(red: 1.0, green: 0.55, blue: 0.25))
+            ]
+        case .newAPI:
+            return balanceCollapsedMetrics(newAPIViewModel.snapshot)
+        case .subAPI:
+            return balanceCollapsedMetrics(subAPIViewModel.snapshot)
+        }
+    }
+
+    private func balanceCollapsedMetrics(_ snapshot: BalanceMonitorSnapshot) -> [CollapsedMetric] {
+        [
+            CollapsedMetric(id: "\(snapshot.source.rawValue)-accounts", label: "账", value: "\(snapshot.accounts.count)", color: Color(red: 0.61, green: 0.95, blue: 0.68)),
+            CollapsedMetric(id: "\(snapshot.source.rawValue)-amount", label: "余", value: snapshot.totalAmountText, color: Color(red: 0.50, green: 0.78, blue: 1.00))
+        ]
+    }
 }
 
-private struct RateLimitRow: View {
-    let label: String
-    let percent: Int?
-    let color: Color
+private struct CollapsedMetricRow: View {
+    let metric: CollapsedMetric
 
     var body: some View {
         HStack(spacing: 0) {
-            Text(label)
-                .frame(width: 14, alignment: .leading)
+            Text(metric.label)
+                .frame(width: 16, alignment: .leading)
                 .foregroundStyle(.white.opacity(0.60))
 
             Color.clear
                 .frame(width: 3)
 
-            if let percent {
-                HStack(spacing: 0) {
-                    Text("\(percent)")
-                        .frame(width: 22, alignment: .trailing)
-                    Text("%")
-                        .fixedSize(horizontal: true, vertical: false)
-                }
-                .foregroundStyle(color)
-            } else {
-                Text("--")
-                    .frame(width: 24, alignment: .leading)
-                    .foregroundStyle(color)
-            }
+            Text(metric.value)
+                .frame(width: 35, alignment: .trailing)
+                .foregroundStyle(metric.color)
+                .lineLimit(1)
+                .minimumScaleFactor(0.66)
         }
         .font(.system(size: 9.0, weight: .bold, design: .rounded))
         .monospacedDigit()
-        .frame(width: 50, alignment: .leading)
+        .frame(width: 54, alignment: .leading)
     }
 }
 
 struct DetailPanelView: View {
     @ObservedObject var viewModel: UsageViewModel
     @ObservedObject var remoteViewModel: RemoteMonitorViewModel
+    @ObservedObject var newAPIViewModel: BalanceMonitorViewModel
+    @ObservedObject var subAPIViewModel: BalanceMonitorViewModel
     @ObservedObject var settings: CodexNotchSettings
     let onSettings: () -> Void
     let onLocalRefresh: () -> Void
     let onRemoteRefresh: () -> Void
-    @State private var detailPage: DetailPage = .local
+    let onNewAPIRefresh: () -> Void
+    let onSubAPIRefresh: () -> Void
+    @State private var detailPage: DetailPage = .codex
 
     private var snapshot: UsageSnapshot {
         viewModel.snapshot
@@ -183,10 +299,15 @@ struct DetailPanelView: View {
                 pageSwitcher
 
                 Group {
-                    if detailPage == .local {
+                    switch selectedPage {
+                    case .codex:
                         localContent
-                    } else {
+                    case .remoteCodex:
                         remoteContent
+                    case .newAPI:
+                        balanceContent(newAPIViewModel)
+                    case .subAPI:
+                        balanceContent(subAPIViewModel)
                     }
                 }
                 .frame(maxHeight: .infinity, alignment: .top)
@@ -210,12 +331,21 @@ struct DetailPanelView: View {
             showsPeriodUsage: settings.showPeriodUsage
         )
         guard settings.remoteMonitorEnabled else {
-            return localHeight
+            let balanceRows = [
+                settings.newAPIMonitorEnabled ? newAPIViewModel.snapshot.accounts.count : nil,
+                settings.subAPIMonitorEnabled ? subAPIViewModel.snapshot.accounts.count : nil
+            ].compactMap { $0 }
+            guard !balanceRows.isEmpty else {
+                return localHeight
+            }
+            return max(localHeight, IslandMetrics.remoteDetailHeight(accountRows: max(1, balanceRows.max() ?? 1)))
         }
-        return max(
-            localHeight,
-            IslandMetrics.remoteDetailHeight(accountRows: remoteViewModel.snapshot.accounts.count)
-        )
+        let rows = [
+            remoteViewModel.snapshot.accounts.count,
+            settings.newAPIMonitorEnabled ? newAPIViewModel.snapshot.accounts.count : nil,
+            settings.subAPIMonitorEnabled ? subAPIViewModel.snapshot.accounts.count : nil
+        ].compactMap { $0 }
+        return max(localHeight, IslandMetrics.remoteDetailHeight(accountRows: max(1, rows.max() ?? 1)))
     }
 
     private var header: some View {
@@ -239,7 +369,7 @@ struct DetailPanelView: View {
             }
             .buttonStyle(IconButtonStyle())
             .disabled(isCurrentPageRefreshing)
-            .help(detailPage == .local ? "刷新本机" : "刷新远程")
+            .help(refreshHelp)
 
             Button(action: onSettings) {
                 Image(systemName: "gearshape.fill")
@@ -252,32 +382,47 @@ struct DetailPanelView: View {
     }
 
     private var headerTitle: String {
-        switch detailPage {
-        case .local:
+        switch selectedPage {
+        case .codex:
             snapshot.isRunning ? "正在运行" : "最近活动"
-        case .remote:
+        case .remoteCodex:
             "远程账号"
+        case .newAPI:
+            "NewAPI 余额"
+        case .subAPI:
+            "SubAPI 余额"
         }
     }
 
     private var headerStatus: String {
-        switch detailPage {
-        case .local:
+        switch selectedPage {
+        case .codex:
             return snapshot.isRunning ? "\(snapshot.tasks.filter { $0.status == .running }.count) 个任务" : "空闲"
-        case .remote:
+        case .remoteCodex:
+            if remoteViewModel.snapshot.usageUnavailableForSource {
+                return "仅账号"
+            }
             if remoteViewModel.snapshot.usageMessage != nil {
                 return "用量旧"
             }
             return remoteHeaderStatus
+        case .newAPI:
+            return balanceHeaderStatus(newAPIViewModel.snapshot)
+        case .subAPI:
+            return balanceHeaderStatus(subAPIViewModel.snapshot)
         }
     }
 
     private var headerStatusColor: Color {
-        switch detailPage {
-        case .local:
+        switch selectedPage {
+        case .codex:
             snapshot.isRunning ? Color(red: 0.61, green: 0.95, blue: 0.68) : .white.opacity(0.48)
-        case .remote:
+        case .remoteCodex:
             remoteStatusColor
+        case .newAPI:
+            balanceStatusColor(newAPIViewModel.snapshot)
+        case .subAPI:
+            balanceStatusColor(subAPIViewModel.snapshot)
         }
     }
 
@@ -312,23 +457,40 @@ struct DetailPanelView: View {
     }
 
     private var isCurrentPageRefreshing: Bool {
-        switch detailPage {
-        case .local:
+        switch selectedPage {
+        case .codex:
             viewModel.isRefreshing
-        case .remote:
+        case .remoteCodex:
             remoteViewModel.isRefreshing
+        case .newAPI:
+            newAPIViewModel.isRefreshing
+        case .subAPI:
+            subAPIViewModel.isRefreshing
+        }
+    }
+
+    private var refreshHelp: String {
+        switch selectedPage {
+        case .codex:
+            "刷新本机"
+        case .remoteCodex:
+            "刷新远程 Codex"
+        case .newAPI:
+            "刷新 NewAPI"
+        case .subAPI:
+            "刷新 SubAPI"
         }
     }
 
     private var pageSwitcher: some View {
         HStack(spacing: 6) {
-            ForEach(DetailPage.allCases) { page in
+            ForEach(availablePages) { page in
                 Button {
                     detailPage = page
                 } label: {
                     ZStack {
                         RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .fill(detailPage == page ? Color.white.opacity(0.12) : Color.white.opacity(0.035))
+                            .fill(selectedPage == page ? Color.white.opacity(0.12) : Color.white.opacity(0.035))
 
                         Text(page.title)
                             .font(.system(size: 10, weight: .bold))
@@ -338,18 +500,40 @@ struct DetailPanelView: View {
                 }
                 .buttonStyle(.plain)
                 .frame(maxWidth: .infinity)
-                .foregroundStyle(detailPage == page ? .white.opacity(0.92) : .white.opacity(0.48))
+                .foregroundStyle(selectedPage == page ? .white.opacity(0.92) : .white.opacity(0.48))
             }
         }
         .frame(height: IslandMetrics.detailPageSwitcherHeight)
     }
 
+    private var availablePages: [DetailPage] {
+        var pages: [DetailPage] = [.codex]
+        if settings.remoteMonitorEnabled {
+            pages.append(.remoteCodex)
+        }
+        if settings.newAPIMonitorEnabled {
+            pages.append(.newAPI)
+        }
+        if settings.subAPIMonitorEnabled {
+            pages.append(.subAPI)
+        }
+        return pages
+    }
+
+    private var selectedPage: DetailPage {
+        availablePages.contains(detailPage) ? detailPage : .codex
+    }
+
     private func refreshCurrentPage() {
-        switch detailPage {
-        case .local:
+        switch selectedPage {
+        case .codex:
             onLocalRefresh()
-        case .remote:
+        case .remoteCodex:
             onRemoteRefresh()
+        case .newAPI:
+            onNewAPIRefresh()
+        case .subAPI:
+            onSubAPIRefresh()
         }
     }
 
@@ -399,6 +583,33 @@ struct DetailPanelView: View {
         .frame(maxHeight: .infinity, alignment: .bottom)
     }
 
+    private func balanceContent(_ balanceViewModel: BalanceMonitorViewModel) -> some View {
+        VStack(spacing: 8) {
+            balanceSummary(balanceViewModel.snapshot)
+
+            Group {
+                if balanceViewModel.snapshot.accounts.isEmpty {
+                    balanceMessage(balanceViewModel.snapshot)
+                } else {
+                    ScrollView(.vertical, showsIndicators: false) {
+                        VStack(spacing: 7) {
+                            if let message = balanceViewModel.snapshot.message {
+                                inlineWarningMessage(message)
+                            }
+                            ForEach(balanceViewModel.snapshot.accounts) { account in
+                                BalanceAccountRow(account: account)
+                            }
+                        }
+                    }
+                }
+            }
+            .frame(maxHeight: .infinity, alignment: .top)
+
+            balanceTotals(balanceViewModel.snapshot)
+        }
+        .frame(maxHeight: .infinity, alignment: .bottom)
+    }
+
     private var remoteSummary: some View {
         HStack(spacing: 8) {
             RemoteSummaryCell(label: "正常", value: "\(remoteViewModel.snapshot.healthyCount)")
@@ -424,11 +635,98 @@ struct DetailPanelView: View {
         )
     }
 
+    @ViewBuilder
     private var cpaUsageSummary: some View {
+        if remoteViewModel.snapshot.usageUnavailableForSource {
+            HStack(spacing: 8) {
+                PeriodUsageCell(label: "来源", value: "CLIProxyAPI")
+                PeriodUsageCell(label: "账号", value: "\(remoteViewModel.snapshot.accounts.count)")
+                PeriodUsageCell(label: "用量", value: "未提供")
+            }
+        } else {
+            HStack(spacing: 8) {
+                PeriodUsageCell(label: "24小时", value: Formatters.compactTokens(remoteViewModel.snapshot.usage24h))
+                PeriodUsageCell(label: "7天", value: Formatters.compactTokens(remoteViewModel.snapshot.usage7d))
+                PeriodUsageCell(label: "30天", value: Formatters.compactTokens(remoteViewModel.snapshot.usage30d))
+            }
+        }
+    }
+
+    private func balanceSummary(_ snapshot: BalanceMonitorSnapshot) -> some View {
         HStack(spacing: 8) {
-            PeriodUsageCell(label: "24小时", value: Formatters.compactTokens(remoteViewModel.snapshot.usage24h))
-            PeriodUsageCell(label: "7天", value: Formatters.compactTokens(remoteViewModel.snapshot.usage7d))
-            PeriodUsageCell(label: "30天", value: Formatters.compactTokens(remoteViewModel.snapshot.usage30d))
+            RemoteSummaryCell(label: "正常", value: "\(snapshot.healthyCount)")
+            RemoteSummaryCell(label: "提醒", value: "\(snapshot.warningCount)")
+            RemoteSummaryCell(label: "异常", value: "\(snapshot.errorCount)")
+        }
+    }
+
+    private func balanceTotals(_ snapshot: BalanceMonitorSnapshot) -> some View {
+        HStack(spacing: 8) {
+            PeriodUsageCell(label: "账户", value: "\(snapshot.accounts.count)")
+            PeriodUsageCell(label: "余额", value: snapshot.totalAmountText)
+            PeriodUsageCell(label: "提醒", value: "\(snapshot.warningCount + snapshot.errorCount)")
+        }
+    }
+
+    private func balanceMessage(_ snapshot: BalanceMonitorSnapshot) -> some View {
+        HStack {
+            Text(snapshot.message ?? "暂无账户")
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.58))
+                .lineLimit(2)
+            Spacer()
+        }
+        .padding(.horizontal, 10)
+        .frame(minHeight: 50)
+        .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+        )
+    }
+
+    private func inlineWarningMessage(_ message: String) -> some View {
+        HStack {
+            Text(message)
+                .font(.system(size: 9.6, weight: .semibold))
+                .foregroundStyle(Color(red: 1.0, green: 0.70, blue: 0.38))
+                .lineLimit(2)
+            Spacer()
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Color(red: 1.0, green: 0.55, blue: 0.25).opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color(red: 1.0, green: 0.55, blue: 0.25).opacity(0.16), lineWidth: 1)
+        )
+    }
+
+    private func balanceHeaderStatus(_ snapshot: BalanceMonitorSnapshot) -> String {
+        switch snapshot.panelState {
+        case .disabled:
+            "未启用"
+        case .notConfigured:
+            "待配置"
+        case .loading:
+            "读取中"
+        case .healthy:
+            "正常"
+        case .warning:
+            "提醒"
+        case .error:
+            "异常"
+        }
+    }
+
+    private func balanceStatusColor(_ snapshot: BalanceMonitorSnapshot) -> Color {
+        switch snapshot.panelSeverity {
+        case .none:
+            Color(red: 0.61, green: 0.95, blue: 0.68)
+        case .warning:
+            Color(red: 1.0, green: 0.55, blue: 0.25)
+        case .error:
+            Color(red: 1.0, green: 0.28, blue: 0.30)
         }
     }
 
@@ -459,33 +757,6 @@ struct DetailPanelView: View {
     }
 }
 
-private struct RemoteAlertBadge: View {
-    let severity: RemoteAlertSeverity
-
-    var body: some View {
-        if severity != .none {
-            Text("!")
-                .font(.system(size: 7, weight: .heavy, design: .rounded))
-                .foregroundStyle(.black.opacity(0.88))
-                .frame(width: 10, height: 10)
-                .background(color, in: Circle())
-                .shadow(color: color.opacity(0.45), radius: 5, x: 0, y: 0)
-                .help(severity == .error ? "远程账号异常" : "远程账号配额提醒")
-        }
-    }
-
-    private var color: Color {
-        switch severity {
-        case .none:
-            .clear
-        case .warning:
-            Color(red: 1.0, green: 0.55, blue: 0.25)
-        case .error:
-            Color(red: 1.0, green: 0.28, blue: 0.30)
-        }
-    }
-}
-
 private struct StatusDot: View {
     let isRunning: Bool
     let pulse: Bool
@@ -513,6 +784,42 @@ private struct StatusDot: View {
                 )
         }
         .frame(width: 12, height: 12)
+    }
+}
+
+private struct SeverityDot: View {
+    let severity: RemoteAlertSeverity
+    let pulse: Bool
+    let enablePulse: Bool
+
+    var body: some View {
+        ZStack {
+            if severity != .none && enablePulse {
+                Circle()
+                    .stroke(color.opacity(0.25), lineWidth: 4)
+                    .frame(width: 8, height: 8)
+                    .scaleEffect(pulse ? 1.45 : 0.95)
+                    .opacity(pulse ? 0.18 : 0.42)
+                    .animation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true), value: pulse)
+            }
+
+            Circle()
+                .fill(color)
+                .frame(width: 8, height: 8)
+                .shadow(color: color.opacity(severity == .none ? 0.10 : 0.80), radius: severity == .none ? 1 : 7, x: 0, y: 0)
+        }
+        .frame(width: 12, height: 12)
+    }
+
+    private var color: Color {
+        switch severity {
+        case .none:
+            Color(red: 0.31, green: 0.33, blue: 0.37)
+        case .warning:
+            Color(red: 1.0, green: 0.55, blue: 0.25)
+        case .error:
+            Color(red: 1.0, green: 0.28, blue: 0.30)
+        }
     }
 }
 
@@ -690,6 +997,57 @@ private struct RemoteAccountRow: View {
             return Color(red: 1.0, green: 0.55, blue: 0.25)
         }
         return .white.opacity(0.62)
+    }
+}
+
+private struct BalanceAccountRow: View {
+    let account: BalanceAccount
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(account.state.color)
+                .frame(width: 8, height: 8)
+                .shadow(color: account.state.color.opacity(0.45), radius: 4, x: 0, y: 0)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(account.displayName)
+                    .font(.system(size: 10.5, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.90))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                Text(account.detailText)
+                    .font(.system(size: 9.3, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.50))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            Spacer(minLength: 8)
+
+            VStack(alignment: .trailing, spacing: 4) {
+                Text(account.state.label)
+                    .font(.system(size: 10, weight: .heavy))
+                    .foregroundStyle(account.state.color)
+                    .lineLimit(1)
+                Text(account.amountText)
+                    .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(.white.opacity(0.66))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+            }
+            .frame(width: 84, alignment: .trailing)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(height: 62)
+        .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+        )
     }
 }
 

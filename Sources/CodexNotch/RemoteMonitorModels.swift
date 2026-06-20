@@ -547,6 +547,7 @@ struct RemoteMonitorSnapshot: Equatable {
     var usage7d: Int = 0
     var usage30d: Int = 0
     var usageMessage: String?
+    var usageUnavailableForSource: Bool = false
 
     static let disabled = RemoteMonitorSnapshot(
         panelState: .disabled,
@@ -558,7 +559,7 @@ struct RemoteMonitorSnapshot: Equatable {
     static let notConfigured = RemoteMonitorSnapshot(
         panelState: .notConfigured,
         accounts: [],
-        message: "请在设置中填写 CPA-Manager-Plus 地址和管理密码",
+        message: "请在设置中填写远程 Codex 面板地址和管理密钥",
         lastUpdated: nil
     )
 

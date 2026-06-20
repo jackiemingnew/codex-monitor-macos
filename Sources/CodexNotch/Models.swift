@@ -141,6 +141,72 @@ enum TaskHistoryRange: String, CaseIterable, Identifiable {
     }
 }
 
+enum RemoteCodexDataSource: String, CaseIterable, Identifiable, Equatable {
+    case cliProxyAPI
+    case cpaManagerPlus
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .cliProxyAPI:
+            "CLIProxyAPI"
+        case .cpaManagerPlus:
+            "CPA Manager Plus"
+        }
+    }
+
+    var detailLabel: String {
+        switch self {
+        case .cliProxyAPI:
+            "直接从 CLIProxyAPI 读取账号状态"
+        case .cpaManagerPlus:
+            "从 CPA Manager Plus 读取巡检和用量"
+        }
+    }
+}
+
+enum NotchDisplaySource: String, CaseIterable, Identifiable, Equatable {
+    case automatic
+    case codex
+    case remoteCodex
+    case newAPI
+    case subAPI
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .automatic:
+            "自动"
+        case .codex:
+            "Codex"
+        case .remoteCodex:
+            "远程 Codex"
+        case .newAPI:
+            "NewAPI"
+        case .subAPI:
+            "SubAPI"
+        }
+    }
+}
+
+enum BalanceMonitorSource: String, CaseIterable, Identifiable, Equatable {
+    case newAPI
+    case subAPI
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .newAPI:
+            "NewAPI"
+        case .subAPI:
+            "SubAPI"
+        }
+    }
+}
+
 enum RefreshCadence {
     static func pendingSnapshotDelay(for interval: TimeInterval) -> TimeInterval {
         clamped((interval * 0.5).rounded(), min: 1, max: 3)

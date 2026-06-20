@@ -20,6 +20,8 @@ swiftc \
   "${ROOT_DIR}/Sources/CodexNotch/KeychainStore.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/CodexNotchSettings.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/CodexUsageStore.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/BalanceMonitorModels.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/BalanceAPIClient.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/RemoteMonitorModels.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/CLIProxyAPIClient.swift" \
   "${ROOT_DIR}/Tests/CodexNotchRegressionTests/main.swift" \

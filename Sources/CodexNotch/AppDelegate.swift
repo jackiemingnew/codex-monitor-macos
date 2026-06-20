@@ -46,12 +46,16 @@ final class NotchOverlayController {
     private let settings = CodexNotchSettings()
     private lazy var viewModel = UsageViewModel(settings: settings)
     private lazy var remoteViewModel = RemoteMonitorViewModel(settings: settings)
+    private lazy var newAPIViewModel = BalanceMonitorViewModel(source: .newAPI, settings: settings)
+    private lazy var subAPIViewModel = BalanceMonitorViewModel(source: .subAPI, settings: settings)
     private let overlayState = OverlayState()
     private let window: NSPanel
     private let detailWindow: NSPanel
     private lazy var settingsController = SettingsWindowController(
         settings: settings,
         remoteViewModel: remoteViewModel,
+        newAPIViewModel: newAPIViewModel,
+        subAPIViewModel: subAPIViewModel,
         onRefresh: { [weak self] in
             self?.viewModel.refreshAll()
         }
@@ -117,6 +121,8 @@ final class NotchOverlayController {
         let view = NotchIslandView(
             viewModel: viewModel,
             remoteViewModel: remoteViewModel,
+            newAPIViewModel: newAPIViewModel,
+            subAPIViewModel: subAPIViewModel,
             overlayState: overlayState,
             settings: settings,
             onSettings: { [weak self] in
@@ -132,6 +138,8 @@ final class NotchOverlayController {
         let detailView = DetailPanelView(
             viewModel: viewModel,
             remoteViewModel: remoteViewModel,
+            newAPIViewModel: newAPIViewModel,
+            subAPIViewModel: subAPIViewModel,
             settings: settings,
             onSettings: { [weak self] in
                 self?.showSettings()
@@ -141,6 +149,12 @@ final class NotchOverlayController {
             },
             onRemoteRefresh: { [weak self] in
                 self?.remoteViewModel.refreshNow()
+            },
+            onNewAPIRefresh: { [weak self] in
+                self?.newAPIViewModel.refreshNow()
+            },
+            onSubAPIRefresh: { [weak self] in
+                self?.subAPIViewModel.refreshNow()
             }
         )
         let detailHostingView = NSHostingView(rootView: detailView)
@@ -176,6 +190,22 @@ final class NotchOverlayController {
             .store(in: &cancellables)
 
         remoteViewModel.objectWillChange
+            .sink { [weak self] _ in
+                DispatchQueue.main.async {
+                    self?.updateFrames()
+                }
+            }
+            .store(in: &cancellables)
+
+        newAPIViewModel.objectWillChange
+            .sink { [weak self] _ in
+                DispatchQueue.main.async {
+                    self?.updateFrames()
+                }
+            }
+            .store(in: &cancellables)
+
+        subAPIViewModel.objectWillChange
             .sink { [weak self] _ in
                 DispatchQueue.main.async {
                     self?.updateFrames()
@@ -297,10 +327,16 @@ final class NotchOverlayController {
             taskRows: IslandMetrics.visibleTaskRows,
             showsPeriodUsage: settings.showPeriodUsage
         )
-        guard settings.remoteMonitorEnabled else {
+        let enabledExternalRows = [
+            settings.remoteMonitorEnabled ? remoteViewModel.snapshot.accounts.count : nil,
+            settings.newAPIMonitorEnabled ? newAPIViewModel.snapshot.accounts.count : nil,
+            settings.subAPIMonitorEnabled ? subAPIViewModel.snapshot.accounts.count : nil
+        ].compactMap { $0 }
+
+        guard !enabledExternalRows.isEmpty else {
             return localHeight
         }
-        let remoteRows = max(1, remoteViewModel.snapshot.accounts.count)
+        let remoteRows = max(1, enabledExternalRows.max() ?? 1)
         return max(localHeight, IslandMetrics.remoteDetailHeight(accountRows: remoteRows))
     }
 }
@@ -309,16 +345,22 @@ final class NotchOverlayController {
 final class SettingsWindowController {
     private let settings: CodexNotchSettings
     private let remoteViewModel: RemoteMonitorViewModel
+    private let newAPIViewModel: BalanceMonitorViewModel
+    private let subAPIViewModel: BalanceMonitorViewModel
     private let onRefresh: () -> Void
     private var window: NSWindow?
 
     init(
         settings: CodexNotchSettings,
         remoteViewModel: RemoteMonitorViewModel,
+        newAPIViewModel: BalanceMonitorViewModel,
+        subAPIViewModel: BalanceMonitorViewModel,
         onRefresh: @escaping () -> Void
     ) {
         self.settings = settings
         self.remoteViewModel = remoteViewModel
+        self.newAPIViewModel = newAPIViewModel
+        self.subAPIViewModel = subAPIViewModel
         self.onRefresh = onRefresh
     }
 
@@ -334,6 +376,8 @@ final class SettingsWindowController {
         let view = SettingsView(
             settings: settings,
             remoteViewModel: remoteViewModel,
+            newAPIViewModel: newAPIViewModel,
+            subAPIViewModel: subAPIViewModel,
             onRefresh: onRefresh
         )
         let hostingView = NSHostingView(rootView: view)

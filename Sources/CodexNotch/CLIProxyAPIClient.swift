@@ -18,9 +18,9 @@ enum CLIProxyAPIError: LocalizedError {
         case .invalidURL:
             "面板地址无效"
         case .missingKey:
-            "缺少管理密码"
+            "缺少管理密钥"
         case .httpStatus(let status):
-            status == 401 || status == 403 ? "管理密码无效或无权限" : "面板返回 HTTP \(status)"
+            status == 401 || status == 403 ? "管理密钥无效或无权限" : "面板返回 HTTP \(status)"
         case .emptyResponse:
             "面板返回空数据"
         }
@@ -35,6 +35,10 @@ final class CLIProxyAPIClient: NSObject, URLSessionDelegate {
     }
 
     func fetchCodexAccounts() async throws -> [RemoteCodexAccount] {
+        try await fetchCodexAccounts(dataSource: .cpaManagerPlus)
+    }
+
+    func fetchCodexAccounts(dataSource: RemoteCodexDataSource) async throws -> [RemoteCodexAccount] {
         guard !configuration.managementKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw CLIProxyAPIError.missingKey
         }
@@ -47,6 +51,10 @@ final class CLIProxyAPIClient: NSObject, URLSessionDelegate {
             timeout: configuration.timeout
         )
         let authFiles = try JSONDecoder().decode(CLIProxyAuthFilesResponse.self, from: authFilesData).files
+        guard dataSource == .cpaManagerPlus else {
+            return Self.authFileAccounts(from: authFiles)
+        }
+
         guard let inspectionRunData = try? await fetchLatestCodexInspectionRunDetailData(baseURL: baseURL) else {
             return Self.authFileAccounts(from: authFiles)
         }

@@ -15,6 +15,7 @@ final class RemoteMonitorViewModel: ObservableObject {
     private var consecutiveFailures = 0
     private var refreshGeneration = 0
     private var observedSettings: RemoteMonitorSettingsSnapshot?
+    private var loadedSettings: RemoteMonitorSettingsSnapshot?
 
     init(settings: CodexNotchSettings) {
         self.settings = settings
@@ -36,26 +37,24 @@ final class RemoteMonitorViewModel: ObservableObject {
         refreshTimer = nil
 
         if cancelInFlight {
-            refreshGeneration += 1
-            refreshTask?.cancel()
-            refreshTask = nil
-            pendingRefresh = false
-            isRefreshing = false
+            invalidateInFlightRefresh()
         }
 
         guard settings.remoteMonitorEnabled else {
-            refreshTask?.cancel()
-            refreshTask = nil
-            isRefreshing = false
+            invalidateInFlightRefresh()
+            loadedSettings = nil
             snapshot = .disabled
             return
         }
 
         let panelURL = settings.cliproxyPanelURL
         let key = settings.cliproxyManagementKey
+        let dataSource = settings.remoteCodexDataSource
+        let settingsSnapshot = RemoteMonitorSettingsSnapshot(settings: settings)
         guard !panelURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            isRefreshing = false
+            invalidateInFlightRefresh()
+            loadedSettings = nil
             snapshot = .notConfigured
             return
         }
@@ -68,16 +67,19 @@ final class RemoteMonitorViewModel: ObservableObject {
         isRefreshing = true
         refreshGeneration += 1
         let generation = refreshGeneration
-        let previousAccounts = snapshot.accounts
-        if snapshot.accounts.isEmpty {
+        let canPreserveSnapshot = loadedSettings == settingsSnapshot
+        let previousAccounts = canPreserveSnapshot && dataSource == .cpaManagerPlus ? snapshot.accounts : []
+        if snapshot.accounts.isEmpty || !canPreserveSnapshot {
             snapshot = RemoteMonitorSnapshot(
                 panelState: .loading,
                 accounts: [],
                 message: "正在读取远程账号",
-                lastUpdated: snapshot.lastUpdated,
-                usage24h: snapshot.usage24h,
-                usage7d: snapshot.usage7d,
-                usage30d: snapshot.usage30d
+                lastUpdated: canPreserveSnapshot ? snapshot.lastUpdated : nil,
+                usage24h: canPreserveSnapshot ? snapshot.usage24h : 0,
+                usage7d: canPreserveSnapshot ? snapshot.usage7d : 0,
+                usage30d: canPreserveSnapshot ? snapshot.usage30d : 0,
+                usageMessage: nil,
+                usageUnavailableForSource: false
             )
         }
 
@@ -92,21 +94,17 @@ final class RemoteMonitorViewModel: ObservableObject {
         refreshTask = Task.detached(priority: .utility) {
             do {
                 let result = try await Self.withTimeout(seconds: totalTimeout) {
-                    let client = CLIProxyAPIClient(configuration: configuration)
-                    let accounts = try await client.fetchCodexAccounts()
-                    let usageResult: Result<PeriodUsage, Error>
-                    do {
-                        usageResult = .success(try await client.fetchManagerPlusUsageTotals())
-                    } catch {
-                        usageResult = .failure(error)
-                    }
-                    return (accounts: accounts, usageResult: usageResult)
+                    try await RemoteCodexProvider(
+                        dataSource: dataSource,
+                        configuration: configuration
+                    ).fetch()
                 }
                 await MainActor.run {
                     guard generation == self.refreshGeneration else {
                         return
                     }
                     guard self.settings.remoteMonitorEnabled,
+                          self.settings.remoteCodexDataSource == dataSource,
                           self.currentConfiguration() == configuration else {
                         self.finishRefreshAndRunPending()
                         if !self.settings.remoteMonitorEnabled {
@@ -117,11 +115,17 @@ final class RemoteMonitorViewModel: ObservableObject {
                     self.consecutiveFailures = 0
                     self.isRefreshing = false
                     self.refreshTask = nil
+                    self.loadedSettings = settingsSnapshot
                     let accounts = RemoteCodexAccount.preservingQuota(
                         in: result.accounts,
                         from: previousAccounts
                     )
-                    self.snapshot = self.snapshot(from: accounts, usageResult: result.usageResult)
+                    self.snapshot = self.snapshot(
+                        from: accounts,
+                        usageResult: result.usageResult,
+                        usageMessageOverride: result.usageMessage,
+                        usageUnavailableForSource: result.usageUnavailableForSource
+                    )
                     self.scheduleStatusRefresh()
                     self.runPendingRefreshIfNeeded()
                 }
@@ -131,6 +135,7 @@ final class RemoteMonitorViewModel: ObservableObject {
                         return
                     }
                     guard self.settings.remoteMonitorEnabled,
+                          self.settings.remoteCodexDataSource == dataSource,
                           self.currentConfiguration() == configuration else {
                         self.finishRefreshAndRunPending()
                         if !self.settings.remoteMonitorEnabled {
@@ -143,12 +148,14 @@ final class RemoteMonitorViewModel: ObservableObject {
                     self.refreshTask = nil
                     self.snapshot = RemoteMonitorSnapshot(
                         panelState: .error,
-                        accounts: self.snapshot.accounts,
+                        accounts: canPreserveSnapshot ? self.snapshot.accounts : [],
                         message: self.localizedMessage(for: error),
                         lastUpdated: Date(),
-                        usage24h: self.snapshot.usage24h,
-                        usage7d: self.snapshot.usage7d,
-                        usage30d: self.snapshot.usage30d
+                        usage24h: canPreserveSnapshot ? self.snapshot.usage24h : 0,
+                        usage7d: canPreserveSnapshot ? self.snapshot.usage7d : 0,
+                        usage30d: canPreserveSnapshot ? self.snapshot.usage30d : 0,
+                        usageMessage: canPreserveSnapshot ? self.snapshot.usageMessage : nil,
+                        usageUnavailableForSource: canPreserveSnapshot ? self.snapshot.usageUnavailableForSource : false
                     )
                     self.scheduleStatusRefresh()
                     self.runPendingRefreshIfNeeded()
@@ -213,6 +220,14 @@ final class RemoteMonitorViewModel: ObservableObject {
         runPendingRefreshIfNeeded()
     }
 
+    private func invalidateInFlightRefresh() {
+        refreshGeneration += 1
+        refreshTask?.cancel()
+        refreshTask = nil
+        pendingRefresh = false
+        isRefreshing = false
+    }
+
     private func runPendingRefreshIfNeeded() {
         guard pendingRefresh else {
             return
@@ -223,7 +238,9 @@ final class RemoteMonitorViewModel: ObservableObject {
 
     private func snapshot(
         from accounts: [RemoteCodexAccount],
-        usageResult: Result<PeriodUsage, Error>? = nil
+        usageResult: Result<PeriodUsage, Error>? = nil,
+        usageMessageOverride: String? = nil,
+        usageUnavailableForSource: Bool = false
     ) -> RemoteMonitorSnapshot {
         let state: RemotePanelState
         if accounts.isEmpty {
@@ -244,13 +261,13 @@ final class RemoteMonitorViewModel: ObservableObject {
         switch usageResult {
         case .success(let value):
             usage = value
-            usageMessage = nil
+            usageMessage = usageMessageOverride
         case .failure:
             usage = nil
             usageMessage = "用量刷新失败，已沿用旧值"
         case nil:
             usage = nil
-            usageMessage = snapshot.usageMessage
+            usageMessage = usageMessageOverride ?? snapshot.usageMessage
         }
 
         return RemoteMonitorSnapshot(
@@ -261,7 +278,8 @@ final class RemoteMonitorViewModel: ObservableObject {
             usage24h: usage?.day ?? snapshot.usage24h,
             usage7d: usage?.week ?? snapshot.usage7d,
             usage30d: usage?.month ?? snapshot.usage30d,
-            usageMessage: usageMessage
+            usageMessage: usageMessage,
+            usageUnavailableForSource: usageUnavailableForSource
         )
     }
 
@@ -322,8 +340,48 @@ final class RemoteMonitorViewModel: ObservableObject {
 
 private struct RemoteRefreshTimeoutError: Error {}
 
+private struct RemoteCodexFetchResult {
+    let accounts: [RemoteCodexAccount]
+    let usageResult: Result<PeriodUsage, Error>
+    let usageMessage: String?
+    let usageUnavailableForSource: Bool
+}
+
+private struct RemoteCodexProvider {
+    let dataSource: RemoteCodexDataSource
+    let configuration: CLIProxyAPIConfiguration
+
+    func fetch() async throws -> RemoteCodexFetchResult {
+        let client = CLIProxyAPIClient(configuration: configuration)
+        let accounts = try await client.fetchCodexAccounts(dataSource: dataSource)
+        switch dataSource {
+        case .cpaManagerPlus:
+            let usageResult: Result<PeriodUsage, Error>
+            do {
+                usageResult = .success(try await client.fetchManagerPlusUsageTotals())
+            } catch {
+                usageResult = .failure(error)
+            }
+            return RemoteCodexFetchResult(
+                accounts: accounts,
+                usageResult: usageResult,
+                usageMessage: nil,
+                usageUnavailableForSource: false
+            )
+        case .cliProxyAPI:
+            return RemoteCodexFetchResult(
+                accounts: accounts,
+                usageResult: .success(.zero),
+                usageMessage: "CLIProxyAPI 模式仅显示账号状态，历史用量需 CPA Manager Plus",
+                usageUnavailableForSource: true
+            )
+        }
+    }
+}
+
 private struct RemoteMonitorSettingsSnapshot: Equatable {
     let remoteMonitorEnabled: Bool
+    let remoteCodexDataSource: RemoteCodexDataSource
     let cliproxyPanelURL: String
     let cliproxyManagementKey: String
     let cliproxyRefreshInterval: TimeInterval
@@ -333,6 +391,7 @@ private struct RemoteMonitorSettingsSnapshot: Equatable {
     @MainActor
     init(settings: CodexNotchSettings) {
         remoteMonitorEnabled = settings.remoteMonitorEnabled
+        remoteCodexDataSource = settings.remoteCodexDataSource
         cliproxyPanelURL = settings.cliproxyPanelURL
         cliproxyManagementKey = settings.cliproxyManagementKey
         cliproxyRefreshInterval = settings.cliproxyRefreshInterval

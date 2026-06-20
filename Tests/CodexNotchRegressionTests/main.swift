@@ -94,6 +94,8 @@ settingsDefaults.removePersistentDomain(forName: settingsSuiteName)
 let settings = CodexNotchSettings(
     defaults: settingsDefaults,
     initialManagementKey: "",
+    initialNewAPIKey: "",
+    initialSubAPIKey: "",
     launchAtLoginManager: FakeLaunchAtLoginManager()
 )
 settings.activeRefreshInterval = settings.activeRefreshInterval
@@ -104,6 +106,30 @@ settings.fileChangeRefreshMinimumGap = settings.fileChangeRefreshMinimumGap
 settings.cliproxyRefreshInterval = settings.cliproxyRefreshInterval
 settings.cliproxyRequestTimeout = settings.cliproxyRequestTimeout
 runner.check(settings.activeRefreshInterval == 3, "saving unchanged refresh intervals should not recurse or change values")
+
+runner.check(settings.remoteCodexDataSource == .cpaManagerPlus, "remote Codex monitor should default to CPA Manager Plus data")
+runner.check(settings.notchDisplaySource == .codex, "collapsed notch display should default to local Codex")
+settings.remoteCodexDataSource = .cliProxyAPI
+settings.notchDisplaySource = .remoteCodex
+settings.newAPIMonitorEnabled = true
+settings.newAPIPanelURL = "https://newapi.example.com"
+settings.newAPIRefreshInterval = 180
+settings.subAPIMonitorEnabled = true
+settings.subAPIPanelURL = "https://subapi.example.com"
+settings.subAPIRefreshInterval = 240
+let reloadedSettings = CodexNotchSettings(
+    defaults: settingsDefaults,
+    initialManagementKey: "",
+    initialNewAPIKey: "",
+    initialSubAPIKey: "",
+    launchAtLoginManager: FakeLaunchAtLoginManager()
+)
+runner.check(reloadedSettings.remoteCodexDataSource == .cliProxyAPI, "remote Codex data source should persist")
+runner.check(reloadedSettings.notchDisplaySource == .remoteCodex, "collapsed notch display source should persist")
+runner.check(reloadedSettings.newAPIMonitorEnabled, "NewAPI monitor enablement should persist")
+runner.check(reloadedSettings.newAPIPanelURL == "https://newapi.example.com", "NewAPI panel URL should persist")
+runner.check(reloadedSettings.subAPIMonitorEnabled, "SubAPI monitor enablement should persist")
+runner.check(reloadedSettings.subAPIPanelURL == "https://subapi.example.com", "SubAPI panel URL should persist")
 settingsDefaults.removePersistentDomain(forName: settingsSuiteName)
 
 let shellTimeoutStart = Date()
@@ -123,6 +149,80 @@ do {
 }
 
 runner.check(CLIProxyAPIClient.managementBaseURL(from: "http://example.com:8317/management.html") == nil, "external plain HTTP panel URL must be rejected")
+
+let newAPIBaseURL = runner.require(
+    BalanceAPIClient.apiBaseURL(from: "https://newapi.example.com/admin"),
+    "NewAPI-compatible panel URL should normalize"
+)
+runner.check(newAPIBaseURL.absoluteString == "https://newapi.example.com", "NewAPI-compatible base URL should use the origin")
+
+let newAPIUserPayload = """
+{
+  "success": true,
+  "message": "",
+  "data": {
+    "username": "owner",
+    "display_name": "Owner",
+    "quota": 1234567,
+    "used_quota": 34567,
+    "request_count": 42,
+    "status": 1
+  }
+}
+""".data(using: .utf8)!
+let userBalanceAccount = try BalanceAPIClient.decodeUserAccount(
+    newAPIUserPayload,
+    source: .newAPI
+)
+runner.check(userBalanceAccount.displayName == "Owner", "NewAPI self account should prefer display_name")
+runner.check(userBalanceAccount.amountText == Formatters.compactTokens(1_234_567), "NewAPI self account quota should decode as balance text")
+runner.check(userBalanceAccount.detailText.contains("请求 42"), "NewAPI self account should include request count")
+
+let newAPIChannelPayload = """
+{
+  "success": true,
+  "message": "",
+  "data": {
+    "items": [
+      {
+        "id": 11,
+        "name": "OpenAI Primary",
+        "status": 1,
+        "balance": 12.3456,
+        "used_quota": 987654
+      },
+      {
+        "id": 12,
+        "name": "Disabled Channel",
+        "status": 2,
+        "balance": "0.5",
+        "used_quota": "123"
+      }
+    ],
+    "total": 2
+  }
+}
+""".data(using: .utf8)!
+let channelBalanceAccounts = try BalanceAPIClient.decodeChannelAccounts(
+    newAPIChannelPayload,
+    source: .newAPI
+)
+runner.check(channelBalanceAccounts.count == 2, "NewAPI channel list should decode channel balances")
+runner.check(channelBalanceAccounts[0].amountText == "$12.35", "NewAPI channel balance should format to dollars")
+runner.check(channelBalanceAccounts[1].state == .warning, "disabled NewAPI channel should become a warning balance account")
+
+let failedBalanceEnvelope = """
+{
+  "success": false,
+  "message": "authorization Bearer sk-sensitive-token should not be displayed"
+}
+""".data(using: .utf8)!
+do {
+    _ = try BalanceAPIClient.decodeUserAccount(failedBalanceEnvelope, source: .newAPI)
+    runner.check(false, "failed NewAPI envelope should throw")
+} catch {
+    runner.check(!error.localizedDescription.lowercased().contains("sk-sensitive"), "NewAPI-compatible error messages should redact token-like secrets")
+}
 
 let localURL = runner.require(
     CLIProxyAPIClient.managementBaseURL(from: "http://127.0.0.1:8317/management.html"),
@@ -840,6 +940,54 @@ runner.check(
         remoteEnabled: true
     ).isEmpty,
     "changing insecure TLS mode should clear the old management key"
+)
+runner.check(
+    CodexNotchSettings.managementKeyForSave(
+        draftKey: "new-secret",
+        oldPanelURL: "https://old.example.com/management.html",
+        newPanelURL: "https://new.example.com/management.html",
+        oldAllowsInsecureTLS: false,
+        newAllowsInsecureTLS: false,
+        remoteEnabled: true,
+        oldSavedKey: "old-secret"
+    ) == "new-secret",
+    "changing remote panel origin should save a newly entered management key"
+)
+runner.check(
+    CodexNotchSettings.managementKeyForSave(
+        draftKey: "old-secret",
+        oldPanelURL: "not a url",
+        newPanelURL: "https://new.example.com/management.html",
+        oldAllowsInsecureTLS: false,
+        newAllowsInsecureTLS: false,
+        remoteEnabled: true,
+        oldSavedKey: "old-secret"
+    ).isEmpty,
+    "changing from an invalid remote panel URL to a valid origin should clear a reused management key"
+)
+runner.check(
+    CodexNotchSettings.apiKeyForSave(
+        draftKey: "old-api-token",
+        oldPanelURL: "not a url",
+        newPanelURL: "https://newapi.example.com",
+        oldAllowsInsecureTLS: false,
+        newAllowsInsecureTLS: false,
+        enabled: true,
+        oldSavedKey: "old-api-token"
+    ).isEmpty,
+    "changing from an invalid API panel URL to a valid origin should clear a reused API key"
+)
+runner.check(
+    CodexNotchSettings.apiKeyForSave(
+        draftKey: "new-api-token",
+        oldPanelURL: "not a url",
+        newPanelURL: "https://newapi.example.com",
+        oldAllowsInsecureTLS: false,
+        newAllowsInsecureTLS: false,
+        enabled: true,
+        oldSavedKey: "old-api-token"
+    ) == "new-api-token",
+    "changing API panel origin should save a newly entered API key"
 )
 
 let tempRoot = URL(fileURLWithPath: NSTemporaryDirectory())
