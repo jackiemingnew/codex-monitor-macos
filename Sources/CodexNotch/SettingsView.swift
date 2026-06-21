@@ -131,6 +131,7 @@ private struct SettingsDraft: Equatable {
     var subAPIThresholds = BalanceThresholdConfiguration()
     var launchAtLoginEnabled = false
     var enablePulse = true
+    var secretStorageMode: SecretStorageMode = .keychain
 
     @MainActor
     init(settings: CodexNotchSettings) {
@@ -170,6 +171,7 @@ private struct SettingsDraft: Equatable {
         subAPIThresholds = settings.balanceDefaultThresholds(for: .subAPI)
         launchAtLoginEnabled = settings.launchAtLoginEnabled
         enablePulse = settings.enablePulse
+        secretStorageMode = settings.secretStorageMode
     }
 
     init() {}
@@ -479,6 +481,19 @@ struct SettingsView: View {
         }
 
         Section("启动与外观") {
+            Picker(selection: $draft.secretStorageMode) {
+                ForEach(SecretStorageMode.allCases) { mode in
+                    Text(mode.label).tag(mode)
+                }
+            } label: {
+                HelpLabel(title: "密钥存储", help: "钥匙串模式更安全，但临时签名更新后可能触发授权；本机数据库模式会减少授权弹窗，但保护性低于钥匙串。切换只在点击保存后生效。")
+            }
+            .pickerStyle(.segmented)
+
+            Text("本机数据库会把密钥保存到当前用户的 Application Support 目录，仅当前 macOS 用户可读写。")
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundStyle(.secondary)
+
             Toggle(isOn: $draft.launchAtLoginEnabled) {
                 HelpLabel(title: "开机自启", help: "登录 macOS 后自动启动 codex监测。保存时才会调用系统启动项接口。")
             }
@@ -488,6 +503,12 @@ struct SettingsView: View {
 
             if let error = settings.launchAtLoginError {
                 Text("开机自启设置失败：\(error)")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.red.opacity(0.85))
+            }
+
+            if let error = settings.secretStorageError {
+                Text("密钥存储切换失败：\(error)")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.red.opacity(0.85))
             }
@@ -1321,6 +1342,10 @@ struct SettingsView: View {
             current: current.subAPIAccounts,
             source: .subAPI
         )
+        settings.setSecretStorageMode(next.secretStorageMode)
+        guard settings.secretStorageMode == next.secretStorageMode else {
+            return
+        }
         if !next.remoteMonitorEnabled {
             settings.remoteMonitorEnabled = false
         }

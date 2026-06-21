@@ -103,11 +103,33 @@ let settingsDefaults = runner.require(
     "settings regression defaults should be available"
 )
 settingsDefaults.removePersistentDomain(forName: settingsSuiteName)
+var secretVault = SecretVault()
+secretVault.set("clip-secret", for: .cliproxyManagement)
+secretVault.set("newapi-legacy", for: .newAPIManagement)
+secretVault.set("subapi-legacy", for: .subAPIManagement)
+secretVault.set("account-secret", for: .balanceAccount(source: .newAPI, id: "account-1"))
+runner.check(secretVault.value(for: .cliproxyManagement) == "clip-secret", "secret vault should store CLIProxyAPI key")
+runner.check(secretVault.value(for: .balanceAccount(source: .newAPI, id: "account-1")) == "account-secret", "secret vault should store account secret")
+secretVault.set("", for: .balanceAccount(source: .newAPI, id: "account-1"))
+runner.check(secretVault.value(for: .balanceAccount(source: .newAPI, id: "account-1")).isEmpty, "empty secret should remove vault entry")
+let memorySecretStore = MemorySecretStore()
+try memorySecretStore.saveVault(secretVault)
+let loadedMemoryVault = try memorySecretStore.loadVault()
+runner.check(loadedMemoryVault == secretVault, "memory secret store should persist one vault")
+let secretDatabaseURL = FileManager.default.temporaryDirectory
+    .appendingPathComponent("CodexNotchSecretStore-\(UUID().uuidString)")
+    .appendingPathComponent("secrets.sqlite3")
+let databaseSecretStore = DatabaseSecretStore(databaseURL: secretDatabaseURL)
+try databaseSecretStore.saveVault(secretVault)
+let loadedDatabaseVault = try databaseSecretStore.loadVault()
+runner.check(loadedDatabaseVault == secretVault, "database secret store should persist one vault")
+try? FileManager.default.removeItem(at: secretDatabaseURL.deletingLastPathComponent())
 let settings = CodexNotchSettings(
     defaults: settingsDefaults,
     initialManagementKey: "",
     initialNewAPIKey: "",
     initialSubAPIKey: "",
+    secretStores: SecretStoreFactory(keychain: MemorySecretStore(), database: MemorySecretStore()),
     launchAtLoginManager: FakeLaunchAtLoginManager()
 )
 settings.activeRefreshInterval = settings.activeRefreshInterval
@@ -136,6 +158,7 @@ let reloadedSettings = CodexNotchSettings(
     initialManagementKey: "",
     initialNewAPIKey: "",
     initialSubAPIKey: "",
+    secretStores: SecretStoreFactory(keychain: MemorySecretStore(), database: MemorySecretStore()),
     launchAtLoginManager: FakeLaunchAtLoginManager()
 )
 runner.check(reloadedSettings.remoteCodexDataSource == .cliProxyAPI, "remote Codex data source should persist")
@@ -161,10 +184,55 @@ let emptiedSettings = CodexNotchSettings(
     initialManagementKey: "",
     initialNewAPIKey: "",
     initialSubAPIKey: "",
+    secretStores: SecretStoreFactory(keychain: MemorySecretStore(), database: MemorySecretStore()),
     launchAtLoginManager: FakeLaunchAtLoginManager()
 )
 runner.check(emptiedSettings.balanceAccounts(for: .newAPI).isEmpty, "explicitly saved empty NewAPI account list should not revive legacy settings")
 settingsDefaults.removePersistentDomain(forName: settingsSuiteName)
+
+let databaseModeSuiteName = "CodexNotchDatabaseSecretMode-\(UUID().uuidString)"
+let databaseModeDefaults = runner.require(
+    UserDefaults(suiteName: databaseModeSuiteName),
+    "database secret mode defaults should be available"
+)
+databaseModeDefaults.removePersistentDomain(forName: databaseModeSuiteName)
+let keychainStoreForDatabaseMode = MemorySecretStore()
+let databaseStoreForDatabaseMode = MemorySecretStore()
+let databaseModeSettings = CodexNotchSettings(
+    defaults: databaseModeDefaults,
+    initialManagementKey: "clip-secret",
+    initialNewAPIKey: "newapi-secret",
+    initialSubAPIKey: "subapi-secret",
+    secretStores: SecretStoreFactory(keychain: keychainStoreForDatabaseMode, database: databaseStoreForDatabaseMode),
+    launchAtLoginManager: FakeLaunchAtLoginManager()
+)
+databaseModeSettings.setSecretStorageMode(.database)
+databaseModeSettings.setBalanceAccounts([
+    BalanceAccountConfiguration(
+        id: "db-account",
+        source: .newAPI,
+        enabled: true,
+        label: "DB Account",
+        panelURL: "https://newapi.example.com",
+        username: "owner",
+        secret: "db-account-secret",
+        requestTimeout: 6
+    )
+], for: .newAPI)
+let reloadedDatabaseModeSettings = CodexNotchSettings(
+    defaults: databaseModeDefaults,
+    secretStores: SecretStoreFactory(keychain: keychainStoreForDatabaseMode, database: databaseStoreForDatabaseMode),
+    launchAtLoginManager: FakeLaunchAtLoginManager()
+)
+runner.check(reloadedDatabaseModeSettings.secretStorageMode == .database, "secret storage mode should persist")
+runner.check(reloadedDatabaseModeSettings.cliproxyManagementKey == "clip-secret", "database mode should reload CLIProxyAPI key")
+runner.check(reloadedDatabaseModeSettings.newAPIManagementKey == "newapi-secret", "database mode should reload NewAPI key")
+runner.check(reloadedDatabaseModeSettings.subAPIManagementKey == "subapi-secret", "database mode should reload Sub2API key")
+runner.check(
+    reloadedDatabaseModeSettings.balanceAccounts(for: .newAPI).first?.secret == "db-account-secret",
+    "database mode should reload account secret"
+)
+databaseModeDefaults.removePersistentDomain(forName: databaseModeSuiteName)
 
 let oldBalanceAccount = BalanceAccountConfiguration(
     id: "account-1",

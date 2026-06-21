@@ -65,10 +65,13 @@ final class CodexNotchSettings: ObservableObject {
         static let subAPIAccounts = "subAPIAccounts"
         static let subAPIWarningThreshold = "subAPIWarningThreshold"
         static let subAPIAlertThreshold = "subAPIAlertThreshold"
+        static let secretStorageMode = "secretStorageMode"
     }
 
     private let defaults: UserDefaults
     private let launchAtLoginManager: LaunchAtLoginManaging
+    private let secretStores: SecretStoreFactory
+    private var secretVault: SecretVault
     private var isInitializing = true
 
     @Published var activeRefreshInterval: TimeInterval {
@@ -210,7 +213,7 @@ final class CodexNotchSettings: ObservableObject {
 
     @Published var newAPIManagementKey: String {
         didSet {
-            persistBalanceManagementKey(newAPIManagementKey, service: Self.newAPIKeychainService)
+            persistBalanceManagementKey(newAPIManagementKey, key: .newAPIManagement, source: .newAPI)
         }
     }
 
@@ -282,7 +285,7 @@ final class CodexNotchSettings: ObservableObject {
 
     @Published var subAPIManagementKey: String {
         didSet {
-            persistBalanceManagementKey(subAPIManagementKey, service: Self.subAPIKeychainService)
+            persistBalanceManagementKey(subAPIManagementKey, key: .subAPIManagement, source: .subAPI)
         }
     }
 
@@ -335,16 +338,46 @@ final class CodexNotchSettings: ObservableObject {
     @Published private(set) var cliproxyKeychainError: String?
     @Published private(set) var newAPIKeychainError: String?
     @Published private(set) var subAPIKeychainError: String?
+    @Published private(set) var secretStorageMode: SecretStorageMode
+    @Published private(set) var secretStorageError: String?
 
     init(
         defaults: UserDefaults = .standard,
         initialManagementKey: String? = nil,
         initialNewAPIKey: String? = nil,
         initialSubAPIKey: String? = nil,
+        secretStores: SecretStoreFactory = .live(),
         launchAtLoginManager: LaunchAtLoginManaging = SMAppServiceLaunchAtLoginManager()
     ) {
         self.defaults = defaults
         self.launchAtLoginManager = launchAtLoginManager
+        self.secretStores = secretStores
+        let loadedSecretStorageMode = SecretStorageMode(rawValue: defaults.string(forKey: Keys.secretStorageMode) ?? "") ?? .keychain
+        self.secretStorageMode = loadedSecretStorageMode
+        var loadedVault = (try? secretStores.store(for: loadedSecretStorageMode).loadVault()) ?? SecretVault()
+        var migratedSecretVault = false
+        migratedSecretVault = Self.applyInitialOrLegacySecret(
+            initialValue: initialManagementKey,
+            key: .cliproxyManagement,
+            legacyLocations: [(Self.cliproxyKeychainService, Self.cliproxyKeychainAccount)],
+            vault: &loadedVault
+        ) || migratedSecretVault
+        migratedSecretVault = Self.applyInitialOrLegacySecret(
+            initialValue: initialNewAPIKey,
+            key: .newAPIManagement,
+            legacyLocations: [
+                (Self.newAPIKeychainService, Self.cliproxyKeychainAccount),
+                ("com.alight.codexnotch.newapi.management-key", Self.cliproxyKeychainAccount)
+            ],
+            vault: &loadedVault
+        ) || migratedSecretVault
+        migratedSecretVault = Self.applyInitialOrLegacySecret(
+            initialValue: initialSubAPIKey,
+            key: .subAPIManagement,
+            legacyLocations: [(Self.subAPIKeychainService, Self.cliproxyKeychainAccount)],
+            vault: &loadedVault
+        ) || migratedSecretVault
+        self.secretVault = loadedVault
         self.activeRefreshInterval = Self.clamped(defaults.object(forKey: Keys.activeRefreshInterval) as? TimeInterval ?? 3, min: 2, max: 30)
         self.idleRefreshInterval = Self.clamped(defaults.object(forKey: Keys.idleRefreshInterval) as? TimeInterval ?? 6, min: 4, max: 120)
         self.usageRefreshInterval = Self.clamped(defaults.object(forKey: Keys.usageRefreshInterval) as? TimeInterval ?? 30, min: 15, max: 300)
@@ -358,22 +391,13 @@ final class CodexNotchSettings: ObservableObject {
         self.remoteMonitorEnabled = defaults.object(forKey: Keys.remoteMonitorEnabled) as? Bool ?? false
         self.remoteCodexDataSource = RemoteCodexDataSource(rawValue: defaults.string(forKey: Keys.remoteCodexDataSource) ?? "") ?? .cpaManagerPlus
         self.cliproxyPanelURL = defaults.string(forKey: Keys.cliproxyPanelURL) ?? ""
-        self.cliproxyManagementKey = initialManagementKey ?? ((try? KeychainStore.read(
-            service: Self.cliproxyKeychainService,
-            account: Self.cliproxyKeychainAccount
-        )) ?? "")
+        self.cliproxyManagementKey = loadedVault.value(for: .cliproxyManagement)
         self.cliproxyRefreshInterval = Self.clamped(defaults.object(forKey: Keys.cliproxyRefreshInterval) as? TimeInterval ?? 60, min: 60, max: 3_600)
         self.cliproxyRequestTimeout = Self.clamped(defaults.object(forKey: Keys.cliproxyRequestTimeout) as? TimeInterval ?? 6, min: 3, max: 30)
         self.cliproxyAllowInsecureTLS = defaults.object(forKey: Keys.cliproxyAllowInsecureTLS) as? Bool ?? false
         self.newAPIMonitorEnabled = defaults.object(forKey: Keys.newAPIMonitorEnabled) as? Bool ?? false
         self.newAPIPanelURL = defaults.string(forKey: Keys.newAPIPanelURL) ?? ""
-        self.newAPIManagementKey = initialNewAPIKey ?? ((try? KeychainStore.read(
-            service: Self.newAPIKeychainService,
-            account: Self.cliproxyKeychainAccount
-        )) ?? ((try? KeychainStore.read(
-            service: "com.alight.codexnotch.newapi.management-key",
-            account: Self.cliproxyKeychainAccount
-        )) ?? ""))
+        self.newAPIManagementKey = loadedVault.value(for: .newAPIManagement)
         self.newAPIUsername = defaults.string(forKey: Keys.newAPIUsername)
             ?? defaults.string(forKey: Keys.newAPIUserID)
             ?? ""
@@ -389,10 +413,7 @@ final class CodexNotchSettings: ObservableObject {
         self.subAPIMonitorEnabled = defaults.object(forKey: Keys.subAPIMonitorEnabled) as? Bool ?? false
         self.subAPIPanelURL = defaults.string(forKey: Keys.subAPIPanelURL) ?? ""
         self.subAPIUsername = defaults.string(forKey: Keys.subAPIUsername) ?? ""
-        self.subAPIManagementKey = initialSubAPIKey ?? ((try? KeychainStore.read(
-            service: Self.subAPIKeychainService,
-            account: Self.cliproxyKeychainAccount
-        )) ?? "")
+        self.subAPIManagementKey = loadedVault.value(for: .subAPIManagement)
         self.subAPIRefreshInterval = Self.clamped(defaults.object(forKey: Keys.subAPIRefreshInterval) as? TimeInterval ?? 300, min: 60, max: 3_600)
         self.subAPIRequestTimeout = Self.clamped(defaults.object(forKey: Keys.subAPIRequestTimeout) as? TimeInterval ?? 6, min: 3, max: 30)
         self.subAPIAllowInsecureTLS = defaults.object(forKey: Keys.subAPIAllowInsecureTLS) as? Bool ?? false
@@ -407,6 +428,7 @@ final class CodexNotchSettings: ObservableObject {
             defaults: defaults,
             key: Keys.newAPIAccounts,
             source: .newAPI,
+            vault: &loadedVault,
             legacy: BalanceAccountConfiguration(
                 id: "legacy-newapi",
                 source: .newAPI,
@@ -419,12 +441,14 @@ final class CodexNotchSettings: ObservableObject {
                 requestTimeout: newAPIRequestTimeout
             )
         )
+        migratedSecretVault = loadedNewAPIAccounts.migratedSecrets || migratedSecretVault
         self.newAPIAccounts = loadedNewAPIAccounts.accounts
         self.newAPIKeychainError = loadedNewAPIAccounts.keychainError
         let loadedSubAPIAccounts = Self.loadBalanceAccounts(
             defaults: defaults,
             key: Keys.subAPIAccounts,
             source: .subAPI,
+            vault: &loadedVault,
             legacy: BalanceAccountConfiguration(
                 id: "legacy-subapi",
                 source: .subAPI,
@@ -437,8 +461,18 @@ final class CodexNotchSettings: ObservableObject {
                 requestTimeout: subAPIRequestTimeout
             )
         )
+        migratedSecretVault = loadedSubAPIAccounts.migratedSecrets || migratedSecretVault
         self.subAPIAccounts = loadedSubAPIAccounts.accounts
         self.subAPIKeychainError = loadedSubAPIAccounts.keychainError
+        self.secretVault = loadedVault
+        if migratedSecretVault {
+            do {
+                try secretStores.store(for: secretStorageMode).saveVault(loadedVault)
+                self.secretStorageError = nil
+            } catch {
+                self.secretStorageError = error.localizedDescription
+            }
+        }
         self.isInitializing = false
     }
 
@@ -451,6 +485,20 @@ final class CodexNotchSettings: ObservableObject {
         }
 
         launchAtLoginEnabled = launchAtLoginManager.isEnabled
+    }
+
+    func setSecretStorageMode(_ mode: SecretStorageMode) {
+        guard mode != secretStorageMode else {
+            return
+        }
+        do {
+            try secretStores.store(for: mode).saveVault(secretVault)
+            secretStorageMode = mode
+            defaults.set(mode.rawValue, forKey: Keys.secretStorageMode)
+            secretStorageError = nil
+        } catch {
+            secretStorageError = error.localizedDescription
+        }
     }
 
     func resetRefreshDefaults() {
@@ -543,10 +591,35 @@ final class CodexNotchSettings: ObservableObject {
         ).normalized
     }
 
+    private static func applyInitialOrLegacySecret(
+        initialValue: String?,
+        key: SecretKey,
+        legacyLocations: [(service: String, account: String)],
+        vault: inout SecretVault
+    ) -> Bool {
+        if let initialValue {
+            vault.set(initialValue, for: key)
+            return !initialValue.isEmpty
+        }
+        if !vault.value(for: key).isEmpty {
+            return false
+        }
+        for location in legacyLocations {
+            guard let legacyValue = try? KeychainStore.read(service: location.service, account: location.account),
+                  !legacyValue.isEmpty else {
+                continue
+            }
+            vault.set(legacyValue, for: key)
+            return true
+        }
+        return false
+    }
+
     private static func loadBalanceAccounts(
         defaults: UserDefaults,
         key: String,
         source: BalanceMonitorSource,
+        vault: inout SecretVault,
         legacy: BalanceAccountConfiguration
     ) -> BalanceAccountsLoadResult {
         let hasLegacyConfiguration = legacy.enabled
@@ -557,11 +630,23 @@ final class CodexNotchSettings: ObservableObject {
         if let data = defaults.data(forKey: key),
            let decoded = try? JSONDecoder().decode([BalanceAccountConfiguration].self, from: data) {
             var keychainErrors: [String] = []
+            var migratedSecrets = false
             let accounts = decoded.map { account in
                 var copy = account
                 copy.source = source
+                let secretKey = SecretKey.balanceAccount(source: source, id: copy.id)
+                let vaultSecret = vault.value(for: secretKey)
+                if !vaultSecret.isEmpty {
+                    copy.secret = vaultSecret
+                    return copy
+                }
                 do {
-                    copy.secret = try KeychainStore.read(service: service, account: copy.id)
+                    let legacySecret = try KeychainStore.read(service: service, account: copy.id)
+                    copy.secret = legacySecret
+                    if !legacySecret.isEmpty {
+                        vault.set(legacySecret, for: secretKey)
+                        migratedSecrets = true
+                    }
                 } catch {
                     copy.secret = ""
                     copy.secretReadFailed = true
@@ -571,13 +656,15 @@ final class CodexNotchSettings: ObservableObject {
             }
             return BalanceAccountsLoadResult(
                 accounts: accounts,
-                keychainError: keychainErrors.isEmpty ? nil : keychainErrors.joined(separator: "；")
+                keychainError: keychainErrors.isEmpty ? nil : keychainErrors.joined(separator: "；"),
+                migratedSecrets: migratedSecrets
             )
         }
 
         return BalanceAccountsLoadResult(
             accounts: hasLegacyConfiguration ? [legacy] : [],
-            keychainError: nil
+            keychainError: nil,
+            migratedSecrets: false
         )
     }
 
@@ -700,37 +787,36 @@ final class CodexNotchSettings: ObservableObject {
     }
 
     private func persistCliproxyManagementKey() {
+        secretVault.set(cliproxyManagementKey, for: .cliproxyManagement)
         do {
-            try KeychainStore.write(
-                cliproxyManagementKey,
-                service: Self.cliproxyKeychainService,
-                account: Self.cliproxyKeychainAccount
-            )
+            try persistSecretVault()
             cliproxyKeychainError = nil
         } catch {
             cliproxyKeychainError = error.localizedDescription
         }
     }
 
-    private func persistBalanceManagementKey(_ key: String, service: String) {
+    private func persistBalanceManagementKey(_ value: String, key: SecretKey, source: BalanceMonitorSource) {
+        secretVault.set(value, for: key)
         do {
-            try KeychainStore.write(
-                key,
-                service: service,
-                account: Self.cliproxyKeychainAccount
-            )
-            if service == Self.newAPIKeychainService {
+            try persistSecretVault()
+            if source == .newAPI {
                 newAPIKeychainError = nil
             } else {
                 subAPIKeychainError = nil
             }
         } catch {
-            if service == Self.newAPIKeychainService {
+            if source == .newAPI {
                 newAPIKeychainError = error.localizedDescription
             } else {
                 subAPIKeychainError = error.localizedDescription
             }
         }
+    }
+
+    private func persistSecretVault() throws {
+        try secretStores.store(for: secretStorageMode).saveVault(secretVault)
+        secretStorageError = nil
     }
 
     private func persistBalanceThresholds(
@@ -759,19 +845,19 @@ final class CodexNotchSettings: ObservableObject {
         guard !isInitializing else {
             return
         }
-        let service = Self.balanceAccountKeychainService(for: source)
         var keychainError: String?
         do {
             for account in accounts {
                 if account.secretReadFailed && account.secret.isEmpty {
                     continue
                 }
-                try KeychainStore.write(account.secret, service: service, account: account.id)
+                secretVault.set(account.secret, for: .balanceAccount(source: source, id: account.id))
             }
             let newIDs = Set(accounts.map(\.id))
             for oldAccount in oldAccounts where !newIDs.contains(oldAccount.id) {
-                try KeychainStore.delete(service: service, account: oldAccount.id)
+                secretVault.removeValue(for: .balanceAccount(source: source, id: oldAccount.id))
             }
+            try persistSecretVault()
         } catch {
             keychainError = error.localizedDescription
         }
@@ -1020,4 +1106,5 @@ final class CodexNotchSettings: ObservableObject {
 private struct BalanceAccountsLoadResult {
     let accounts: [BalanceAccountConfiguration]
     let keychainError: String?
+    let migratedSecrets: Bool
 }
