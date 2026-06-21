@@ -65,6 +65,18 @@ struct BalanceThresholdConfiguration: Codable, Equatable {
         )
     }
 
+    var hasValidOrder: Bool {
+        guard let warningThreshold,
+              let alertThreshold else {
+            return true
+        }
+        return warningThreshold > alertThreshold
+    }
+
+    var orderValidationMessage: String? {
+        hasValidOrder ? nil : "提醒阈值必须高于告警阈值"
+    }
+
     func state(for balance: Double?) -> BalanceAccountState {
         guard let balance else {
             return .healthy
@@ -182,6 +194,21 @@ struct BalanceAccountConfiguration: Identifiable, Codable, Equatable {
                 warningThreshold: warningThreshold,
                 alertThreshold: alertThreshold
             ).normalized
+    }
+
+    var customThresholds: BalanceThresholdConfiguration {
+        BalanceThresholdConfiguration(
+            warningThreshold: warningThreshold,
+            alertThreshold: alertThreshold
+        )
+    }
+
+    var hasValidThresholdOrder: Bool {
+        usesDefaultThresholds || customThresholds.hasValidOrder
+    }
+
+    var thresholdOrderValidationMessage: String? {
+        hasValidThresholdOrder ? nil : customThresholds.orderValidationMessage
     }
 
     func thresholdSummary(defaults: BalanceThresholdConfiguration) -> String {

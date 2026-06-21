@@ -263,6 +263,15 @@ runner.check(defaultThresholds.normalized.alertThreshold == 30, "already ordered
 let swappedThresholds = BalanceThresholdConfiguration(warningThreshold: 25, alertThreshold: 50).normalized
 runner.check(swappedThresholds.warningThreshold == 50, "normalized thresholds should keep warning at the larger value")
 runner.check(swappedThresholds.alertThreshold == 25, "normalized thresholds should keep alert at the smaller value")
+runner.check(defaultThresholds.hasValidOrder, "warning threshold above alert threshold should be valid")
+runner.check(
+    !BalanceThresholdConfiguration(warningThreshold: 25, alertThreshold: 50).hasValidOrder,
+    "warning threshold below alert threshold should be invalid for editing"
+)
+runner.check(
+    !BalanceThresholdConfiguration(warningThreshold: 50, alertThreshold: 50).hasValidOrder,
+    "warning threshold equal to alert threshold should be invalid for editing"
+)
 runner.check(BalanceThresholdConfiguration().summaryText == "不提醒", "empty threshold summary should be explicit")
 runner.check(defaultThresholds.summaryText == "提醒 100.00 · 告警 30.00", "threshold summary should show warning and alert values")
 let defaultThresholdAccount = BalanceAccountConfiguration(
@@ -284,6 +293,28 @@ let customThresholdAccount = BalanceAccountConfiguration(
 runner.check(
     customThresholdAccount.thresholdSummary(defaults: defaultThresholds) == "自定义：提醒 20.00 · 告警 5.00",
     "custom threshold account summary should show account thresholds"
+)
+let invalidCustomThresholdAccount = BalanceAccountConfiguration(
+    source: .newAPI,
+    username: "owner",
+    usesDefaultThresholds: false,
+    warningThreshold: 5,
+    alertThreshold: 20
+)
+runner.check(
+    !invalidCustomThresholdAccount.hasValidThresholdOrder,
+    "custom account thresholds should require warning threshold above alert threshold"
+)
+let defaultThresholdAccountWithStaleInvalidCustomValues = BalanceAccountConfiguration(
+    source: .newAPI,
+    username: "owner",
+    usesDefaultThresholds: true,
+    warningThreshold: 5,
+    alertThreshold: 20
+)
+runner.check(
+    defaultThresholdAccountWithStaleInvalidCustomValues.hasValidThresholdOrder,
+    "default-threshold accounts should ignore stale custom threshold ordering"
 )
 
 let newAPI2FAResponse = """

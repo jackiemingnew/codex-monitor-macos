@@ -89,6 +89,11 @@ private struct AccountDeleteCandidate {
     let label: String
 }
 
+private struct AccountEditorContext: Identifiable {
+    let id = UUID()
+    let source: BalanceMonitorSource
+}
+
 private struct SettingsDraft: Equatable {
     var activeRefreshInterval: TimeInterval = 3
     var idleRefreshInterval: TimeInterval = 6
@@ -193,8 +198,7 @@ struct SettingsView: View {
     @State private var draft = SettingsDraft()
     @State private var selectedPreset: RefreshPreset = .balanced
     @State private var selectedTab: SettingsTab = .codex
-    @State private var showsAccountEditor = false
-    @State private var accountEditorSource: BalanceMonitorSource?
+    @State private var accountEditorContext: AccountEditorContext?
     @State private var accountEditorID: String?
     @State private var accountEditorDraft = BalanceAccountConfiguration(source: .newAPI)
     @State private var deleteCandidate: AccountDeleteCandidate?
@@ -223,8 +227,8 @@ struct SettingsView: View {
         .onAppear {
             reloadDraft()
         }
-        .sheet(isPresented: $showsAccountEditor) {
-            accountEditorSheet
+        .sheet(item: $accountEditorContext, onDismiss: resetAccountEditorState) { context in
+            accountEditorSheet(source: context.source)
         }
         .alert(
             "删除账号？",
@@ -250,6 +254,22 @@ struct SettingsView: View {
 
     private var hasChanges: Bool {
         draft != currentDraft
+    }
+
+    private var thresholdValidationMessage: String? {
+        thresholdValidationMessage(for: draft)
+    }
+
+    private var canSaveDraft: Bool {
+        hasChanges && thresholdValidationMessage == nil
+    }
+
+    private var accountEditorValidationMessage: String? {
+        accountEditorDraft.thresholdOrderValidationMessage
+    }
+
+    private var canSaveAccountEditor: Bool {
+        accountEditorValidationMessage == nil
     }
 
     private var hasRemoteChanges: Bool {
@@ -753,23 +773,22 @@ struct SettingsView: View {
         .opacity(enabled ? 1 : 0.55)
     }
 
-    @ViewBuilder
-    private var accountEditorSheet: some View {
-        if let source = accountEditorSource {
-            VStack(alignment: .leading, spacing: 16) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(accountEditorID == nil ? "添加 \(source.title) 账号" : "修改 \(source.title) 账号")
-                            .font(.system(size: 17, weight: .bold))
-                        Text("账号配置只会在点击“保存账号”后写入当前设置草稿。")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
+    private func accountEditorSheet(source: BalanceMonitorSource) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(accountEditorID == nil ? "添加 \(source.title) 账号" : "修改 \(source.title) 账号")
+                        .font(.system(size: 17, weight: .bold))
+                    Text("账号配置只会在点击“保存账号”后写入当前设置草稿。")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
                 }
+                Spacer()
+            }
 
-                Form {
-                    Section("基础信息") {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    accountEditorSection("基础信息") {
                         Toggle(isOn: $accountEditorDraft.enabled) {
                             HelpLabel(title: "启用账号", help: "关闭后这个账号不会参与刷新、详情页展示或刘海提醒。")
                         }
@@ -803,7 +822,7 @@ struct SettingsView: View {
                         )
                     }
 
-                    Section("连接与阈值") {
+                    accountEditorSection("连接与阈值") {
                         intervalStepper(
                             "请求超时",
                             value: $accountEditorDraft.requestTimeout,
@@ -829,25 +848,45 @@ struct SettingsView: View {
                         }
                     }
                 }
-                .formStyle(.grouped)
-
-                HStack {
-                    Button("取消") {
-                        closeAccountEditor()
-                    }
-                    Spacer()
-                    Button("保存账号") {
-                        saveAccountEditor()
-                    }
-                    .keyboardShortcut(.defaultAction)
-                }
+                .padding(.vertical, 2)
             }
-            .padding(20)
-            .frame(width: 560)
-            .frame(minHeight: 560)
-        } else {
-            EmptyView()
+            .frame(height: 460)
+
+            if let accountEditorValidationMessage {
+                Text(accountEditorValidationMessage)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.red)
+            }
+
+            HStack {
+                Button("取消") {
+                    closeAccountEditor()
+                }
+                Spacer()
+                Button("保存账号") {
+                    saveAccountEditor()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(!canSaveAccountEditor)
+            }
         }
+        .padding(20)
+        .frame(width: 620, height: 620)
+    }
+
+    private func accountEditorSection<Content: View>(
+        _ title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title)
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(.secondary)
+            content()
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     private func thresholdsEditor(
@@ -856,13 +895,17 @@ struct SettingsView: View {
         alert: Binding<Double?>,
         help: String
     ) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let validationMessage = BalanceThresholdConfiguration(
+            warningThreshold: warning.wrappedValue,
+            alertThreshold: alert.wrappedValue
+        ).orderValidationMessage
+        return VStack(alignment: .leading, spacing: 8) {
             HelpLabel(title: title, help: help)
             thresholdFieldRow("提醒阈值", value: warning, help: "余额低于这个值时显示黄灯提醒。")
-            thresholdFieldRow("告警阈值", value: alert, help: "余额低于这个值时显示红灯告警。通常应小于提醒阈值。")
-            Text("留空表示不启用对应提醒。账号自定义阈值会覆盖默认阈值。")
+            thresholdFieldRow("告警阈值", value: alert, help: "余额低于这个值时显示红灯告警。必须小于提醒阈值。")
+            Text(validationMessage ?? "留空表示不启用对应提醒。账号自定义阈值会覆盖默认阈值。")
                 .font(.system(size: 10.5, weight: .medium))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(validationMessage == nil ? Color.secondary : Color.red)
         }
     }
 
@@ -916,32 +959,36 @@ struct SettingsView: View {
 
     private func startAddingAccount(source: BalanceMonitorSource) {
         let count = accountBinding(for: source).wrappedValue.count
-        accountEditorSource = source
         accountEditorID = nil
         accountEditorDraft = BalanceAccountConfiguration(
             source: source,
             label: "\(source.title) \(count + 1)",
             requestTimeout: 6
         )
-        showsAccountEditor = true
+        accountEditorContext = AccountEditorContext(source: source)
     }
 
     private func startEditingAccount(source: BalanceMonitorSource, account: BalanceAccountConfiguration) {
-        accountEditorSource = source
         accountEditorID = account.id
         accountEditorDraft = account
-        showsAccountEditor = true
+        accountEditorContext = AccountEditorContext(source: source)
     }
 
     private func closeAccountEditor() {
-        showsAccountEditor = false
-        accountEditorSource = nil
+        accountEditorContext = nil
+        resetAccountEditorState()
+    }
+
+    private func resetAccountEditorState() {
         accountEditorID = nil
         accountEditorDraft = BalanceAccountConfiguration(source: .newAPI)
     }
 
     private func saveAccountEditor() {
-        guard let source = accountEditorSource else {
+        guard canSaveAccountEditor else {
+            return
+        }
+        guard let source = accountEditorContext?.source else {
             closeAccountEditor()
             return
         }
@@ -1092,9 +1139,15 @@ struct SettingsView: View {
             }
 
             if hasChanges {
-                Text("有未保存更改")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.orange)
+                if let thresholdValidationMessage {
+                    Text(thresholdValidationMessage)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.red)
+                } else {
+                    Text("有未保存更改")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.orange)
+                }
             }
 
             Spacer()
@@ -1113,7 +1166,7 @@ struct SettingsView: View {
                 saveDraft()
             }
             .keyboardShortcut(.defaultAction)
-            .disabled(!hasChanges)
+            .disabled(!canSaveDraft)
         }
     }
 
@@ -1224,6 +1277,24 @@ struct SettingsView: View {
         }
     }
 
+    private func thresholdValidationMessage(for draft: SettingsDraft) -> String? {
+        if let message = draft.newAPIThresholds.orderValidationMessage {
+            return "NewAPI 默认阈值：\(message)"
+        }
+        if let account = draft.newAPIAccounts.first(where: { !$0.hasValidThresholdOrder }),
+           let message = account.thresholdOrderValidationMessage {
+            return "NewAPI 账号「\(account.displayLabel)」：\(message)"
+        }
+        if let message = draft.subAPIThresholds.orderValidationMessage {
+            return "Sub2API 默认阈值：\(message)"
+        }
+        if let account = draft.subAPIAccounts.first(where: { !$0.hasValidThresholdOrder }),
+           let message = account.thresholdOrderValidationMessage {
+            return "Sub2API 账号「\(account.displayLabel)」：\(message)"
+        }
+        return nil
+    }
+
     private func reloadDraft() {
         let nextDraft = currentDraft
         draft = nextDraft
@@ -1231,6 +1302,9 @@ struct SettingsView: View {
     }
 
     private func saveDraft() {
+        guard thresholdValidationMessage == nil else {
+            return
+        }
         let next = draft
         let current = currentDraft
         let managementKeyForSave = CodexNotchSettings.managementKeyForSave(
