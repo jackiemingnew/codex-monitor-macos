@@ -162,6 +162,10 @@ struct RemoteCodexAccount: Identifiable, Equatable {
         quotaWindows.primaryDisplayWindows
     }
 
+    var alertQuotaWindows: [RemoteQuotaWindow] {
+        quotaWindows.accountAlertWindows
+    }
+
     var stateReasonText: String {
         switch state {
         case .healthy:
@@ -198,7 +202,7 @@ struct RemoteCodexAccount: Identifiable, Equatable {
             return replacingState(.abnormal)
         }
 
-        if displayQuotaWindows.contains(where: { $0.reachesThreshold }) {
+        if alertQuotaWindows.contains(where: { $0.reachesThreshold }) {
             return replacingState(.quotaExhausted)
         }
 
@@ -232,7 +236,7 @@ struct RemoteCodexAccount: Identifiable, Equatable {
             return .abnormal
         }
 
-        if windows.primaryDisplayWindows.contains(where: { $0.reachesThreshold }) {
+        if windows.accountAlertWindows.contains(where: { $0.reachesThreshold }) {
             return .quotaExhausted
         }
 
@@ -244,7 +248,7 @@ struct RemoteCodexAccount: Identifiable, Equatable {
     }
 
     var hasLongTermQuotaExhaustion: Bool {
-        displayQuotaWindows.contains { $0.reachesThreshold && !$0.isShortTermWindow }
+        alertQuotaWindows.contains { $0.reachesThreshold && !$0.isShortTermWindow }
     }
 
     func preservingQuota(from previous: RemoteCodexAccount?) -> RemoteCodexAccount {
@@ -315,7 +319,7 @@ struct RemoteCodexAccount: Identifiable, Equatable {
     }
 
     private var quotaThresholdReason: String? {
-        let reachedWindows = displayQuotaWindows.filter(\.reachesThreshold)
+        let reachedWindows = alertQuotaWindows.filter(\.reachesThreshold)
         guard !reachedWindows.isEmpty else {
             return nil
         }
@@ -337,7 +341,7 @@ struct RemoteCodexAccount: Identifiable, Equatable {
             let normalizedStatus = status.lowercased()
             let healthyStatuses = ["active", "available", "enabled", "normal", "ready", "ok", "healthy", "valid"]
             if !healthyStatuses.contains(normalizedStatus) {
-                return "状态 \(status)"
+                return "状态异常"
             }
         }
 
@@ -458,6 +462,24 @@ struct RemoteQuotaWindow: Identifiable, Equatable {
             || compactLabel == "周额度"
     }
 
+    var isAccountAlertWindow: Bool {
+        let label = shortLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let compactLabel = label
+            .replacingOccurrences(of: " ", with: "")
+            .lowercased()
+        return compactLabel == "5h"
+            || compactLabel == "5小时"
+            || compactLabel == "5hr"
+            || compactLabel == "5hrs"
+            || compactLabel == "7d"
+            || compactLabel == "7天"
+            || compactLabel == "1周"
+            || compactLabel == "周额度"
+            || compactLabel == "30d"
+            || compactLabel == "30天"
+            || compactLabel == "月额度"
+    }
+
     var reasonLabel: String {
         let label = shortLabel.trimmingCharacters(in: .whitespacesAndNewlines)
         if label == "5h" {
@@ -511,8 +533,11 @@ extension Array where Element == RemoteQuotaWindow {
 
     var primaryDisplayWindows: [RemoteQuotaWindow] {
         let sortedWindows = sortedForSummary
-        let primaryWindows = sortedWindows.filter(\.isPrimaryDisplayWindow)
-        return primaryWindows.isEmpty ? sortedWindows : primaryWindows
+        return sortedWindows.filter(\.isPrimaryDisplayWindow)
+    }
+
+    var accountAlertWindows: [RemoteQuotaWindow] {
+        sortedForSummary.filter(\.isAccountAlertWindow)
     }
 }
 

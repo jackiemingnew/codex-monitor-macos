@@ -1008,11 +1008,11 @@ private struct SubAPIUserData: Decodable {
         let statusState: BalanceAccountState = normalizedStatus == nil || normalizedStatus == "active" ? .healthy : .warning
         let thresholdState = thresholds.state(for: balance)
         let state = statusState.combined(with: thresholdState)
-        let statusReason = statusState == .warning ? "状态 \(status ?? "异常")" : nil
+        let statusReason = statusState == .warning ? "状态异常" : nil
         let roleText = role?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "admin" ? "管理员余额" : "用户余额"
         let details = [
             concurrency.map { "并发 \($0)" },
-            normalizedStatus.map { "状态 \($0)" }
+            Self.statusDetailText(for: normalizedStatus)
         ].compactMap { $0 }.joined(separator: " · ")
         let configuredLabel = accountLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
         let name = configuredLabel?.isEmpty == false
@@ -1034,6 +1034,16 @@ private struct SubAPIUserData: Decodable {
             balanceUnitKey: balance == nil ? nil : "USD",
             balanceUnitSymbol: balance == nil ? nil : "$"
         )
+    }
+
+    private static func statusDetailText(for normalizedStatus: String?) -> String? {
+        guard let normalizedStatus else {
+            return nil
+        }
+        if normalizedStatus == "active" {
+            return "状态 active"
+        }
+        return "状态异常"
     }
 }
 

@@ -393,7 +393,7 @@ final class CLIProxyAPIClient: NSObject, URLSessionDelegate {
         let status = result.status?.lowercased() ?? ""
         let reason = result.actionReason?.lowercased() ?? ""
 
-        if inspectionQuotaWindows(from: result).contains(where: \.reachesThreshold)
+        if inspectionQuotaWindows(from: result).accountAlertWindows.contains(where: \.reachesThreshold)
             || result.isQuota == true
             || reasonIndicatesQuotaExhaustion(reason) {
             return .quotaExhausted
