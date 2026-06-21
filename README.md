@@ -23,7 +23,8 @@ Click the island to expand or collapse it. Right-click it to refresh or quit.
 
 ```bash
 ./scripts/build-app.sh
-open "dist/codex监测.app"
+./scripts/install-user-app.sh
 ```
 
 The bundled app is an accessory app (`LSUIElement=true`), so it does not show a Dock icon.
+The install script copies the app to `~/Applications/codex监测.app`, so local updates do not require an administrator password.
