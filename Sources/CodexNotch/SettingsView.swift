@@ -63,6 +63,7 @@ private struct SettingsDraft: Equatable {
     var newAPIMonitorEnabled = false
     var newAPIPanelURL = ""
     var newAPIManagementKey = ""
+    var newAPIUserID = ""
     var newAPIRefreshInterval: TimeInterval = 300
     var newAPIRequestTimeout: TimeInterval = 6
     var newAPIAllowInsecureTLS = false
@@ -96,6 +97,7 @@ private struct SettingsDraft: Equatable {
         newAPIMonitorEnabled = settings.newAPIMonitorEnabled
         newAPIPanelURL = settings.newAPIPanelURL
         newAPIManagementKey = settings.newAPIManagementKey
+        newAPIUserID = settings.newAPIUserID
         newAPIRefreshInterval = settings.newAPIRefreshInterval
         newAPIRequestTimeout = settings.newAPIRequestTimeout
         newAPIAllowInsecureTLS = settings.newAPIAllowInsecureTLS
@@ -218,7 +220,7 @@ struct SettingsView: View {
                     )
                     .disabled(!draft.remoteMonitorEnabled)
 
-                    Text("地址、密钥和刷新配置仅在点击保存后生效。")
+                    Text("地址、认证信息和刷新配置仅在点击保存后生效。")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
 
@@ -247,6 +249,7 @@ struct SettingsView: View {
                     enabled: $draft.newAPIMonitorEnabled,
                     panelURL: $draft.newAPIPanelURL,
                     managementKey: $draft.newAPIManagementKey,
+                    newAPIUserID: $draft.newAPIUserID,
                     refreshInterval: $draft.newAPIRefreshInterval,
                     requestTimeout: $draft.newAPIRequestTimeout,
                     allowInsecureTLS: $draft.newAPIAllowInsecureTLS,
@@ -255,7 +258,7 @@ struct SettingsView: View {
                 )
 
                 balanceMonitorSection(
-                    title: "SubAPI",
+                    title: "Sub2API",
                     source: .subAPI,
                     enabled: $draft.subAPIMonitorEnabled,
                     panelURL: $draft.subAPIPanelURL,
@@ -398,6 +401,7 @@ struct SettingsView: View {
         enabled: Binding<Bool>,
         panelURL: Binding<String>,
         managementKey: Binding<String>,
+        newAPIUserID: Binding<String>? = nil,
         refreshInterval: Binding<TimeInterval>,
         requestTimeout: Binding<TimeInterval>,
         allowInsecureTLS: Binding<Bool>,
@@ -406,7 +410,7 @@ struct SettingsView: View {
     ) -> some View {
         Section(title) {
             Toggle(isOn: enabled) {
-                HelpLabel(title: "启用 \(title)", help: "启用后详情页会出现 \(title) tab，用于读取兼容 NewAPI 接口的账户额度和渠道余额。")
+                HelpLabel(title: "启用 \(title)", help: balanceMonitorEnableHelp(title: title, source: source))
             }
 
             labeledTextField(
@@ -418,14 +422,24 @@ struct SettingsView: View {
             .disabled(!enabled.wrappedValue)
 
             labeledSecureField(
-                "访问密钥",
+                balanceCredentialTitle(source: source),
                 text: managementKey,
-                placeholder: "\(title) API Token",
-                help: "用于调用 \(title) 的 /api/user/self 和渠道列表接口。密钥只保存到 macOS Keychain。"
+                placeholder: balanceCredentialPlaceholder(source: source),
+                help: balanceCredentialHelp(source: source)
             )
             .disabled(!enabled.wrappedValue)
 
-            Text("地址、密钥和刷新配置仅在点击保存后生效。")
+            if let newAPIUserID {
+                labeledTextField(
+                    "用户 ID",
+                    text: newAPIUserID,
+                    placeholder: "New-Api-User",
+                    help: "NewAPI 管理接口要求同时传入 New-Api-User 头，值为生成系统访问令牌的用户 ID。"
+                )
+                .disabled(!enabled.wrappedValue)
+            }
+
+            Text("地址、认证信息和刷新配置仅在点击保存后生效。")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.secondary)
 
@@ -446,10 +460,46 @@ struct SettingsView: View {
             )
 
             if let keychainError {
-                Text("访问密钥保存失败：\(keychainError)")
+                Text("认证信息保存失败：\(keychainError)")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.red.opacity(0.85))
             }
+        }
+    }
+
+    private func balanceMonitorEnableHelp(title: String, source: BalanceMonitorSource) -> String {
+        switch source {
+        case .newAPI:
+            "启用后详情页会出现 \(title) tab，用于读取 NewAPI 当前用户额度和渠道余额。"
+        case .subAPI:
+            "启用后详情页会出现 \(title) tab，用于读取 Sub2API 管理后台中的用户余额。"
+        }
+    }
+
+    private func balanceCredentialTitle(source: BalanceMonitorSource) -> String {
+        switch source {
+        case .newAPI:
+            "系统访问令牌"
+        case .subAPI:
+            "管理员 API Key"
+        }
+    }
+
+    private func balanceCredentialPlaceholder(source: BalanceMonitorSource) -> String {
+        switch source {
+        case .newAPI:
+            "个人设置中的系统访问令牌"
+        case .subAPI:
+            "admin-..."
+        }
+    }
+
+    private func balanceCredentialHelp(source: BalanceMonitorSource) -> String {
+        switch source {
+        case .newAPI:
+            "用于调用 NewAPI 管理接口，会作为 Authorization: Bearer 发送。令牌只保存到 macOS Keychain。"
+        case .subAPI:
+            "用于调用 Sub2API 管理接口，会作为 x-api-key 发送。API Key 只保存到 macOS Keychain。"
         }
     }
 
@@ -488,7 +538,7 @@ struct SettingsView: View {
 
     private var remoteStatusRow: some View {
         HStack {
-            HelpLabel(title: "远程状态", help: "显示当前保存配置下的远程 Codex 读取状态。修改地址、密钥或数据源后需要先保存再刷新。")
+            HelpLabel(title: "远程状态", help: "显示当前保存配置下的远程 Codex 读取状态。修改地址、认证信息或数据源后需要先保存再刷新。")
             Spacer()
             Text(hasRemoteChanges ? "保存后生效" : remoteStatusText)
                 .font(.system(size: 11, weight: .semibold))
@@ -528,6 +578,7 @@ struct SettingsView: View {
             return draft.newAPIMonitorEnabled != current.newAPIMonitorEnabled
                 || draft.newAPIPanelURL != current.newAPIPanelURL
                 || draft.newAPIManagementKey != current.newAPIManagementKey
+                || draft.newAPIUserID != current.newAPIUserID
                 || draft.newAPIRefreshInterval != current.newAPIRefreshInterval
                 || draft.newAPIRequestTimeout != current.newAPIRequestTimeout
                 || draft.newAPIAllowInsecureTLS != current.newAPIAllowInsecureTLS
@@ -666,6 +717,7 @@ struct SettingsView: View {
         }
 
         settings.newAPIPanelURL = next.newAPIPanelURL
+        settings.newAPIUserID = next.newAPIMonitorEnabled ? next.newAPIUserID : ""
         settings.newAPIRefreshInterval = next.newAPIRefreshInterval
         settings.newAPIRequestTimeout = next.newAPIRequestTimeout
         settings.newAPIAllowInsecureTLS = next.newAPIAllowInsecureTLS

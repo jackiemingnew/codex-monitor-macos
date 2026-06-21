@@ -102,7 +102,7 @@ struct BalanceMonitorSnapshot: Equatable {
             source: source,
             panelState: .notConfigured,
             accounts: [],
-            message: "请在设置中填写 \(source.title) 地址和访问密钥",
+            message: "请在设置中填写 \(source.title) 地址和认证信息",
             lastUpdated: nil
         )
     }

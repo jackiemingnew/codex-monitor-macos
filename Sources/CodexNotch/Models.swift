@@ -186,7 +186,7 @@ enum NotchDisplaySource: String, CaseIterable, Identifiable, Equatable {
         case .newAPI:
             "NewAPI"
         case .subAPI:
-            "SubAPI"
+            "Sub2API"
         }
     }
 }
@@ -202,7 +202,7 @@ enum BalanceMonitorSource: String, CaseIterable, Identifiable, Equatable {
         case .newAPI:
             "NewAPI"
         case .subAPI:
-            "SubAPI"
+            "Sub2API"
         }
     }
 }

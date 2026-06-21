@@ -18,7 +18,7 @@ private enum DetailPage: String, CaseIterable, Identifiable {
         case .newAPI:
             "NewAPI"
         case .subAPI:
-            "SubAPI"
+            "Sub2API"
         }
     }
 }
@@ -179,7 +179,7 @@ struct NotchIslandView: View {
         case .newAPI:
             "NewAPI"
         case .subAPI:
-            "SubAPI"
+            "Sub2API"
         }
     }
 
@@ -390,7 +390,7 @@ struct DetailPanelView: View {
         case .newAPI:
             "NewAPI 余额"
         case .subAPI:
-            "SubAPI 余额"
+            "Sub2API 余额"
         }
     }
 
@@ -478,7 +478,7 @@ struct DetailPanelView: View {
         case .newAPI:
             "刷新 NewAPI"
         case .subAPI:
-            "刷新 SubAPI"
+            "刷新 Sub2API"
         }
     }
 

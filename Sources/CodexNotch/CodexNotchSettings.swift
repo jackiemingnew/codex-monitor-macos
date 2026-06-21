@@ -48,6 +48,7 @@ final class CodexNotchSettings: ObservableObject {
         static let cliproxyAllowInsecureTLS = "cliproxyAllowInsecureTLS"
         static let newAPIMonitorEnabled = "newAPIMonitorEnabled"
         static let newAPIPanelURL = "newAPIPanelURL"
+        static let newAPIUserID = "newAPIUserID"
         static let newAPIRefreshInterval = "newAPIRefreshInterval"
         static let newAPIRequestTimeout = "newAPIRequestTimeout"
         static let newAPIAllowInsecureTLS = "newAPIAllowInsecureTLS"
@@ -204,6 +205,17 @@ final class CodexNotchSettings: ObservableObject {
         }
     }
 
+    @Published var newAPIUserID: String {
+        didSet {
+            let trimmed = newAPIUserID.trimmingCharacters(in: .whitespacesAndNewlines)
+            if newAPIUserID != trimmed {
+                newAPIUserID = trimmed
+                return
+            }
+            defaults.set(trimmed, forKey: Keys.newAPIUserID)
+        }
+    }
+
     @Published var newAPIRefreshInterval: TimeInterval {
         didSet {
             normalizeNewAPIRefreshInterval()
@@ -315,6 +327,7 @@ final class CodexNotchSettings: ObservableObject {
             service: Self.newAPIKeychainService,
             account: Self.cliproxyKeychainAccount
         )) ?? "")
+        self.newAPIUserID = defaults.string(forKey: Keys.newAPIUserID) ?? ""
         self.newAPIRefreshInterval = Self.clamped(defaults.object(forKey: Keys.newAPIRefreshInterval) as? TimeInterval ?? 300, min: 60, max: 3_600)
         self.newAPIRequestTimeout = Self.clamped(defaults.object(forKey: Keys.newAPIRequestTimeout) as? TimeInterval ?? 6, min: 3, max: 30)
         self.newAPIAllowInsecureTLS = defaults.object(forKey: Keys.newAPIAllowInsecureTLS) as? Bool ?? false
@@ -444,6 +457,15 @@ final class CodexNotchSettings: ObservableObject {
             newAPIManagementKey
         case .subAPI:
             subAPIManagementKey
+        }
+    }
+
+    func balanceNewAPIUserID(for source: BalanceMonitorSource) -> String {
+        switch source {
+        case .newAPI:
+            newAPIUserID
+        case .subAPI:
+            ""
         }
     }
 

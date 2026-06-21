@@ -3,6 +3,7 @@ import Foundation
 struct BalanceAPIConfiguration: Equatable {
     let panelURL: String
     let accessToken: String
+    let newAPIUserID: String
     let timeout: TimeInterval
     let allowInsecureTLS: Bool
 }
@@ -10,6 +11,7 @@ struct BalanceAPIConfiguration: Equatable {
 enum BalanceAPIError: LocalizedError {
     case invalidURL
     case missingKey
+    case missingNewAPIUserID
     case httpStatus(Int)
     case emptyResponse
     case unsupportedResponse(String)
@@ -19,9 +21,11 @@ enum BalanceAPIError: LocalizedError {
         case .invalidURL:
             "面板地址无效"
         case .missingKey:
-            "缺少访问密钥"
+            "缺少认证信息"
+        case .missingNewAPIUserID:
+            "缺少 NewAPI 用户 ID"
         case .httpStatus(let status):
-            status == 401 || status == 403 ? "访问密钥无效或无权限" : "面板返回 HTTP \(status)"
+            status == 401 || status == 403 ? "认证信息无效或无权限" : "面板返回 HTTP \(status)"
         case .emptyResponse:
             "面板返回空数据"
         case .unsupportedResponse(let message):
@@ -38,25 +42,64 @@ final class BalanceAPIClient: NSObject, URLSessionDelegate {
     }
 
     func fetchSnapshot(source: BalanceMonitorSource) async throws -> BalanceMonitorSnapshot {
-        guard !configuration.accessToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw BalanceAPIError.missingKey
-        }
+        let headers = try Self.authenticationHeaders(for: configuration, source: source)
         guard let baseURL = Self.apiBaseURL(from: configuration.panelURL) else {
             throw BalanceAPIError.invalidURL
         }
 
+        switch source {
+        case .newAPI:
+            return try await fetchNewAPISnapshot(baseURL: baseURL, headers: headers, source: source)
+        case .subAPI:
+            return try await fetchSubAPISnapshot(baseURL: baseURL, headers: headers, source: source)
+        }
+    }
+
+    static func authenticationHeaders(
+        for configuration: BalanceAPIConfiguration,
+        source: BalanceMonitorSource
+    ) throws -> [String: String] {
+        let token = configuration.accessToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else {
+            throw BalanceAPIError.missingKey
+        }
+
+        switch source {
+        case .newAPI:
+            let userID = configuration.newAPIUserID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !userID.isEmpty else {
+                throw BalanceAPIError.missingNewAPIUserID
+            }
+            return [
+                "Authorization": "Bearer \(token)",
+                "New-Api-User": userID,
+                "Accept": "application/json"
+            ]
+        case .subAPI:
+            return [
+                "x-api-key": token,
+                "Accept": "application/json"
+            ]
+        }
+    }
+
+    private func fetchNewAPISnapshot(
+        baseURL: URL,
+        headers: [String: String],
+        source: BalanceMonitorSource
+    ) async throws -> BalanceMonitorSnapshot {
         let selfEndpoint = baseURL
             .appendingPathComponent("api")
             .appendingPathComponent("user")
             .appendingPathComponent("self")
-        let selfData = try await authenticatedGET(selfEndpoint, timeout: configuration.timeout)
+        let selfData = try await authenticatedGET(selfEndpoint, headers: headers, timeout: configuration.timeout)
         var accounts = [try Self.decodeUserAccount(selfData, source: source)]
         var partialMessage: String?
 
         if let channelEndpoint = Self.channelListURL(baseURL: baseURL),
            !channelEndpoint.absoluteString.isEmpty {
             do {
-                let channelData = try await authenticatedGET(channelEndpoint, timeout: configuration.timeout)
+                let channelData = try await authenticatedGET(channelEndpoint, headers: headers, timeout: configuration.timeout)
                 let channels = try Self.decodeChannelAccounts(channelData, source: source)
                 accounts.append(contentsOf: channels)
             } catch {
@@ -64,35 +107,46 @@ final class BalanceAPIClient: NSObject, URLSessionDelegate {
             }
         }
 
-        var state: BalancePanelState
-        if accounts.isEmpty {
-            state = .warning
-        } else if accounts.contains(where: { $0.state == .error }) {
-            state = .error
-        } else if accounts.contains(where: { $0.state == .warning }) {
-            state = .warning
-        } else {
-            state = .healthy
-        }
-        if partialMessage != nil, state == .healthy {
-            state = .warning
-        }
-
         return BalanceMonitorSnapshot(
             source: source,
-            panelState: state,
+            panelState: Self.panelState(for: accounts, partialMessage: partialMessage),
             accounts: accounts,
             message: partialMessage ?? (accounts.isEmpty ? "没有找到 \(source.title) 账户" : nil),
             lastUpdated: Date()
         )
     }
 
-    private func authenticatedGET(_ endpoint: URL, timeout: TimeInterval) async throws -> Data {
+    private func fetchSubAPISnapshot(
+        baseURL: URL,
+        headers: [String: String],
+        source: BalanceMonitorSource
+    ) async throws -> BalanceMonitorSnapshot {
+        guard let usersEndpoint = Self.subAPIUsersURL(baseURL: baseURL) else {
+            throw BalanceAPIError.invalidURL
+        }
+        let usersData = try await authenticatedGET(usersEndpoint, headers: headers, timeout: configuration.timeout)
+        let accounts = try Self.decodeSubAPIUserAccounts(usersData)
+
+        return BalanceMonitorSnapshot(
+            source: source,
+            panelState: Self.panelState(for: accounts, partialMessage: nil),
+            accounts: accounts,
+            message: accounts.isEmpty ? "没有找到 Sub2API 用户余额" : nil,
+            lastUpdated: Date()
+        )
+    }
+
+    private func authenticatedGET(
+        _ endpoint: URL,
+        headers: [String: String],
+        timeout: TimeInterval
+    ) async throws -> Data {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "GET"
         request.timeoutInterval = timeout
-        request.setValue("Bearer \(configuration.accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        for (name, value) in headers {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
 
         let sessionConfig = URLSessionConfiguration.ephemeral
         sessionConfig.timeoutIntervalForRequest = timeout
@@ -115,6 +169,23 @@ final class BalanceAPIClient: NSObject, URLSessionDelegate {
             throw BalanceAPIError.emptyResponse
         }
         return data
+    }
+
+    private static func panelState(for accounts: [BalanceAccount], partialMessage: String?) -> BalancePanelState {
+        var state: BalancePanelState
+        if accounts.isEmpty {
+            state = .warning
+        } else if accounts.contains(where: { $0.state == .error }) {
+            state = .error
+        } else if accounts.contains(where: { $0.state == .warning }) {
+            state = .warning
+        } else {
+            state = .healthy
+        }
+        if partialMessage != nil, state == .healthy {
+            state = .warning
+        }
+        return state
     }
 
     func urlSession(
@@ -172,6 +243,24 @@ final class BalanceAPIClient: NSObject, URLSessionDelegate {
         return components?.url
     }
 
+    private static func subAPIUsersURL(baseURL: URL) -> URL? {
+        var components = URLComponents(
+            url: baseURL
+                .appendingPathComponent("api")
+                .appendingPathComponent("v1")
+                .appendingPathComponent("admin")
+                .appendingPathComponent("users"),
+            resolvingAgainstBaseURL: false
+        )
+        components?.queryItems = [
+            URLQueryItem(name: "page", value: "1"),
+            URLQueryItem(name: "page_size", value: "100"),
+            URLQueryItem(name: "sort_by", value: "balance"),
+            URLQueryItem(name: "sort_order", value: "desc")
+        ]
+        return components?.url
+    }
+
     private static func isLocalHost(_ host: String) -> Bool {
         let normalized = host.trimmingCharacters(in: CharacterSet(charactersIn: "[]")).lowercased()
         return normalized == "localhost" || normalized == "127.0.0.1" || normalized == "::1"
@@ -198,10 +287,33 @@ final class BalanceAPIClient: NSObject, URLSessionDelegate {
         throw BalanceAPIError.unsupportedResponse("渠道余额格式不兼容")
     }
 
+    static func decodeSubAPIUserAccounts(_ data: Data) throws -> [BalanceAccount] {
+        if let list = try? decodeSubAPIPayload(SubAPIUserListData.self, from: data) {
+            return list.items.map { $0.balanceAccount() }
+        }
+        if let users = try? decodeSubAPIPayload([SubAPIUserData].self, from: data) {
+            return users.map { $0.balanceAccount() }
+        }
+        throw BalanceAPIError.unsupportedResponse("Sub2API 用户余额格式不兼容")
+    }
+
     private static func decodePayload<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
         let decoder = JSONDecoder()
         if let envelope = try? decoder.decode(NewAPIEnvelope<T>.self, from: data) {
             if envelope.success == false {
+                throw BalanceAPIError.unsupportedResponse((envelope.message ?? "").redactedForDisplay)
+            }
+            if let payload = envelope.data {
+                return payload
+            }
+        }
+        return try decoder.decode(T.self, from: data)
+    }
+
+    private static func decodeSubAPIPayload<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
+        let decoder = JSONDecoder()
+        if let envelope = try? decoder.decode(SubAPIEnvelope<T>.self, from: data) {
+            if let code = envelope.code, code != 0 {
                 throw BalanceAPIError.unsupportedResponse((envelope.message ?? "").redactedForDisplay)
             }
             if let payload = envelope.data {
@@ -221,6 +333,12 @@ final class BalanceAPIClient: NSObject, URLSessionDelegate {
 
 private struct NewAPIEnvelope<T: Decodable>: Decodable {
     let success: Bool?
+    let message: String?
+    let data: T?
+}
+
+private struct SubAPIEnvelope<T: Decodable>: Decodable {
+    let code: Int?
     let message: String?
     let data: T?
 }
@@ -323,6 +441,64 @@ private struct NewAPIChannelData: Decodable {
             usedText: usedQuota.map(Formatters.compactTokens(_:)),
             requestCount: nil,
             updatedAt: balanceUpdatedTime.map { "更新 \($0)" },
+            state: state
+        )
+    }
+}
+
+private struct SubAPIUserListData: Decodable {
+    let items: [SubAPIUserData]
+    let total: Int?
+}
+
+private struct SubAPIUserData: Decodable {
+    let id: Int?
+    let email: String?
+    let username: String?
+    let role: String?
+    let balance: Double?
+    let concurrency: Int?
+    let status: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case email
+        case username
+        case role
+        case balance
+        case concurrency
+        case status
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = container.flexibleInt(for: [.id])
+        email = container.flexibleString(for: [.email])
+        username = container.flexibleString(for: [.username])
+        role = container.flexibleString(for: [.role])
+        balance = container.flexibleDouble(for: [.balance])
+        concurrency = container.flexibleInt(for: [.concurrency])
+        status = container.flexibleString(for: [.status])
+    }
+
+    func balanceAccount() -> BalanceAccount {
+        let normalizedStatus = status?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let state: BalanceAccountState = normalizedStatus == nil || normalizedStatus == "active" ? .healthy : .warning
+        let roleText = role?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "admin" ? "管理员余额" : "用户余额"
+        let details = [
+            concurrency.map { "并发 \($0)" },
+            normalizedStatus.map { "状态 \($0)" }
+        ].compactMap { $0 }.joined(separator: " · ")
+        return BalanceAccount(
+            id: "subapi-user-\(id.map(String.init) ?? email ?? username ?? UUID().uuidString)",
+            source: .subAPI,
+            name: email ?? username ?? "用户 \(id.map(String.init) ?? "")",
+            kind: roleText,
+            statusCode: nil,
+            amountText: balance.map(BalanceMonitorSnapshot.currencyText(_:)) ?? "--",
+            usedText: nil,
+            requestCount: nil,
+            updatedAt: details.isEmpty ? nil : details,
             state: state
         )
     }

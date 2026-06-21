@@ -113,6 +113,7 @@ settings.remoteCodexDataSource = .cliProxyAPI
 settings.notchDisplaySource = .remoteCodex
 settings.newAPIMonitorEnabled = true
 settings.newAPIPanelURL = "https://newapi.example.com"
+settings.newAPIUserID = "42"
 settings.newAPIRefreshInterval = 180
 settings.subAPIMonitorEnabled = true
 settings.subAPIPanelURL = "https://subapi.example.com"
@@ -128,6 +129,7 @@ runner.check(reloadedSettings.remoteCodexDataSource == .cliProxyAPI, "remote Cod
 runner.check(reloadedSettings.notchDisplaySource == .remoteCodex, "collapsed notch display source should persist")
 runner.check(reloadedSettings.newAPIMonitorEnabled, "NewAPI monitor enablement should persist")
 runner.check(reloadedSettings.newAPIPanelURL == "https://newapi.example.com", "NewAPI panel URL should persist")
+runner.check(reloadedSettings.newAPIUserID == "42", "NewAPI user ID should persist")
 runner.check(reloadedSettings.subAPIMonitorEnabled, "SubAPI monitor enablement should persist")
 runner.check(reloadedSettings.subAPIPanelURL == "https://subapi.example.com", "SubAPI panel URL should persist")
 settingsDefaults.removePersistentDomain(forName: settingsSuiteName)
@@ -155,6 +157,32 @@ let newAPIBaseURL = runner.require(
     "NewAPI-compatible panel URL should normalize"
 )
 runner.check(newAPIBaseURL.absoluteString == "https://newapi.example.com", "NewAPI-compatible base URL should use the origin")
+
+let newAPIHeaders = try BalanceAPIClient.authenticationHeaders(
+    for: BalanceAPIConfiguration(
+        panelURL: "https://newapi.example.com",
+        accessToken: "newapi-token",
+        newAPIUserID: "42",
+        timeout: 6,
+        allowInsecureTLS: false
+    ),
+    source: .newAPI
+)
+runner.check(newAPIHeaders["Authorization"] == "Bearer newapi-token", "NewAPI should use bearer access token authentication")
+runner.check(newAPIHeaders["New-Api-User"] == "42", "NewAPI should include the required user id header")
+
+let subAPIHeaders = try BalanceAPIClient.authenticationHeaders(
+    for: BalanceAPIConfiguration(
+        panelURL: "https://subapi.example.com",
+        accessToken: "admin-token",
+        newAPIUserID: "",
+        timeout: 6,
+        allowInsecureTLS: false
+    ),
+    source: .subAPI
+)
+runner.check(subAPIHeaders["x-api-key"] == "admin-token", "SubAPI should use x-api-key admin authentication")
+runner.check(subAPIHeaders["Authorization"] == nil, "SubAPI admin API key should not be sent as bearer authorization")
 
 let newAPIUserPayload = """
 {
@@ -210,6 +238,44 @@ let channelBalanceAccounts = try BalanceAPIClient.decodeChannelAccounts(
 runner.check(channelBalanceAccounts.count == 2, "NewAPI channel list should decode channel balances")
 runner.check(channelBalanceAccounts[0].amountText == "$12.35", "NewAPI channel balance should format to dollars")
 runner.check(channelBalanceAccounts[1].state == .warning, "disabled NewAPI channel should become a warning balance account")
+
+let subAPIUsersPayload = """
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "items": [
+      {
+        "id": 101,
+        "email": "active@example.com",
+        "username": "active",
+        "role": "user",
+        "balance": 12.5,
+        "concurrency": 3,
+        "status": "active"
+      },
+      {
+        "id": 102,
+        "email": "disabled@example.com",
+        "username": "disabled",
+        "role": "user",
+        "balance": "0.25",
+        "concurrency": 1,
+        "status": "disabled"
+      }
+    ],
+    "total": 2,
+    "page": 1,
+    "page_size": 100,
+    "pages": 1
+  }
+}
+""".data(using: .utf8)!
+let subAPIAccounts = try BalanceAPIClient.decodeSubAPIUserAccounts(subAPIUsersPayload)
+runner.check(subAPIAccounts.count == 2, "SubAPI user list should decode user balances")
+runner.check(subAPIAccounts[0].displayName == "active@example.com", "SubAPI user balance should prefer email")
+runner.check(subAPIAccounts[0].amountText == "$12.50", "SubAPI user balance should format as currency")
+runner.check(subAPIAccounts[1].state == .warning, "disabled SubAPI user should become a warning balance account")
 
 let failedBalanceEnvelope = """
 {
