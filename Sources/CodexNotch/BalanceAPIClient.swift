@@ -72,6 +72,7 @@ final class BalanceAPIClient: NSObject, URLSessionDelegate {
         defer {
             session.finishTasksAndInvalidate()
         }
+        let quotaDisplay = try await fetchNewAPIQuotaDisplay(baseURL: baseURL, session: session)
         let userID = try await loginToNewAPI(baseURL: baseURL, session: session)
         let managementHeaders = Self.newAPIManagementHeaders(userID: userID)
         let selfEndpoint = baseURL
@@ -85,7 +86,7 @@ final class BalanceAPIClient: NSObject, URLSessionDelegate {
             session: session,
             timeout: configuration.timeout
         )
-        let accounts = [try Self.decodeUserAccount(selfData, source: source)]
+        let accounts = [try Self.decodeUserAccount(selfData, source: source, quotaDisplay: quotaDisplay)]
 
         return BalanceMonitorSnapshot(
             source: source,
@@ -94,6 +95,22 @@ final class BalanceAPIClient: NSObject, URLSessionDelegate {
             message: accounts.isEmpty ? "没有找到 \(source.title) 账户" : nil,
             lastUpdated: Date()
         )
+    }
+
+    private func fetchNewAPIQuotaDisplay(baseURL: URL, session: URLSession) async throws -> NewAPIQuotaDisplay {
+        let statusEndpoint = baseURL
+            .appendingPathComponent("api")
+            .appendingPathComponent("status")
+        let statusData = try await requestData(
+            statusEndpoint,
+            method: "GET",
+            headers: [
+                "Accept": "application/json"
+            ],
+            session: session,
+            timeout: configuration.timeout
+        )
+        return try Self.decodeNewAPIQuotaDisplay(statusData)
     }
 
     private func fetchSubAPISnapshot(
@@ -309,10 +326,11 @@ final class BalanceAPIClient: NSObject, URLSessionDelegate {
 
     static func decodeUserAccount(
         _ data: Data,
-        source: BalanceMonitorSource
+        source: BalanceMonitorSource,
+        quotaDisplay: NewAPIQuotaDisplay = .default
     ) throws -> BalanceAccount {
         let user = try decodePayload(NewAPIUserData.self, from: data)
-        return user.balanceAccount(source: source)
+        return user.balanceAccount(source: source, quotaDisplay: quotaDisplay)
     }
 
     static func decodeChannelAccounts(
@@ -341,6 +359,10 @@ final class BalanceAPIClient: NSObject, URLSessionDelegate {
             "username": username,
             "password": password
         ])
+    }
+
+    static func decodeNewAPIQuotaDisplay(_ data: Data) throws -> NewAPIQuotaDisplay {
+        try decodePayload(NewAPIStatusData.self, from: data).quotaDisplay
     }
 
     static func newAPIManagementHeaders(userID: String) -> [String: String] {
@@ -521,6 +543,103 @@ private struct SubAPILoginData: Decodable {
     }
 }
 
+struct NewAPIQuotaDisplay: Equatable {
+    enum DisplayType: String {
+        case usd = "USD"
+        case cny = "CNY"
+        case custom = "CUSTOM"
+        case tokens = "TOKENS"
+    }
+
+    static let `default` = NewAPIQuotaDisplay(
+        quotaPerUnit: 500_000,
+        displayType: .usd,
+        exchangeRate: 1,
+        customSymbol: "¤",
+        customExchangeRate: 1
+    )
+
+    let quotaPerUnit: Double
+    let displayType: DisplayType
+    let exchangeRate: Double
+    let customSymbol: String
+    let customExchangeRate: Double
+
+    func quotaText(_ quota: Int) -> String {
+        switch displayType {
+        case .tokens:
+            return Formatters.compactTokens(quota)
+        case .usd:
+            return String(format: "$%.2f", quotaValue(quota))
+        case .cny:
+            return String(format: "¥%.2f", quotaValue(quota) * exchangeRate)
+        case .custom:
+            return customSymbol + String(format: "%.2f", quotaValue(quota) * customExchangeRate)
+        }
+    }
+
+    private func quotaValue(_ quota: Int) -> Double {
+        Double(quota) / max(1, quotaPerUnit)
+    }
+}
+
+private struct NewAPIStatusData: Decodable {
+    let quotaPerUnit: Double?
+    let quotaDisplayType: String?
+    let displayInCurrency: Bool?
+    let usdExchangeRate: Double?
+    let customCurrencySymbol: String?
+    let customCurrencyExchangeRate: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case quotaPerUnit = "quota_per_unit"
+        case quotaPerUnitCamel = "quotaPerUnit"
+        case quotaDisplayType = "quota_display_type"
+        case quotaDisplayTypeCamel = "quotaDisplayType"
+        case displayInCurrency = "display_in_currency"
+        case displayInCurrencyCamel = "displayInCurrency"
+        case usdExchangeRate = "usd_exchange_rate"
+        case usdExchangeRateCamel = "usdExchangeRate"
+        case customCurrencySymbol = "custom_currency_symbol"
+        case customCurrencySymbolCamel = "customCurrencySymbol"
+        case customCurrencyExchangeRate = "custom_currency_exchange_rate"
+        case customCurrencyExchangeRateCamel = "customCurrencyExchangeRate"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        quotaPerUnit = container.flexibleDouble(for: [.quotaPerUnit, .quotaPerUnitCamel])
+        quotaDisplayType = container.flexibleString(for: [.quotaDisplayType, .quotaDisplayTypeCamel])
+        displayInCurrency = container.flexibleBool(for: [.displayInCurrency, .displayInCurrencyCamel])
+        usdExchangeRate = container.flexibleDouble(for: [.usdExchangeRate, .usdExchangeRateCamel])
+        customCurrencySymbol = container.flexibleString(for: [.customCurrencySymbol, .customCurrencySymbolCamel])
+        customCurrencyExchangeRate = container.flexibleDouble(for: [.customCurrencyExchangeRate, .customCurrencyExchangeRateCamel])
+    }
+
+    var quotaDisplay: NewAPIQuotaDisplay {
+        let normalizedType = quotaDisplayType?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let displayType: NewAPIQuotaDisplay.DisplayType
+        if let normalizedType,
+           let type = NewAPIQuotaDisplay.DisplayType(rawValue: normalizedType) {
+            displayType = type
+        } else if displayInCurrency == true {
+            displayType = .cny
+        } else {
+            displayType = .usd
+        }
+
+        return NewAPIQuotaDisplay(
+            quotaPerUnit: quotaPerUnit.flatMap { $0 > 0 ? $0 : nil } ?? NewAPIQuotaDisplay.default.quotaPerUnit,
+            displayType: displayType,
+            exchangeRate: usdExchangeRate.flatMap { $0 > 0 ? $0 : nil } ?? 1,
+            customSymbol: customCurrencySymbol?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                ? customCurrencySymbol!
+                : NewAPIQuotaDisplay.default.customSymbol,
+            customExchangeRate: customCurrencyExchangeRate.flatMap { $0 > 0 ? $0 : nil } ?? 1
+        )
+    }
+}
+
 private struct NewAPIUserData: Decodable {
     let username: String?
     let displayName: String?
@@ -551,7 +670,7 @@ private struct NewAPIUserData: Decodable {
         status = container.flexibleInt(for: [.status])
     }
 
-    func balanceAccount(source: BalanceMonitorSource) -> BalanceAccount {
+    func balanceAccount(source: BalanceMonitorSource, quotaDisplay: NewAPIQuotaDisplay) -> BalanceAccount {
         let state: BalanceAccountState = status == nil || status == 1 ? .healthy : .warning
         return BalanceAccount(
             id: "\(source.rawValue)-self",
@@ -559,8 +678,8 @@ private struct NewAPIUserData: Decodable {
             name: displayName ?? username ?? "\(source.title) 用户",
             kind: "用户额度",
             statusCode: status,
-            amountText: quota.map(Formatters.compactTokens(_:)) ?? "--",
-            usedText: usedQuota.map(Formatters.compactTokens(_:)),
+            amountText: quota.map(quotaDisplay.quotaText(_:)) ?? "--",
+            usedText: usedQuota.map(quotaDisplay.quotaText(_:)),
             requestCount: requestCount,
             updatedAt: nil,
             state: state

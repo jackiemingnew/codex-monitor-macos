@@ -301,19 +301,33 @@ let newAPIUserPayload = """
   "data": {
     "username": "owner",
     "display_name": "Owner",
-    "quota": 1234567,
-    "used_quota": 34567,
+    "quota": 73454877,
+    "used_quota": 0,
     "request_count": 42,
     "status": 1
   }
 }
 """.data(using: .utf8)!
+let newAPIStatusPayload = """
+{
+  "success": true,
+  "message": "",
+  "data": {
+    "quota_per_unit": 500000,
+    "quota_display_type": "CNY",
+    "usd_exchange_rate": 6.8069
+  }
+}
+""".data(using: .utf8)!
+let newAPIQuotaDisplay = try BalanceAPIClient.decodeNewAPIQuotaDisplay(newAPIStatusPayload)
 let userBalanceAccount = try BalanceAPIClient.decodeUserAccount(
     newAPIUserPayload,
-    source: .newAPI
+    source: .newAPI,
+    quotaDisplay: newAPIQuotaDisplay
 )
 runner.check(userBalanceAccount.displayName == "Owner", "NewAPI self account should prefer display_name")
-runner.check(userBalanceAccount.amountText == Formatters.compactTokens(1_234_567), "NewAPI self account quota should decode as balance text")
+runner.check(userBalanceAccount.amountText == "¥1000.00", "NewAPI self account quota should display the same CNY balance as the console")
+runner.check(userBalanceAccount.detailText.contains("已用 ¥0.00"), "NewAPI used quota should display as currency usage")
 runner.check(userBalanceAccount.detailText.contains("请求 42"), "NewAPI self account should include request count")
 
 let newAPIChannelPayload = """
