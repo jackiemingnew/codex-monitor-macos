@@ -89,8 +89,8 @@ let proQuotaAccount = remoteAccount(
         RemoteQuotaWindow(id: "pro-5x", shortLabel: "Pro 5x", remainingPercent: 80, usedPercent: 20, resetText: nil)
     ]
 )
-runner.check(proQuotaAccount.quotaSummaryText.contains("Pro 20x 100%"), "CLIProxyAPI quota summary should preserve Pro 20x quota")
-runner.check(proQuotaAccount.quotaSummaryText.contains("Pro 5x 80%"), "CLIProxyAPI quota summary should preserve Pro 5x quota")
+runner.check(proQuotaAccount.displayQuotaWindows.map(\.shortLabel) == ["5h", "7d"], "CLIProxyAPI Pro account detail should only display 5h and 7d quota windows")
+runner.check(proQuotaAccount.quotaSummaryText == "5h 98%  7d 60%", "CLIProxyAPI Pro account quota summary should hide extra Pro quota windows")
 
 runner.check(RefreshCadence.pendingSnapshotDelay(for: 2) == 1, "coalesced snapshot refresh should wait at least one second")
 runner.check(RefreshCadence.pendingSnapshotDelay(for: 6) == 3, "coalesced snapshot refresh should cap short follow-up waits")
@@ -521,6 +521,14 @@ runner.check(userBalanceAccount.displayName == "Owner", "NewAPI self account sho
 runner.check(userBalanceAccount.amountText == "¥1000.00", "NewAPI self account quota should display the same CNY balance as the console")
 runner.check(userBalanceAccount.detailText.contains("已用 ¥0.00"), "NewAPI used quota should display as currency usage")
 runner.check(userBalanceAccount.detailText.contains("请求 42"), "NewAPI self account should include request count")
+let warningThresholdBalanceAccount = try BalanceAPIClient.decodeUserAccount(
+    newAPIUserPayload,
+    source: .newAPI,
+    quotaDisplay: newAPIQuotaDisplay,
+    thresholds: BalanceThresholdConfiguration(warningThreshold: 1200, alertThreshold: 500)
+)
+runner.check(warningThresholdBalanceAccount.state == .warning, "NewAPI balance below reminder threshold should become warning")
+runner.check(warningThresholdBalanceAccount.stateText == "余额低于提醒阈值", "NewAPI warning status should explain the balance threshold reason")
 
 let newAPIChannelPayload = """
 {
@@ -653,6 +661,12 @@ let subAPIProfileAccount = try BalanceAPIClient.decodeSubAPIProfileAccount(subAP
 runner.check(subAPIProfileAccount.displayName == "active@example.com", "Sub2API profile balance should prefer email")
 runner.check(subAPIProfileAccount.amountText == "$12.50", "Sub2API profile balance should format as currency")
 runner.check(subAPIProfileAccount.detailText.contains("并发 3"), "Sub2API profile should include concurrency")
+let alertThresholdSubAPIProfileAccount = try BalanceAPIClient.decodeSubAPIProfileAccount(
+    subAPIProfilePayload,
+    thresholds: BalanceThresholdConfiguration(warningThreshold: 20, alertThreshold: 15)
+)
+runner.check(alertThresholdSubAPIProfileAccount.state == .error, "Sub2API balance below alert threshold should become error")
+runner.check(alertThresholdSubAPIProfileAccount.stateText == "余额低于告警阈值", "Sub2API error status should explain the balance threshold reason")
 
 let subAPIPlatformQuotaPayload = """
 {

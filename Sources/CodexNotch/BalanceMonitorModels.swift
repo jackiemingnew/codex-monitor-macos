@@ -93,6 +93,17 @@ struct BalanceThresholdConfiguration: Codable, Equatable {
         return .healthy
     }
 
+    func stateReason(for balance: Double?) -> String? {
+        switch state(for: balance) {
+        case .healthy:
+            return nil
+        case .warning:
+            return "余额低于提醒阈值"
+        case .error:
+            return "余额低于告警阈值"
+        }
+    }
+
     var summaryText: String {
         let thresholds = normalized
         var parts: [String] = []
@@ -228,6 +239,7 @@ struct BalanceAccount: Identifiable, Equatable {
     let requestCount: Int?
     let updatedAt: String?
     let state: BalanceAccountState
+    let stateReason: String?
     let balanceAmount: Double?
     let balanceUnitKey: String?
     let balanceUnitSymbol: String?
@@ -244,6 +256,7 @@ struct BalanceAccount: Identifiable, Equatable {
         requestCount: Int?,
         updatedAt: String?,
         state: BalanceAccountState,
+        stateReason: String? = nil,
         balanceAmount: Double? = nil,
         balanceUnitKey: String? = nil,
         balanceUnitSymbol: String? = nil,
@@ -259,6 +272,7 @@ struct BalanceAccount: Identifiable, Equatable {
         self.requestCount = requestCount
         self.updatedAt = updatedAt
         self.state = state
+        self.stateReason = stateReason
         self.balanceAmount = balanceAmount
         self.balanceUnitKey = balanceUnitKey
         self.balanceUnitSymbol = balanceUnitSymbol
@@ -267,6 +281,14 @@ struct BalanceAccount: Identifiable, Equatable {
 
     var displayName: String {
         name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "\(source.title) 账户" : name
+    }
+
+    var stateText: String {
+        if let stateReason,
+           !stateReason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return stateReason
+        }
+        return state.label
     }
 
     var detailText: String {

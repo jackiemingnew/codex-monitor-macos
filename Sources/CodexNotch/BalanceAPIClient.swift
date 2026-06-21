@@ -782,7 +782,9 @@ private struct NewAPIUserData: Decodable {
     ) -> BalanceAccount {
         let statusState: BalanceAccountState = status == nil || status == 1 ? .healthy : .warning
         let balanceAmount = quota.map(quotaDisplay.quotaAmount(_:))
-        let state = statusState.combined(with: thresholds.state(for: balanceAmount))
+        let thresholdState = thresholds.state(for: balanceAmount)
+        let state = statusState.combined(with: thresholdState)
+        let statusReason = statusState == .warning ? "账号状态异常" : nil
         let configuredLabel = accountLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
         let name = configuredLabel?.isEmpty == false
             ? configuredLabel!
@@ -798,6 +800,7 @@ private struct NewAPIUserData: Decodable {
             requestCount: requestCount,
             updatedAt: nil,
             state: state,
+            stateReason: thresholds.stateReason(for: balanceAmount) ?? statusReason,
             balanceAmount: balanceAmount,
             balanceUnitKey: balanceAmount == nil ? nil : quotaDisplay.unitKey,
             balanceUnitSymbol: balanceAmount == nil ? nil : quotaDisplay.unitSymbol
@@ -857,6 +860,7 @@ private struct NewAPIChannelData: Decodable {
             requestCount: nil,
             updatedAt: balanceUpdatedTime.map { "更新 \($0)" },
             state: state,
+            stateReason: state == .warning ? "渠道状态异常" : nil,
             balanceAmount: balance,
             balanceUnitKey: balance == nil ? nil : "USD",
             balanceUnitSymbol: balance == nil ? nil : "$",
@@ -929,6 +933,12 @@ private struct SubAPIPlatformQuotaData: Decodable {
             }
             return (usage ?? 0) >= limit
         }
+        let exhaustedLabel = windows.first { _, usage, limit in
+            guard let limit else {
+                return false
+            }
+            return (usage ?? 0) >= limit
+        }?.0
         let details = windows.compactMap { label, usage, limit -> String? in
             guard let usage else {
                 return nil
@@ -953,7 +963,8 @@ private struct SubAPIPlatformQuotaData: Decodable {
             usedText: nil,
             requestCount: nil,
             updatedAt: details.isEmpty ? nil : details,
-            state: exhausted ? .warning : .healthy
+            state: exhausted ? .warning : .healthy,
+            stateReason: exhaustedLabel.map { "\($0)配额已满" }
         )
     }
 }
@@ -995,7 +1006,9 @@ private struct SubAPIUserData: Decodable {
     ) -> BalanceAccount {
         let normalizedStatus = status?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let statusState: BalanceAccountState = normalizedStatus == nil || normalizedStatus == "active" ? .healthy : .warning
-        let state = statusState.combined(with: thresholds.state(for: balance))
+        let thresholdState = thresholds.state(for: balance)
+        let state = statusState.combined(with: thresholdState)
+        let statusReason = statusState == .warning ? "状态 \(status ?? "异常")" : nil
         let roleText = role?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "admin" ? "管理员余额" : "用户余额"
         let details = [
             concurrency.map { "并发 \($0)" },
@@ -1016,6 +1029,7 @@ private struct SubAPIUserData: Decodable {
             requestCount: nil,
             updatedAt: details.isEmpty ? nil : details,
             state: state,
+            stateReason: thresholds.stateReason(for: balance) ?? statusReason,
             balanceAmount: balance,
             balanceUnitKey: balance == nil ? nil : "USD",
             balanceUnitSymbol: balance == nil ? nil : "$"

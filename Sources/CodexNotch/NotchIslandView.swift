@@ -349,7 +349,7 @@ struct DetailPanelView: View {
             localHeight,
             IslandMetrics.remoteDetailHeight(
                 accountRows: max(1, rows.max() ?? 1),
-                usesTallRows: remoteViewModel.snapshot.accounts.contains { $0.quotaWindows.count > 2 }
+                usesTallRows: remoteViewModel.snapshot.accounts.contains { $0.displayQuotaWindows.count > 2 }
             )
         )
     }
@@ -992,7 +992,7 @@ private struct RemoteAccountRow: View {
     }
 
     private var quotaWindows: [RemoteQuotaWindow] {
-        account.quotaWindows.sortedForSummary
+        account.displayQuotaWindows
     }
 
     @ViewBuilder
@@ -1029,7 +1029,7 @@ private struct RemoteAccountRow: View {
         if account.quotaError != nil {
             return Color(red: 1.0, green: 0.55, blue: 0.25)
         }
-        if account.quotaWindows.contains(where: \.reachesThreshold) {
+        if account.displayQuotaWindows.contains(where: \.reachesThreshold) {
             return Color(red: 1.0, green: 0.55, blue: 0.25)
         }
         return .white.opacity(0.62)
@@ -1063,10 +1063,11 @@ private struct BalanceAccountRow: View {
             Spacer(minLength: 8)
 
             VStack(alignment: .trailing, spacing: 4) {
-                Text(account.state.label)
+                Text(account.stateText)
                     .font(.system(size: 10, weight: .heavy))
                     .foregroundStyle(account.state.color)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.68)
                 Text(account.amountText)
                     .font(.system(size: 9.5, weight: .semibold, design: .rounded))
                     .monospacedDigit()
@@ -1074,7 +1075,7 @@ private struct BalanceAccountRow: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.72)
             }
-            .frame(width: 84, alignment: .trailing)
+            .frame(width: 104, alignment: .trailing)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)

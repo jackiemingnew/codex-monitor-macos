@@ -380,7 +380,8 @@ final class BalanceMonitorViewModel: ObservableObject {
             usedText: nil,
             requestCount: nil,
             updatedAt: message,
-            state: .error
+            state: .error,
+            stateReason: "读取失败"
         )
     }
 

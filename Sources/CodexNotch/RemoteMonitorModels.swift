@@ -146,17 +146,20 @@ struct RemoteCodexAccount: Identifiable, Equatable {
     }
 
     var quotaSummaryText: String {
-        guard !quotaWindows.isEmpty else {
+        guard !displayQuotaWindows.isEmpty else {
             if let quotaError, !quotaError.isEmpty {
                 return "额度失败"
             }
             return "额度 --"
         }
-        return quotaWindows
-            .sortedForSummary
+        return displayQuotaWindows
             .map { window in
             "\(window.shortLabel) \(window.remainingText)"
         }.joined(separator: "  ")
+    }
+
+    var displayQuotaWindows: [RemoteQuotaWindow] {
+        quotaWindows.primaryDisplayWindows
     }
 
     var stateReasonText: String {
@@ -195,7 +198,7 @@ struct RemoteCodexAccount: Identifiable, Equatable {
             return replacingState(.abnormal)
         }
 
-        if quotaWindows.contains(where: { $0.reachesThreshold }) {
+        if displayQuotaWindows.contains(where: { $0.reachesThreshold }) {
             return replacingState(.quotaExhausted)
         }
 
@@ -229,7 +232,7 @@ struct RemoteCodexAccount: Identifiable, Equatable {
             return .abnormal
         }
 
-        if windows.contains(where: { $0.reachesThreshold }) {
+        if windows.primaryDisplayWindows.contains(where: { $0.reachesThreshold }) {
             return .quotaExhausted
         }
 
@@ -241,7 +244,7 @@ struct RemoteCodexAccount: Identifiable, Equatable {
     }
 
     var hasLongTermQuotaExhaustion: Bool {
-        quotaWindows.contains { $0.reachesThreshold && !$0.isShortTermWindow }
+        displayQuotaWindows.contains { $0.reachesThreshold && !$0.isShortTermWindow }
     }
 
     func preservingQuota(from previous: RemoteCodexAccount?) -> RemoteCodexAccount {
@@ -312,7 +315,7 @@ struct RemoteCodexAccount: Identifiable, Equatable {
     }
 
     private var quotaThresholdReason: String? {
-        let reachedWindows = quotaWindows.filter(\.reachesThreshold)
+        let reachedWindows = displayQuotaWindows.filter(\.reachesThreshold)
         guard !reachedWindows.isEmpty else {
             return nil
         }
@@ -440,6 +443,26 @@ struct RemoteQuotaWindow: Identifiable, Equatable {
         shortLabel == "5h" || shortLabel.hasSuffix(" 5h")
     }
 
+    var isPrimaryDisplayWindow: Bool {
+        let label = shortLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        if label == "5h" || label == "7d" {
+            return true
+        }
+        if label.hasSuffix(" 5h") || label.hasSuffix(" 7d") {
+            return true
+        }
+
+        let compactLabel = label
+            .replacingOccurrences(of: " ", with: "")
+            .lowercased()
+        return compactLabel == "5小时"
+            || compactLabel == "5hr"
+            || compactLabel == "5hrs"
+            || compactLabel == "7天"
+            || compactLabel == "1周"
+            || compactLabel == "周额度"
+    }
+
     var reasonLabel: String {
         let label = shortLabel.trimmingCharacters(in: .whitespacesAndNewlines)
         if label == "5h" {
@@ -489,6 +512,12 @@ extension Array where Element == RemoteQuotaWindow {
             }
             return $0.summarySortPriority < $1.summarySortPriority
         }
+    }
+
+    var primaryDisplayWindows: [RemoteQuotaWindow] {
+        let sortedWindows = sortedForSummary
+        let primaryWindows = sortedWindows.filter(\.isPrimaryDisplayWindow)
+        return primaryWindows.isEmpty ? sortedWindows : primaryWindows
     }
 }
 
