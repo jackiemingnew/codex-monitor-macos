@@ -545,7 +545,7 @@ struct SettingsView: View {
                 infoRow(title: "本机监测", value: "Codex 运行状态、额度和 token 用量")
                 infoRow(title: "远程监测", value: "CLIProxyAPI、CPA Manager Plus、NewAPI、Sub2API")
 
-                Text("codex监测会读取本机 Codex 数据文件，也可以按需连接你配置的远程面板。请勿将真实密钥、账号密码或本机密钥数据库提交到公开仓库。")
+                Text("codex监测用于在 Mac 刘海屏区域展示 Codex 本机状态、额度用量和远程账号监测信息。")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
