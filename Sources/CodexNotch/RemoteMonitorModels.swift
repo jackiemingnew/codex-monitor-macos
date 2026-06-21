@@ -154,7 +154,6 @@ struct RemoteCodexAccount: Identifiable, Equatable {
         }
         return quotaWindows
             .sortedForSummary
-            .prefix(2)
             .map { window in
             "\(window.shortLabel) \(window.remainingText)"
         }.joined(separator: "  ")
@@ -482,7 +481,7 @@ struct RemoteQuotaWindow: Identifiable, Equatable {
     }
 }
 
-private extension Array where Element == RemoteQuotaWindow {
+extension Array where Element == RemoteQuotaWindow {
     var sortedForSummary: [RemoteQuotaWindow] {
         sorted {
             if $0.summarySortPriority == $1.summarySortPriority {
@@ -513,29 +512,6 @@ private extension String {
         return String(trimmed[..<end]) + "..."
     }
 
-    var redactedForDisplay: String {
-        var redacted = self
-        let patterns = [
-            #"(?i)bearer\s+[A-Za-z0-9._~+/=-]{8,}"#,
-            #"(?i)(token|authorization|api[_ -]?key|password|secret)\s*[:= ]+\s*[A-Za-z0-9._~+/=-]{6,}"#,
-            #"sk-[A-Za-z0-9_-]{6,}"#,
-            #"Bearer\s+[A-Za-z0-9._~+/=-]{8,}"#
-        ]
-
-        for pattern in patterns {
-            guard let regex = try? NSRegularExpression(pattern: pattern) else {
-                continue
-            }
-            let range = NSRange(redacted.startIndex..<redacted.endIndex, in: redacted)
-            redacted = regex.stringByReplacingMatches(
-                in: redacted,
-                range: range,
-                withTemplate: "[已隐藏]"
-            )
-        }
-
-        return redacted
-    }
 }
 
 struct RemoteMonitorSnapshot: Equatable {

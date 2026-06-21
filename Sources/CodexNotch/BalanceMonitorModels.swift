@@ -49,6 +49,126 @@ enum BalanceAccountState: Equatable {
     }
 }
 
+struct BalanceThresholdConfiguration: Codable, Equatable {
+    var warningThreshold: Double? = nil
+    var alertThreshold: Double? = nil
+
+    var normalized: BalanceThresholdConfiguration {
+        guard let warningThreshold,
+              let alertThreshold,
+              alertThreshold > warningThreshold else {
+            return self
+        }
+        return BalanceThresholdConfiguration(
+            warningThreshold: alertThreshold,
+            alertThreshold: warningThreshold
+        )
+    }
+
+    func state(for balance: Double?) -> BalanceAccountState {
+        guard let balance else {
+            return .healthy
+        }
+        let thresholds = normalized
+        if let alertThreshold = thresholds.alertThreshold,
+           balance < alertThreshold {
+            return .error
+        }
+        if let warningThreshold = thresholds.warningThreshold,
+           balance < warningThreshold {
+            return .warning
+        }
+        return .healthy
+    }
+}
+
+struct BalanceAccountConfiguration: Identifiable, Codable, Equatable {
+    var id: String
+    var source: BalanceMonitorSource
+    var enabled: Bool
+    var label: String
+    var panelURL: String
+    var username: String
+    var secret: String = ""
+    var secretReadFailed: Bool = false
+    var allowInsecureTLS: Bool
+    var requestTimeout: TimeInterval
+    var usesDefaultThresholds: Bool
+    var warningThreshold: Double?
+    var alertThreshold: Double?
+
+    init(
+        id: String = UUID().uuidString,
+        source: BalanceMonitorSource,
+        enabled: Bool = true,
+        label: String = "",
+        panelURL: String = "",
+        username: String = "",
+        secret: String = "",
+        allowInsecureTLS: Bool = false,
+        requestTimeout: TimeInterval = 6,
+        usesDefaultThresholds: Bool = true,
+        warningThreshold: Double? = nil,
+        alertThreshold: Double? = nil
+    ) {
+        self.id = id
+        self.source = source
+        self.enabled = enabled
+        self.label = label
+        self.panelURL = panelURL
+        self.username = username
+        self.secret = secret
+        self.secretReadFailed = false
+        self.allowInsecureTLS = allowInsecureTLS
+        self.requestTimeout = requestTimeout
+        self.usesDefaultThresholds = usesDefaultThresholds
+        self.warningThreshold = warningThreshold
+        self.alertThreshold = alertThreshold
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case source
+        case enabled
+        case label
+        case panelURL
+        case username
+        case allowInsecureTLS
+        case requestTimeout
+        case usesDefaultThresholds
+        case warningThreshold
+        case alertThreshold
+    }
+
+    var displayLabel: String {
+        if let configuredLabel {
+            return configuredLabel
+        }
+        let trimmedUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedUsername.isEmpty {
+            return trimmedUsername
+        }
+        return "\(source.title) 账户"
+    }
+
+    var configuredLabel: String? {
+        let trimmedLabel = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedLabel.isEmpty {
+            return trimmedLabel
+        }
+        return nil
+    }
+
+    func effectiveThresholds(defaults: BalanceThresholdConfiguration) -> BalanceThresholdConfiguration {
+        usesDefaultThresholds
+            ? defaults.normalized
+            : BalanceThresholdConfiguration(
+                warningThreshold: warningThreshold,
+                alertThreshold: alertThreshold
+            ).normalized
+    }
+}
+
 struct BalanceAccount: Identifiable, Equatable {
     let id: String
     let source: BalanceMonitorSource
@@ -60,6 +180,42 @@ struct BalanceAccount: Identifiable, Equatable {
     let requestCount: Int?
     let updatedAt: String?
     let state: BalanceAccountState
+    let balanceAmount: Double?
+    let balanceUnitKey: String?
+    let balanceUnitSymbol: String?
+    let usedTokenCount: Int?
+
+    init(
+        id: String,
+        source: BalanceMonitorSource,
+        name: String,
+        kind: String,
+        statusCode: Int?,
+        amountText: String,
+        usedText: String?,
+        requestCount: Int?,
+        updatedAt: String?,
+        state: BalanceAccountState,
+        balanceAmount: Double? = nil,
+        balanceUnitKey: String? = nil,
+        balanceUnitSymbol: String? = nil,
+        usedTokenCount: Int? = nil
+    ) {
+        self.id = id
+        self.source = source
+        self.name = name
+        self.kind = kind
+        self.statusCode = statusCode
+        self.amountText = amountText
+        self.usedText = usedText
+        self.requestCount = requestCount
+        self.updatedAt = updatedAt
+        self.state = state
+        self.balanceAmount = balanceAmount
+        self.balanceUnitKey = balanceUnitKey
+        self.balanceUnitSymbol = balanceUnitSymbol
+        self.usedTokenCount = usedTokenCount
+    }
 
     var displayName: String {
         name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "\(source.title) 账户" : name
@@ -69,6 +225,9 @@ struct BalanceAccount: Identifiable, Equatable {
         var parts = [kind]
         if let usedText {
             parts.append("已用 \(usedText)")
+        }
+        if let usedTokenCount {
+            parts.append("已用Token \(Formatters.compactTokens(usedTokenCount))")
         }
         if let requestCount {
             parts.append("请求 \(requestCount)")
@@ -131,6 +290,36 @@ struct BalanceMonitorSnapshot: Equatable {
     }
 
     var totalAmountText: String {
+        let groups = Dictionary(grouping: accounts.compactMap { account -> BalanceAmountGroup? in
+            guard let amount = account.balanceAmount,
+                  let key = account.balanceUnitKey,
+                  let symbol = account.balanceUnitSymbol else {
+                return nil
+            }
+            return BalanceAmountGroup(key: key, symbol: symbol, amount: amount)
+        }, by: \.key)
+
+        let totals = groups
+            .map { key, values in
+                BalanceAmountGroup(
+                    key: key,
+                    symbol: values.first?.symbol ?? "",
+                    amount: values.reduce(0) { $0 + $1.amount }
+                )
+            }
+            .sorted { $0.key < $1.key }
+
+        if totals.count == 1,
+           let total = totals.first {
+            return total.displayText
+        }
+        if totals.count == 2 {
+            return totals.map(\.displayText).joined(separator: " + ")
+        }
+        if totals.count > 2 {
+            return "多币种 \(totals.count) 类"
+        }
+
         let values = accounts.compactMap { account -> Double? in
             guard account.amountText.hasPrefix("$") else {
                 return nil
@@ -163,5 +352,18 @@ struct BalanceMonitorSnapshot: Equatable {
 
     static func currencyText(_ value: Double) -> String {
         String(format: "$%.2f", value)
+    }
+}
+
+private struct BalanceAmountGroup: Equatable {
+    let key: String
+    let symbol: String
+    let amount: Double
+
+    var displayText: String {
+        if key == "TOKENS" {
+            return Formatters.compactTokens(Int(amount.rounded()))
+        }
+        return symbol + String(format: "%.2f", amount)
     }
 }

@@ -6,6 +6,29 @@ struct BalanceAPIConfiguration: Equatable {
     let secret: String
     let timeout: TimeInterval
     let allowInsecureTLS: Bool
+    let accountID: String
+    let accountLabel: String?
+    let thresholds: BalanceThresholdConfiguration
+
+    init(
+        panelURL: String,
+        username: String,
+        secret: String,
+        timeout: TimeInterval,
+        allowInsecureTLS: Bool,
+        accountID: String = "default",
+        accountLabel: String? = nil,
+        thresholds: BalanceThresholdConfiguration = BalanceThresholdConfiguration()
+    ) {
+        self.panelURL = panelURL
+        self.username = username
+        self.secret = secret
+        self.timeout = timeout
+        self.allowInsecureTLS = allowInsecureTLS
+        self.accountID = accountID
+        self.accountLabel = accountLabel
+        self.thresholds = thresholds.normalized
+    }
 }
 
 enum BalanceAPIError: LocalizedError {
@@ -86,7 +109,14 @@ final class BalanceAPIClient: NSObject, URLSessionDelegate {
             session: session,
             timeout: configuration.timeout
         )
-        let accounts = [try Self.decodeUserAccount(selfData, source: source, quotaDisplay: quotaDisplay)]
+        let accounts = [try Self.decodeUserAccount(
+            selfData,
+            source: source,
+            quotaDisplay: quotaDisplay,
+            accountID: configuration.accountID,
+            accountLabel: configuration.accountLabel,
+            thresholds: configuration.thresholds
+        )]
 
         return BalanceMonitorSnapshot(
             source: source,
@@ -136,7 +166,12 @@ final class BalanceAPIClient: NSObject, URLSessionDelegate {
             session: session,
             timeout: configuration.timeout
         )
-        var accounts = [try Self.decodeSubAPIProfileAccount(profileData)]
+        var accounts = [try Self.decodeSubAPIProfileAccount(
+            profileData,
+            accountID: configuration.accountID,
+            accountLabel: configuration.accountLabel,
+            thresholds: configuration.thresholds
+        )]
         var partialMessage: String?
 
         let quotasEndpoint = baseURL
@@ -152,7 +187,11 @@ final class BalanceAPIClient: NSObject, URLSessionDelegate {
                 session: session,
                 timeout: configuration.timeout
             )
-            accounts.append(contentsOf: try Self.decodeSubAPIPlatformQuotaAccounts(quotasData))
+            accounts.append(contentsOf: try Self.decodeSubAPIPlatformQuotaAccounts(
+                quotasData,
+                accountID: configuration.accountID,
+                accountLabel: configuration.accountLabel
+            ))
         } catch {
             partialMessage = "平台配额读取失败：\(Self.localizedMessage(for: error))"
         }
@@ -304,6 +343,9 @@ final class BalanceAPIClient: NSObject, URLSessionDelegate {
               !host.isEmpty else {
             return nil
         }
+        guard components.user == nil, components.password == nil else {
+            return nil
+        }
 
         guard scheme == "https" || scheme == "http" else {
             return nil
@@ -327,10 +369,19 @@ final class BalanceAPIClient: NSObject, URLSessionDelegate {
     static func decodeUserAccount(
         _ data: Data,
         source: BalanceMonitorSource,
-        quotaDisplay: NewAPIQuotaDisplay = .default
+        quotaDisplay: NewAPIQuotaDisplay = .default,
+        accountID: String = "self",
+        accountLabel: String? = nil,
+        thresholds: BalanceThresholdConfiguration = BalanceThresholdConfiguration()
     ) throws -> BalanceAccount {
         let user = try decodePayload(NewAPIUserData.self, from: data)
-        return user.balanceAccount(source: source, quotaDisplay: quotaDisplay)
+        return user.balanceAccount(
+            source: source,
+            quotaDisplay: quotaDisplay,
+            accountID: accountID,
+            accountLabel: accountLabel,
+            thresholds: thresholds
+        )
     }
 
     static func decodeChannelAccounts(
@@ -422,16 +473,29 @@ final class BalanceAPIClient: NSObject, URLSessionDelegate {
         return token
     }
 
-    static func decodeSubAPIProfileAccount(_ data: Data) throws -> BalanceAccount {
-        try decodeSubAPIPayload(SubAPIUserData.self, from: data).balanceAccount()
+    static func decodeSubAPIProfileAccount(
+        _ data: Data,
+        accountID: String = "self",
+        accountLabel: String? = nil,
+        thresholds: BalanceThresholdConfiguration = BalanceThresholdConfiguration()
+    ) throws -> BalanceAccount {
+        try decodeSubAPIPayload(SubAPIUserData.self, from: data).balanceAccount(
+            accountID: accountID,
+            accountLabel: accountLabel,
+            thresholds: thresholds
+        )
     }
 
-    static func decodeSubAPIPlatformQuotaAccounts(_ data: Data) throws -> [BalanceAccount] {
+    static func decodeSubAPIPlatformQuotaAccounts(
+        _ data: Data,
+        accountID: String = "self",
+        accountLabel: String? = nil
+    ) throws -> [BalanceAccount] {
         if let list = try? decodeSubAPIPayload(SubAPIPlatformQuotaListData.self, from: data) {
-            return list.platformQuotas.map { $0.balanceAccount() }
+            return list.platformQuotas.map { $0.balanceAccount(accountID: accountID, accountLabel: accountLabel) }
         }
         if let quotas = try? decodeSubAPIPayload([SubAPIPlatformQuotaData].self, from: data) {
-            return quotas.map { $0.balanceAccount() }
+            return quotas.map { $0.balanceAccount(accountID: accountID, accountLabel: accountLabel) }
         }
         throw BalanceAPIError.unsupportedResponse("Sub2API 平台配额格式不兼容")
     }
@@ -578,6 +642,45 @@ struct NewAPIQuotaDisplay: Equatable {
         }
     }
 
+    func quotaAmount(_ quota: Int) -> Double {
+        switch displayType {
+        case .tokens:
+            return Double(quota)
+        case .usd:
+            return quotaValue(quota)
+        case .cny:
+            return quotaValue(quota) * exchangeRate
+        case .custom:
+            return quotaValue(quota) * customExchangeRate
+        }
+    }
+
+    var unitKey: String {
+        switch displayType {
+        case .tokens:
+            return "TOKENS"
+        case .usd:
+            return "USD"
+        case .cny:
+            return "CNY"
+        case .custom:
+            return "CUSTOM-\(customSymbol)"
+        }
+    }
+
+    var unitSymbol: String {
+        switch displayType {
+        case .tokens:
+            return ""
+        case .usd:
+            return "$"
+        case .cny:
+            return "¥"
+        case .custom:
+            return customSymbol
+        }
+    }
+
     private func quotaValue(_ quota: Int) -> Double {
         Double(quota) / max(1, quotaPerUnit)
     }
@@ -670,19 +773,34 @@ private struct NewAPIUserData: Decodable {
         status = container.flexibleInt(for: [.status])
     }
 
-    func balanceAccount(source: BalanceMonitorSource, quotaDisplay: NewAPIQuotaDisplay) -> BalanceAccount {
-        let state: BalanceAccountState = status == nil || status == 1 ? .healthy : .warning
+    func balanceAccount(
+        source: BalanceMonitorSource,
+        quotaDisplay: NewAPIQuotaDisplay,
+        accountID: String,
+        accountLabel: String?,
+        thresholds: BalanceThresholdConfiguration
+    ) -> BalanceAccount {
+        let statusState: BalanceAccountState = status == nil || status == 1 ? .healthy : .warning
+        let balanceAmount = quota.map(quotaDisplay.quotaAmount(_:))
+        let state = statusState.combined(with: thresholds.state(for: balanceAmount))
+        let configuredLabel = accountLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = configuredLabel?.isEmpty == false
+            ? configuredLabel!
+            : (displayName ?? username ?? "\(source.title) 用户")
         return BalanceAccount(
-            id: "\(source.rawValue)-self",
+            id: "\(source.rawValue)-\(accountID)",
             source: source,
-            name: displayName ?? username ?? "\(source.title) 用户",
+            name: name,
             kind: "用户额度",
             statusCode: status,
             amountText: quota.map(quotaDisplay.quotaText(_:)) ?? "--",
             usedText: usedQuota.map(quotaDisplay.quotaText(_:)),
             requestCount: requestCount,
             updatedAt: nil,
-            state: state
+            state: state,
+            balanceAmount: balanceAmount,
+            balanceUnitKey: balanceAmount == nil ? nil : quotaDisplay.unitKey,
+            balanceUnitSymbol: balanceAmount == nil ? nil : quotaDisplay.unitSymbol
         )
     }
 }
@@ -738,7 +856,11 @@ private struct NewAPIChannelData: Decodable {
             usedText: usedQuota.map(Formatters.compactTokens(_:)),
             requestCount: nil,
             updatedAt: balanceUpdatedTime.map { "更新 \($0)" },
-            state: state
+            state: state,
+            balanceAmount: balance,
+            balanceUnitKey: balance == nil ? nil : "USD",
+            balanceUnitSymbol: balance == nil ? nil : "$",
+            usedTokenCount: usedQuota
         )
     }
 }
@@ -789,7 +911,7 @@ private struct SubAPIPlatformQuotaData: Decodable {
         monthlyLimitUSD = container.flexibleDouble(for: [.monthlyLimitUSD])
     }
 
-    func balanceAccount() -> BalanceAccount {
+    func balanceAccount(accountID: String = "self", accountLabel: String? = nil) -> BalanceAccount {
         let windows = [
             ("日", dailyUsageUSD, dailyLimitUSD),
             ("周", weeklyUsageUSD, weeklyLimitUSD),
@@ -817,10 +939,12 @@ private struct SubAPIPlatformQuotaData: Decodable {
             return "\(label) 已用 \(BalanceMonitorSnapshot.currencyText(usage))"
         }.joined(separator: " · ")
         let platformName = platform?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let displayName = platformName?.isEmpty == false ? platformName! : "平台配额"
+        let baseName = platformName?.isEmpty == false ? platformName! : "平台配额"
+        let configuredLabel = accountLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let displayName = configuredLabel?.isEmpty == false ? "\(configuredLabel!) · \(baseName)" : baseName
 
         return BalanceAccount(
-            id: "subapi-quota-\(displayName)",
+            id: "subapi-quota-\(accountID)-\(baseName)",
             source: .subAPI,
             name: displayName,
             kind: "平台配额",
@@ -864,26 +988,50 @@ private struct SubAPIUserData: Decodable {
         status = container.flexibleString(for: [.status])
     }
 
-    func balanceAccount() -> BalanceAccount {
+    func balanceAccount(
+        accountID: String,
+        accountLabel: String?,
+        thresholds: BalanceThresholdConfiguration
+    ) -> BalanceAccount {
         let normalizedStatus = status?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let state: BalanceAccountState = normalizedStatus == nil || normalizedStatus == "active" ? .healthy : .warning
+        let statusState: BalanceAccountState = normalizedStatus == nil || normalizedStatus == "active" ? .healthy : .warning
+        let state = statusState.combined(with: thresholds.state(for: balance))
         let roleText = role?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "admin" ? "管理员余额" : "用户余额"
         let details = [
             concurrency.map { "并发 \($0)" },
             normalizedStatus.map { "状态 \($0)" }
         ].compactMap { $0 }.joined(separator: " · ")
+        let configuredLabel = accountLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = configuredLabel?.isEmpty == false
+            ? configuredLabel!
+            : (email ?? username ?? "用户 \(id.map(String.init) ?? "")")
         return BalanceAccount(
-            id: "subapi-user-\(id.map(String.init) ?? email ?? username ?? UUID().uuidString)",
+            id: "subapi-user-\(accountID)",
             source: .subAPI,
-            name: email ?? username ?? "用户 \(id.map(String.init) ?? "")",
+            name: name,
             kind: roleText,
             statusCode: nil,
             amountText: balance.map(BalanceMonitorSnapshot.currencyText(_:)) ?? "--",
             usedText: nil,
             requestCount: nil,
             updatedAt: details.isEmpty ? nil : details,
-            state: state
+            state: state,
+            balanceAmount: balance,
+            balanceUnitKey: balance == nil ? nil : "USD",
+            balanceUnitSymbol: balance == nil ? nil : "$"
         )
+    }
+}
+
+private extension BalanceAccountState {
+    func combined(with other: BalanceAccountState) -> BalanceAccountState {
+        if self == .error || other == .error {
+            return .error
+        }
+        if self == .warning || other == .warning {
+            return .warning
+        }
+        return .healthy
     }
 }
 
@@ -954,31 +1102,5 @@ private extension KeyedDecodingContainer {
             }
         }
         return nil
-    }
-}
-
-private extension String {
-    var redactedForDisplay: String {
-        var redacted = self
-        let patterns = [
-            #"(?i)bearer\s+[A-Za-z0-9._~+/=-]{8,}"#,
-            #"(?i)(token|authorization|api[_ -]?key|password|secret)\s*[:= ]+\s*[A-Za-z0-9._~+/=-]{6,}"#,
-            #"sk-[A-Za-z0-9_-]{6,}"#,
-            #"Bearer\s+[A-Za-z0-9._~+/=-]{8,}"#
-        ]
-
-        for pattern in patterns {
-            guard let regex = try? NSRegularExpression(pattern: pattern) else {
-                continue
-            }
-            let range = NSRange(redacted.startIndex..<redacted.endIndex, in: redacted)
-            redacted = regex.stringByReplacingMatches(
-                in: redacted,
-                range: range,
-                withTemplate: "[已隐藏]"
-            )
-        }
-
-        return redacted
     }
 }

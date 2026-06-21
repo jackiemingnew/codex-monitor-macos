@@ -51,13 +51,10 @@ final class BalanceMonitorViewModel: ObservableObject {
             return
         }
 
-        let panelURL = settings.balancePanelURL(for: source)
-        let key = settings.balanceManagementKey(for: source)
-        let username = settings.balanceUsername(for: source)
         let settingsSnapshot = BalanceMonitorSettingsSnapshot(source: source, settings: settings)
-        guard !panelURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        let targets = refreshTargets(from: settingsSnapshot)
+        guard !settingsSnapshot.accounts.filter(\.enabled).isEmpty,
+              !targets.isEmpty else {
             invalidateInFlightRefresh()
             loadedSettings = nil
             snapshot = .notConfigured(source: source)
@@ -83,20 +80,19 @@ final class BalanceMonitorViewModel: ObservableObject {
             )
         }
 
-        let configuration = currentConfiguration(panelURL: panelURL, key: key)
         let source = source
-        let totalTimeout = max(8, configuration.timeout * 3)
+        let totalTimeout = max(8, (targets.compactMap(\.configuration?.timeout).max() ?? 6) * 3 + 3)
 
         refreshTask = Task.detached(priority: .utility) {
             do {
                 let nextSnapshot = try await Self.withTimeout(seconds: totalTimeout) {
-                    try await BalanceAPIClient(configuration: configuration).fetchSnapshot(source: source)
+                    await Self.fetchCombinedSnapshot(source: source, targets: targets)
                 }
                 await MainActor.run {
                     guard generation == self.refreshGeneration else {
                         return
                     }
-                    guard self.currentConfiguration() == configuration,
+                    guard self.currentSettingsSnapshot() == settingsSnapshot,
                           self.settings.balanceMonitorEnabled(for: self.source) else {
                         self.finishRefreshAndRunPending()
                         if !self.settings.balanceMonitorEnabled(for: self.source) {
@@ -104,7 +100,9 @@ final class BalanceMonitorViewModel: ObservableObject {
                         }
                         return
                     }
-                    self.consecutiveFailures = 0
+                    self.consecutiveFailures = nextSnapshot.accounts.allSatisfy { $0.state == .error }
+                        ? self.consecutiveFailures + 1
+                        : 0
                     self.isRefreshing = false
                     self.refreshTask = nil
                     self.loadedSettings = settingsSnapshot
@@ -117,7 +115,7 @@ final class BalanceMonitorViewModel: ObservableObject {
                     guard generation == self.refreshGeneration else {
                         return
                     }
-                    guard self.currentConfiguration() == configuration,
+                    guard self.currentSettingsSnapshot() == settingsSnapshot,
                           self.settings.balanceMonitorEnabled(for: self.source) else {
                         self.finishRefreshAndRunPending()
                         if !self.settings.balanceMonitorEnabled(for: self.source) {
@@ -165,7 +163,7 @@ final class BalanceMonitorViewModel: ObservableObject {
         let timer = Timer.scheduledTimer(withTimeInterval: 0.45, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 self?.consecutiveFailures = 0
-                self?.refreshSnapshot()
+                self?.refreshSnapshot(cancelInFlight: true)
             }
         }
         timer.tolerance = 0.2
@@ -210,26 +208,48 @@ final class BalanceMonitorViewModel: ObservableObject {
         refreshSnapshot()
     }
 
-    private func currentConfiguration(panelURL: String, key: String) -> BalanceAPIConfiguration {
-        BalanceAPIConfiguration(
-            panelURL: panelURL,
-            username: settings.balanceUsername(for: source),
-            secret: key,
-            timeout: settings.balanceRequestTimeout(for: source),
-            allowInsecureTLS: settings.balanceAllowInsecureTLS(for: source)
-        )
+    private func currentSettingsSnapshot() -> BalanceMonitorSettingsSnapshot {
+        BalanceMonitorSettingsSnapshot(source: source, settings: settings)
     }
 
-    private func currentConfiguration() -> BalanceAPIConfiguration? {
-        let panelURL = settings.balancePanelURL(for: source)
-        let key = settings.balanceManagementKey(for: source)
-        let username = settings.balanceUsername(for: source)
-        guard !panelURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return nil
-        }
-        return currentConfiguration(panelURL: panelURL, key: key)
+    private func refreshTargets(from snapshot: BalanceMonitorSettingsSnapshot) -> [BalanceRefreshTarget] {
+        snapshot.accounts
+            .filter(\.enabled)
+            .enumerated()
+            .map { offset, account in
+                let panelURL = account.panelURL.trimmingCharacters(in: .whitespacesAndNewlines)
+                let username = account.username.trimmingCharacters(in: .whitespacesAndNewlines)
+                let secret = account.secret.trimmingCharacters(in: .whitespacesAndNewlines)
+                let missing: String?
+                if panelURL.isEmpty {
+                    missing = "缺少面板地址"
+                } else if username.isEmpty {
+                    missing = snapshot.source == .subAPI ? "缺少登录邮箱" : "缺少用户名"
+                } else if secret.isEmpty {
+                    missing = "缺少密码"
+                } else {
+                    missing = nil
+                }
+                let configuration = missing == nil
+                    ? BalanceAPIConfiguration(
+                        panelURL: panelURL,
+                        username: username,
+                        secret: secret,
+                        timeout: account.requestTimeout,
+                        allowInsecureTLS: account.allowInsecureTLS,
+                        accountID: account.id,
+                        accountLabel: account.configuredLabel,
+                        thresholds: account.effectiveThresholds(defaults: snapshot.defaultThresholds)
+                    )
+                    : nil
+                return BalanceRefreshTarget(
+                    order: offset,
+                    source: snapshot.source,
+                    account: account,
+                    configuration: configuration,
+                    missingMessage: missing
+                )
+            }
     }
 
     private func localizedMessage(for error: Error) -> String {
@@ -270,53 +290,161 @@ final class BalanceMonitorViewModel: ObservableObject {
             return result
         }
     }
+
+    nonisolated private static func fetchCombinedSnapshot(
+        source: BalanceMonitorSource,
+        targets: [BalanceRefreshTarget]
+    ) async -> BalanceMonitorSnapshot {
+        var results: [BalanceRefreshResult] = []
+
+        await withTaskGroup(of: BalanceRefreshResult.self) { group in
+            for target in targets {
+                group.addTask {
+                    guard let configuration = target.configuration else {
+                        return BalanceRefreshResult(
+                            order: target.order,
+                            accounts: [failedAccount(source: source, target: target, message: target.missingMessage ?? "配置不完整")],
+                            message: nil,
+                            failed: true
+                        )
+                    }
+
+                    do {
+                        let snapshot = try await BalanceAPIClient(configuration: configuration).fetchSnapshot(source: source)
+                        return BalanceRefreshResult(
+                            order: target.order,
+                            accounts: snapshot.accounts,
+                            message: snapshot.message.map { "\(target.account.displayLabel)：\($0)" },
+                            failed: false
+                        )
+                    } catch {
+                        let message = localizedMessage(source: source, for: error)
+                        return BalanceRefreshResult(
+                            order: target.order,
+                            accounts: [failedAccount(source: source, target: target, message: message)],
+                            message: "\(target.account.displayLabel)：\(message)",
+                            failed: true
+                        )
+                    }
+                }
+            }
+
+            for await result in group {
+                results.append(result)
+            }
+        }
+
+        let orderedResults = results.sorted { $0.order < $1.order }
+        var accounts = orderedResults.flatMap(\.accounts)
+        let messages = orderedResults.compactMap(\.message)
+        let allFailed = !orderedResults.isEmpty && orderedResults.allSatisfy(\.failed)
+        accounts.sort { lhs, rhs in
+            if lhs.state != rhs.state {
+                return lhs.state.sortRank > rhs.state.sortRank
+            }
+            return lhs.displayName.localizedStandardCompare(rhs.displayName) == .orderedAscending
+        }
+
+        let panelState: BalancePanelState
+        if accounts.isEmpty {
+            panelState = .warning
+        } else if allFailed || accounts.contains(where: { $0.state == .error }) {
+            panelState = .error
+        } else if accounts.contains(where: { $0.state == .warning }) {
+            panelState = .warning
+        } else {
+            panelState = .healthy
+        }
+
+        return BalanceMonitorSnapshot(
+            source: source,
+            panelState: panelState,
+            accounts: accounts,
+            message: messages.isEmpty ? nil : messages.joined(separator: "；"),
+            lastUpdated: Date()
+        )
+    }
+
+    nonisolated private static func failedAccount(
+        source: BalanceMonitorSource,
+        target: BalanceRefreshTarget,
+        message: String
+    ) -> BalanceAccount {
+        BalanceAccount(
+            id: "\(source.rawValue)-\(target.account.id)-failed",
+            source: source,
+            name: target.account.displayLabel,
+            kind: "读取失败",
+            statusCode: nil,
+            amountText: "--",
+            usedText: nil,
+            requestCount: nil,
+            updatedAt: message,
+            state: .error
+        )
+    }
+
+    nonisolated private static func localizedMessage(source: BalanceMonitorSource, for error: Error) -> String {
+        if error is BalanceRefreshTimeoutError {
+            return "\(source.title) 刷新超时"
+        }
+        if let localized = (error as? LocalizedError)?.errorDescription {
+            return localized.redactedForDisplay
+        }
+        let message = error.localizedDescription
+        if message.contains("secure connection") || message.contains("SSL") || message.contains("TLS") {
+            return "TLS 连接失败，请检查面板地址、证书或反向代理配置"
+        }
+        if message.contains("timed out") {
+            return "连接超时"
+        }
+        return message.redactedForDisplay
+    }
 }
 
 private struct BalanceRefreshTimeoutError: Error {}
 
 private struct BalanceMonitorSettingsSnapshot: Equatable {
     let enabled: Bool
-    let panelURL: String
-    let key: String
-    let username: String
+    let source: BalanceMonitorSource
+    let accounts: [BalanceAccountConfiguration]
+    let defaultThresholds: BalanceThresholdConfiguration
     let refreshInterval: TimeInterval
-    let requestTimeout: TimeInterval
-    let allowInsecureTLS: Bool
 
     @MainActor
     init(source: BalanceMonitorSource, settings: CodexNotchSettings) {
         enabled = settings.balanceMonitorEnabled(for: source)
-        panelURL = settings.balancePanelURL(for: source)
-        key = settings.balanceManagementKey(for: source)
-        username = settings.balanceUsername(for: source)
+        self.source = source
+        accounts = settings.balanceAccounts(for: source)
+        defaultThresholds = settings.balanceDefaultThresholds(for: source)
         refreshInterval = settings.balanceRefreshInterval(for: source)
-        requestTimeout = settings.balanceRequestTimeout(for: source)
-        allowInsecureTLS = settings.balanceAllowInsecureTLS(for: source)
     }
 }
 
-private extension String {
-    var redactedForDisplay: String {
-        var redacted = self
-        let patterns = [
-            #"(?i)bearer\s+[A-Za-z0-9._~+/=-]{8,}"#,
-            #"(?i)(token|authorization|api[_ -]?key|password|secret)\s*[:= ]+\s*[A-Za-z0-9._~+/=-]{6,}"#,
-            #"sk-[A-Za-z0-9_-]{6,}"#,
-            #"Bearer\s+[A-Za-z0-9._~+/=-]{8,}"#
-        ]
+private struct BalanceRefreshTarget: Equatable {
+    let order: Int
+    let source: BalanceMonitorSource
+    let account: BalanceAccountConfiguration
+    let configuration: BalanceAPIConfiguration?
+    let missingMessage: String?
+}
 
-        for pattern in patterns {
-            guard let regex = try? NSRegularExpression(pattern: pattern) else {
-                continue
-            }
-            let range = NSRange(redacted.startIndex..<redacted.endIndex, in: redacted)
-            redacted = regex.stringByReplacingMatches(
-                in: redacted,
-                range: range,
-                withTemplate: "[已隐藏]"
-            )
+private struct BalanceRefreshResult {
+    let order: Int
+    let accounts: [BalanceAccount]
+    let message: String?
+    let failed: Bool
+}
+
+private extension BalanceAccountState {
+    var sortRank: Int {
+        switch self {
+        case .error:
+            return 2
+        case .warning:
+            return 1
+        case .healthy:
+            return 0
         }
-
-        return redacted
     }
 }

@@ -43,6 +43,31 @@ private enum RefreshPreset: String, CaseIterable, Identifiable {
     }
 }
 
+private enum SettingsTab: String, CaseIterable, Identifiable {
+    case codex
+    case remoteCodex
+    case newAPI
+    case subAPI
+    case launch
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .codex:
+            "Codex"
+        case .remoteCodex:
+            "CLIProxyAPI"
+        case .newAPI:
+            "NewAPI"
+        case .subAPI:
+            "Sub2API"
+        case .launch:
+            "启动与外观"
+        }
+    }
+}
+
 private struct SettingsDraft: Equatable {
     var activeRefreshInterval: TimeInterval = 3
     var idleRefreshInterval: TimeInterval = 6
@@ -67,6 +92,8 @@ private struct SettingsDraft: Equatable {
     var newAPIRefreshInterval: TimeInterval = 300
     var newAPIRequestTimeout: TimeInterval = 6
     var newAPIAllowInsecureTLS = false
+    var newAPIAccounts: [BalanceAccountConfiguration] = []
+    var newAPIThresholds = BalanceThresholdConfiguration()
     var subAPIMonitorEnabled = false
     var subAPIPanelURL = ""
     var subAPIUsername = ""
@@ -74,6 +101,8 @@ private struct SettingsDraft: Equatable {
     var subAPIRefreshInterval: TimeInterval = 300
     var subAPIRequestTimeout: TimeInterval = 6
     var subAPIAllowInsecureTLS = false
+    var subAPIAccounts: [BalanceAccountConfiguration] = []
+    var subAPIThresholds = BalanceThresholdConfiguration()
     var launchAtLoginEnabled = false
     var enablePulse = true
 
@@ -102,6 +131,8 @@ private struct SettingsDraft: Equatable {
         newAPIRefreshInterval = settings.newAPIRefreshInterval
         newAPIRequestTimeout = settings.newAPIRequestTimeout
         newAPIAllowInsecureTLS = settings.newAPIAllowInsecureTLS
+        newAPIAccounts = settings.balanceAccounts(for: .newAPI)
+        newAPIThresholds = settings.balanceDefaultThresholds(for: .newAPI)
         subAPIMonitorEnabled = settings.subAPIMonitorEnabled
         subAPIPanelURL = settings.subAPIPanelURL
         subAPIUsername = settings.subAPIUsername
@@ -109,6 +140,8 @@ private struct SettingsDraft: Equatable {
         subAPIRefreshInterval = settings.subAPIRefreshInterval
         subAPIRequestTimeout = settings.subAPIRequestTimeout
         subAPIAllowInsecureTLS = settings.subAPIAllowInsecureTLS
+        subAPIAccounts = settings.balanceAccounts(for: .subAPI)
+        subAPIThresholds = settings.balanceDefaultThresholds(for: .subAPI)
         launchAtLoginEnabled = settings.launchAtLoginEnabled
         enablePulse = settings.enablePulse
     }
@@ -138,155 +171,16 @@ struct SettingsView: View {
 
     @State private var draft = SettingsDraft()
     @State private var selectedPreset: RefreshPreset = .balanced
+    @State private var selectedTab: SettingsTab = .codex
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             header
 
+            tabPicker
+
             Form {
-                Section("Codex 刷新") {
-                    HelpLabel(
-                        title: "刷新模式",
-                        help: "快速切换 Codex 运行状态、空闲状态、历史用量和文件监听的刷新频率。自定义数值后会自动变为均衡以外的配置。"
-                    )
-                    presetControls
-                    intervalStepper("运行中", value: $draft.activeRefreshInterval, range: 2...30, help: "检测到 Codex 正在执行任务时的状态刷新间隔。数值越小越实时，功耗也越高。")
-                    intervalStepper("空闲", value: $draft.idleRefreshInterval, range: 4...120, help: "Codex 没有运行中任务时的状态刷新间隔。")
-                    intervalStepper("历史用量", value: $draft.usageRefreshInterval, range: 15...300, help: "统计 Codex 24小时、7天、30天 token 用量的刷新间隔。")
-                    intervalStepper("文件监听", value: $draft.watcherRefreshInterval, range: 8...120, help: "扫描 Codex 会话文件变化的保底间隔，用于补偿文件事件丢失。")
-                    intervalStepper("补刷节流", value: $draft.fileChangeRefreshMinimumGap, range: 1...30, help: "文件变化很多时，连续触发刷新之间的最小间隔。")
-                }
-
-                Section("Codex 数据") {
-                    Picker(selection: $draft.rateLimitSource) {
-                        ForEach(RateLimitSourcePreference.allCases) { source in
-                            Text(source.label).tag(source)
-                        }
-                    } label: {
-                        HelpLabel(title: "额度来源", help: "决定 Codex 5小时和7天剩余额度优先从实时接口读取，还是只使用本地记录。")
-                    }
-                    .pickerStyle(.segmented)
-
-                    Toggle(isOn: $draft.showPeriodUsage) {
-                        HelpLabel(title: "显示 24小时 / 7天 / 30天", help: "控制详情页底部是否显示 Codex 三个时间窗口的 token 用量。")
-                    }
-                    Picker(selection: $draft.taskHistoryRange) {
-                        ForEach(TaskHistoryRange.allCases) { range in
-                            Text(range.label).tag(range)
-                        }
-                    } label: {
-                        HelpLabel(title: "任务范围", help: "决定 Codex 详情页任务列表读取最近多长时间内的对话。列表会在详情页中滚动显示。")
-                    }
-                    .pickerStyle(.segmented)
-                }
-
-                Section("刘海显示") {
-                    Picker(selection: $draft.notchDisplaySource) {
-                        ForEach(NotchDisplaySource.allCases) { source in
-                            Text(source.label).tag(source)
-                        }
-                    } label: {
-                        HelpLabel(title: "显示来源", help: "选择收起状态下刘海左右区域显示哪一种监控数据。自动模式会优先显示有提醒的外部监控，否则显示 Codex。")
-                    }
-                    .pickerStyle(.menu)
-                }
-
-                Section("CLIProxyAPI 设置") {
-                    Toggle(isOn: $draft.remoteMonitorEnabled) {
-                        HelpLabel(title: "启用 CLIProxyAPI", help: "启用后详情页会出现 CLIProxyAPI tab，用于查看 CLIProxyAPI 或 CPA Manager Plus 中的 Codex 账号状态。")
-                    }
-
-                    Picker(selection: $draft.remoteCodexDataSource) {
-                        ForEach(RemoteCodexDataSource.allCases) { source in
-                            Text(source.label).tag(source)
-                        }
-                    } label: {
-                        HelpLabel(title: "数据源", help: "CLIProxyAPI 适合只读取账号状态；CPA Manager Plus 会使用服务端巡检和持久用量统计。")
-                    }
-                    .pickerStyle(.segmented)
-                    .disabled(!draft.remoteMonitorEnabled)
-
-                    labeledTextField(
-                        "面板地址",
-                        text: $draft.cliproxyPanelURL,
-                        placeholder: draft.remoteCodexDataSource == .cpaManagerPlus ? "CPA Manager Plus 地址" : "CLIProxyAPI 管理面板地址",
-                        help: "填写管理面板地址。支持 https；本地 localhost 可使用 http。"
-                    )
-                    .disabled(!draft.remoteMonitorEnabled)
-
-                    labeledSecureField(
-                        "管理密钥",
-                        text: $draft.cliproxyManagementKey,
-                        placeholder: draft.remoteCodexDataSource == .cpaManagerPlus ? "CPA Manager Plus 管理密钥" : "CLIProxyAPI 管理密钥",
-                        help: "用于调用远程管理接口。密钥只保存到 macOS Keychain，不写入 UserDefaults。"
-                    )
-                    .disabled(!draft.remoteMonitorEnabled)
-
-                    Text("地址、认证信息和刷新配置仅在点击保存后生效。")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-
-                    intervalStepper("账号刷新", value: $draft.cliproxyRefreshInterval, range: 60...3_600, help: "CLIProxyAPI 账号状态的刷新间隔。CPA Manager Plus 的巡检结果由服务端产生，这里只是读取频率。")
-                        .disabled(!draft.remoteMonitorEnabled)
-                    intervalStepper("请求超时", value: $draft.cliproxyRequestTimeout, range: 3...30, help: "单个远程管理接口请求等待的最长秒数。")
-                        .disabled(!draft.remoteMonitorEnabled)
-
-                    Toggle(isOn: $draft.cliproxyAllowInsecureTLS) {
-                        HelpLabel(title: "允许不安全 TLS", help: "允许连接自签名或证书不完整的测试面板。开启后会信任该请求中的服务器证书，请只在你控制的面板上使用。")
-                    }
-                        .disabled(!draft.remoteMonitorEnabled)
-
-                    remoteStatusRow
-
-                    if let error = settings.cliproxyKeychainError {
-                        Text("管理密钥保存失败：\(error)")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.red.opacity(0.85))
-                    }
-                }
-
-                balanceMonitorSection(
-                    title: "NewAPI",
-                    source: .newAPI,
-                    enabled: $draft.newAPIMonitorEnabled,
-                    panelURL: $draft.newAPIPanelURL,
-                    managementKey: $draft.newAPIManagementKey,
-                    loginUsername: $draft.newAPIUsername,
-                    refreshInterval: $draft.newAPIRefreshInterval,
-                    requestTimeout: $draft.newAPIRequestTimeout,
-                    allowInsecureTLS: $draft.newAPIAllowInsecureTLS,
-                    viewModel: newAPIViewModel,
-                    keychainError: settings.newAPIKeychainError
-                )
-
-                balanceMonitorSection(
-                    title: "Sub2API",
-                    source: .subAPI,
-                    enabled: $draft.subAPIMonitorEnabled,
-                    panelURL: $draft.subAPIPanelURL,
-                    managementKey: $draft.subAPIManagementKey,
-                    loginUsername: $draft.subAPIUsername,
-                    refreshInterval: $draft.subAPIRefreshInterval,
-                    requestTimeout: $draft.subAPIRequestTimeout,
-                    allowInsecureTLS: $draft.subAPIAllowInsecureTLS,
-                    viewModel: subAPIViewModel,
-                    keychainError: settings.subAPIKeychainError
-                )
-
-                Section("启动与外观") {
-                    Toggle(isOn: $draft.launchAtLoginEnabled) {
-                        HelpLabel(title: "开机自启", help: "登录 macOS 后自动启动 Codex 刘海。保存时才会调用系统启动项接口。")
-                    }
-                    Toggle(isOn: $draft.enablePulse) {
-                        HelpLabel(title: "运行指示灯动画", help: "控制运行中状态点和外部提醒状态点是否带轻微呼吸动画。关闭可进一步降低功耗。")
-                    }
-
-                    if let error = settings.launchAtLoginError {
-                        Text("开机自启设置失败：\(error)")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.red.opacity(0.85))
-                    }
-                }
+                tabContent
             }
             .formStyle(.grouped)
 
@@ -329,6 +223,174 @@ struct SettingsView: View {
             }
 
             Spacer()
+        }
+    }
+
+    private var tabPicker: some View {
+        Picker("设置分组", selection: $selectedTab) {
+            ForEach(SettingsTab.allCases) { tab in
+                Text(tab.title).tag(tab)
+            }
+        }
+        .pickerStyle(.segmented)
+    }
+
+    @ViewBuilder
+    private var tabContent: some View {
+        switch selectedTab {
+        case .codex:
+            codexSettingsContent
+        case .remoteCodex:
+            remoteCodexSettingsContent
+        case .newAPI:
+            balanceMonitorSection(
+                title: "NewAPI",
+                source: .newAPI,
+                enabled: $draft.newAPIMonitorEnabled,
+                accounts: $draft.newAPIAccounts,
+                defaultThresholds: $draft.newAPIThresholds,
+                refreshInterval: $draft.newAPIRefreshInterval,
+                viewModel: newAPIViewModel,
+                keychainError: settings.newAPIKeychainError
+            )
+        case .subAPI:
+            balanceMonitorSection(
+                title: "Sub2API",
+                source: .subAPI,
+                enabled: $draft.subAPIMonitorEnabled,
+                accounts: $draft.subAPIAccounts,
+                defaultThresholds: $draft.subAPIThresholds,
+                refreshInterval: $draft.subAPIRefreshInterval,
+                viewModel: subAPIViewModel,
+                keychainError: settings.subAPIKeychainError
+            )
+        case .launch:
+            launchAndAppearanceContent
+        }
+    }
+
+    @ViewBuilder
+    private var codexSettingsContent: some View {
+        Section("Codex 刷新") {
+            HelpLabel(
+                title: "刷新模式",
+                help: "快速切换 Codex 运行状态、空闲状态、历史用量和文件监听的刷新频率。自定义数值后会自动变为均衡以外的配置。"
+            )
+            presetControls
+            intervalStepper("运行中", value: $draft.activeRefreshInterval, range: 2...30, help: "检测到 Codex 正在执行任务时的状态刷新间隔。数值越小越实时，功耗也越高。")
+            intervalStepper("空闲", value: $draft.idleRefreshInterval, range: 4...120, help: "Codex 没有运行中任务时的状态刷新间隔。")
+            intervalStepper("历史用量", value: $draft.usageRefreshInterval, range: 15...300, help: "统计 Codex 24小时、7天、30天 token 用量的刷新间隔。")
+            intervalStepper("文件监听", value: $draft.watcherRefreshInterval, range: 8...120, help: "扫描 Codex 会话文件变化的保底间隔，用于补偿文件事件丢失。")
+            intervalStepper("补刷节流", value: $draft.fileChangeRefreshMinimumGap, range: 1...30, help: "文件变化很多时，连续触发刷新之间的最小间隔。")
+        }
+
+        Section("Codex 数据") {
+            Picker(selection: $draft.rateLimitSource) {
+                ForEach(RateLimitSourcePreference.allCases) { source in
+                    Text(source.label).tag(source)
+                }
+            } label: {
+                HelpLabel(title: "额度来源", help: "决定 Codex 5小时和7天剩余额度优先从实时接口读取，还是只使用本地记录。")
+            }
+            .pickerStyle(.segmented)
+
+            Toggle(isOn: $draft.showPeriodUsage) {
+                HelpLabel(title: "显示 24小时 / 7天 / 30天", help: "控制详情页底部是否显示 Codex 三个时间窗口的 token 用量。")
+            }
+            Picker(selection: $draft.taskHistoryRange) {
+                ForEach(TaskHistoryRange.allCases) { range in
+                    Text(range.label).tag(range)
+                }
+            } label: {
+                HelpLabel(title: "任务范围", help: "决定 Codex 详情页任务列表读取最近多长时间内的对话。列表会在详情页中滚动显示。")
+            }
+            .pickerStyle(.segmented)
+        }
+    }
+
+    @ViewBuilder
+    private var remoteCodexSettingsContent: some View {
+        Section("CLIProxyAPI 设置") {
+            Toggle(isOn: $draft.remoteMonitorEnabled) {
+                HelpLabel(title: "启用 CLIProxyAPI", help: "启用后详情页会出现 CLIProxyAPI tab，用于查看 CLIProxyAPI 或 CPA Manager Plus 中的 Codex 账号状态。")
+            }
+
+            Picker(selection: $draft.remoteCodexDataSource) {
+                ForEach(RemoteCodexDataSource.allCases) { source in
+                    Text(source.label).tag(source)
+                }
+            } label: {
+                HelpLabel(title: "数据源", help: "未安装 CPA Manager Plus 时可选择 CLIProxyAPI；安装后建议选择 CPA Manager Plus，直接读取服务端巡检和用量统计。")
+            }
+            .pickerStyle(.segmented)
+            .disabled(!draft.remoteMonitorEnabled)
+
+            labeledTextField(
+                "面板地址",
+                text: $draft.cliproxyPanelURL,
+                placeholder: draft.remoteCodexDataSource == .cpaManagerPlus ? "CPA Manager Plus 地址" : "CLIProxyAPI 管理面板地址",
+                help: "填写管理面板地址。支持 https；本地 localhost 可使用 http。"
+            )
+            .disabled(!draft.remoteMonitorEnabled)
+
+            labeledSecureField(
+                "管理密钥",
+                text: $draft.cliproxyManagementKey,
+                placeholder: draft.remoteCodexDataSource == .cpaManagerPlus ? "CPA Manager Plus 管理密钥" : "CLIProxyAPI 管理密钥",
+                help: "用于调用远程管理接口。密钥只保存到 macOS Keychain，不写入 UserDefaults。"
+            )
+            .disabled(!draft.remoteMonitorEnabled)
+
+            Text("地址、认证信息和刷新配置仅在点击保存后生效。")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+
+            intervalStepper("账号刷新", value: $draft.cliproxyRefreshInterval, range: 60...3_600, help: "远程账号状态的读取间隔。CPA Manager Plus 的巡检结果由服务端产生，这里只是读取频率。")
+                .disabled(!draft.remoteMonitorEnabled)
+            intervalStepper("请求超时", value: $draft.cliproxyRequestTimeout, range: 3...30, help: "单个远程管理接口请求等待的最长秒数。")
+                .disabled(!draft.remoteMonitorEnabled)
+
+            Toggle(isOn: $draft.cliproxyAllowInsecureTLS) {
+                HelpLabel(title: "允许不安全 TLS", help: "允许连接自签名或证书不完整的测试面板。开启后会信任该请求中的服务器证书，请只在你控制的面板上使用。")
+            }
+            .disabled(!draft.remoteMonitorEnabled)
+
+            remoteStatusRow
+
+            if let error = settings.cliproxyKeychainError {
+                Text("管理密钥保存失败：\(error)")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.red.opacity(0.85))
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var launchAndAppearanceContent: some View {
+        Section("刘海显示") {
+            Picker(selection: $draft.notchDisplaySource) {
+                ForEach(NotchDisplaySource.allCases) { source in
+                    Text(source.label).tag(source)
+                }
+            } label: {
+                HelpLabel(title: "显示来源", help: "选择收起状态下刘海左右区域显示哪一种监控数据。自动模式会优先显示有提醒的外部监控，否则显示 Codex。")
+            }
+            .pickerStyle(.menu)
+        }
+
+        Section("启动与外观") {
+            Toggle(isOn: $draft.launchAtLoginEnabled) {
+                HelpLabel(title: "开机自启", help: "登录 macOS 后自动启动 Codex 刘海。保存时才会调用系统启动项接口。")
+            }
+            Toggle(isOn: $draft.enablePulse) {
+                HelpLabel(title: "运行指示灯动画", help: "控制运行中状态点和外部提醒状态点是否带轻微呼吸动画。关闭可进一步降低功耗。")
+            }
+
+            if let error = settings.launchAtLoginError {
+                Text("开机自启设置失败：\(error)")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.red.opacity(0.85))
+            }
         }
     }
 
@@ -404,16 +466,14 @@ struct SettingsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    @ViewBuilder
     private func balanceMonitorSection(
         title: String,
         source: BalanceMonitorSource,
         enabled: Binding<Bool>,
-        panelURL: Binding<String>,
-        managementKey: Binding<String>,
-        loginUsername: Binding<String>? = nil,
+        accounts: Binding<[BalanceAccountConfiguration]>,
+        defaultThresholds: Binding<BalanceThresholdConfiguration>,
         refreshInterval: Binding<TimeInterval>,
-        requestTimeout: Binding<TimeInterval>,
-        allowInsecureTLS: Binding<Bool>,
         viewModel: BalanceMonitorViewModel,
         keychainError: String?
     ) -> some View {
@@ -422,44 +482,25 @@ struct SettingsView: View {
                 HelpLabel(title: "启用 \(title)", help: balanceMonitorEnableHelp(title: title, source: source))
             }
 
-            labeledTextField(
-                "面板地址",
-                text: panelURL,
-                placeholder: "\(title) 面板地址",
-                help: "填写 \(title) 的面板地址。会自动归一化到协议、域名和端口。"
-            )
-            .disabled(!enabled.wrappedValue)
-
-            if let loginUsername {
-                labeledTextField(
-                    balanceUsernameTitle(source: source),
-                    text: loginUsername,
-                    placeholder: balanceUsernamePlaceholder(source: source),
-                    help: balanceUsernameHelp(source: source)
-                )
-                .disabled(!enabled.wrappedValue)
-            }
-
-            labeledSecureField(
-                balanceCredentialTitle(source: source),
-                text: managementKey,
-                placeholder: balanceCredentialPlaceholder(source: source),
-                help: balanceCredentialHelp(source: source)
-            )
-            .disabled(!enabled.wrappedValue)
-
             Text("地址、认证信息和刷新配置仅在点击保存后生效。")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.secondary)
 
-            intervalStepper("余额刷新", value: refreshInterval, range: 60...3_600, help: "\(title) 余额和渠道列表的刷新间隔。")
-                .disabled(!enabled.wrappedValue)
-            intervalStepper("请求超时", value: requestTimeout, range: 3...30, help: "\(title) 单个接口请求等待的最长秒数。")
+            intervalStepper("余额刷新", value: refreshInterval, range: 60...3_600, help: "\(title) 所有账号余额的刷新间隔。")
                 .disabled(!enabled.wrappedValue)
 
-            Toggle(isOn: allowInsecureTLS) {
-                HelpLabel(title: "允许不安全 TLS", help: "允许连接自签名或证书不完整的测试面板。请只在你控制的面板上使用。")
-            }
+            thresholdsEditor(
+                title: "默认阈值",
+                warning: Binding(
+                    get: { defaultThresholds.wrappedValue.warningThreshold },
+                    set: { defaultThresholds.wrappedValue.warningThreshold = $0 }
+                ),
+                alert: Binding(
+                    get: { defaultThresholds.wrappedValue.alertThreshold },
+                    set: { defaultThresholds.wrappedValue.alertThreshold = $0 }
+                ),
+                help: "账号没有单独设置阈值时使用这里的值。余额低于提醒阈值显示黄灯，低于告警阈值显示红灯。"
+            )
             .disabled(!enabled.wrappedValue)
 
             balanceStatusRow(
@@ -474,6 +515,211 @@ struct SettingsView: View {
                     .foregroundStyle(.red.opacity(0.85))
             }
         }
+
+        Section("\(title) 账户") {
+            if accounts.wrappedValue.isEmpty {
+                Text("还没有配置账号。")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+
+            ForEach(accounts.wrappedValue) { rowAccount in
+                balanceAccountEditor(
+                    source: source,
+                    account: Binding(
+                        get: {
+                            accountBindingValue(id: rowAccount.id, fallback: rowAccount, accounts: accounts)
+                        },
+                        set: { newValue in
+                            updateAccount(id: rowAccount.id, newValue: newValue, source: source, accounts: accounts)
+                        }
+                    ),
+                    onDelete: {
+                        accounts.wrappedValue.removeAll { $0.id == rowAccount.id }
+                    }
+                )
+                .disabled(!enabled.wrappedValue)
+            }
+
+            Button {
+                accounts.wrappedValue.append(
+                    BalanceAccountConfiguration(
+                        source: source,
+                        label: "\(title) \(accounts.wrappedValue.count + 1)",
+                        requestTimeout: 6
+                    )
+                )
+            } label: {
+                Label("添加账号", systemImage: "plus.circle.fill")
+            }
+            .disabled(!enabled.wrappedValue)
+        }
+    }
+
+    private func balanceAccountEditor(
+        source: BalanceMonitorSource,
+        account: Binding<BalanceAccountConfiguration>,
+        onDelete: @escaping () -> Void
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Toggle(isOn: account.enabled) {
+                    HelpLabel(title: account.wrappedValue.displayLabel, help: "关闭后这个账号不会参与刷新、详情页展示或刘海提醒。")
+                }
+                Spacer()
+                Button(role: .destructive, action: onDelete) {
+                    Image(systemName: "trash.fill")
+                }
+                .buttonStyle(.borderless)
+                .help("删除账号")
+            }
+
+            labeledTextField(
+                "显示名称",
+                text: account.label,
+                placeholder: "\(source.title) 账号",
+                help: "只用于本机显示，留空时会使用登录用户名。"
+            )
+
+            labeledTextField(
+                "面板地址",
+                text: account.panelURL,
+                placeholder: "\(source.title) 面板地址",
+                help: "填写这个账号所在面板的地址。会自动归一化到协议、域名和端口。"
+            )
+
+            labeledTextField(
+                balanceUsernameTitle(source: source),
+                text: account.username,
+                placeholder: balanceUsernamePlaceholder(source: source),
+                help: balanceUsernameHelp(source: source)
+            )
+
+            labeledSecureField(
+                balanceCredentialTitle(source: source),
+                text: account.secret,
+                placeholder: balanceCredentialPlaceholder(source: source),
+                help: balanceCredentialHelp(source: source)
+            )
+
+            intervalStepper("请求超时", value: account.requestTimeout, range: 3...30, help: "\(source.title) 这个账号单个接口请求等待的最长秒数。")
+
+            Toggle(isOn: account.allowInsecureTLS) {
+                HelpLabel(title: "允许不安全 TLS", help: "允许连接自签名或证书不完整的测试面板。请只在你控制的面板上使用。")
+            }
+
+            Toggle(isOn: account.usesDefaultThresholds) {
+                HelpLabel(title: "使用默认阈值", help: "开启后使用本页上方的默认提醒/告警阈值；关闭后可按这个账号单独设置。")
+            }
+
+            if !account.wrappedValue.usesDefaultThresholds {
+                thresholdsEditor(
+                    title: "账号阈值",
+                    warning: account.warningThreshold,
+                    alert: account.alertThreshold,
+                    help: "用于覆盖默认阈值。适合消费量差异较大的账号单独设置。"
+                )
+            }
+        }
+        .padding(.vertical, 8)
+    }
+
+    private func thresholdsEditor(
+        title: String,
+        warning: Binding<Double?>,
+        alert: Binding<Double?>,
+        help: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HelpLabel(title: title, help: help)
+            HStack(spacing: 10) {
+                optionalDoubleField("提醒阈值", value: warning, help: "余额低于这个值时显示黄灯提醒。")
+                optionalDoubleField("告警阈值", value: alert, help: "余额低于这个值时显示红灯告警。通常应小于提醒阈值。")
+            }
+        }
+    }
+
+    private func optionalDoubleField(
+        _ title: String,
+        value: Binding<Double?>,
+        help: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HelpLabel(title: title, help: help)
+            TextField(
+                "不设置",
+                text: Binding(
+                    get: {
+                        guard let number = value.wrappedValue else {
+                            return ""
+                        }
+                        return String(format: "%.2f", number)
+                    },
+                    set: { text in
+                        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        value.wrappedValue = trimmed.isEmpty ? nil : Double(trimmed)
+                    }
+                )
+            )
+            .textFieldStyle(.roundedBorder)
+            .lineLimit(1)
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func normalizedAccount(_ account: BalanceAccountConfiguration, source: BalanceMonitorSource) -> BalanceAccountConfiguration {
+        var copy = account
+        copy.source = source
+        copy.requestTimeout = min(30, max(3, copy.requestTimeout.rounded()))
+        if !copy.secret.isEmpty {
+            copy.secretReadFailed = false
+        }
+        return copy
+    }
+
+    private func accountBindingValue(
+        id: String,
+        fallback: BalanceAccountConfiguration,
+        accounts: Binding<[BalanceAccountConfiguration]>
+    ) -> BalanceAccountConfiguration {
+        accounts.wrappedValue.first { $0.id == id } ?? fallback
+    }
+
+    private func updateAccount(
+        id: String,
+        newValue: BalanceAccountConfiguration,
+        source: BalanceMonitorSource,
+        accounts: Binding<[BalanceAccountConfiguration]>
+    ) {
+        guard let index = accounts.wrappedValue.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        let oldValue = accounts.wrappedValue[index]
+        var copy = normalizedAccount(newValue, source: source)
+        if accountSecurityContextChanged(old: oldValue, new: copy),
+           copy.secret == oldValue.secret {
+            copy.secret = ""
+            copy.secretReadFailed = false
+        }
+        accounts.wrappedValue[index] = copy
+    }
+
+    private func accountSecurityContextChanged(
+        old: BalanceAccountConfiguration,
+        new: BalanceAccountConfiguration
+    ) -> Bool {
+        old.allowInsecureTLS != new.allowInsecureTLS
+            || apiOrigin(from: old.panelURL) != apiOrigin(from: new.panelURL)
+    }
+
+    private func apiOrigin(from input: String) -> String? {
+        guard let url = BalanceAPIClient.apiBaseURL(from: input),
+              let scheme = url.scheme,
+              let host = url.host else {
+            return nil
+        }
+        let port = url.port.map { ":\($0)" } ?? ""
+        return "\(scheme)://\(host.lowercased())\(port)"
     }
 
     private func balanceMonitorEnableHelp(title: String, source: BalanceMonitorSource) -> String {
@@ -555,7 +801,7 @@ struct SettingsView: View {
             Spacer()
 
             Button("立即刷新") {
-                onRefresh()
+                refreshSelectedTab()
             }
             .keyboardShortcut("r", modifiers: .command)
 
@@ -612,20 +858,14 @@ struct SettingsView: View {
         switch source {
         case .newAPI:
             return draft.newAPIMonitorEnabled != current.newAPIMonitorEnabled
-                || draft.newAPIPanelURL != current.newAPIPanelURL
-                || draft.newAPIManagementKey != current.newAPIManagementKey
-                || draft.newAPIUsername != current.newAPIUsername
                 || draft.newAPIRefreshInterval != current.newAPIRefreshInterval
-                || draft.newAPIRequestTimeout != current.newAPIRequestTimeout
-                || draft.newAPIAllowInsecureTLS != current.newAPIAllowInsecureTLS
+                || draft.newAPIAccounts != current.newAPIAccounts
+                || draft.newAPIThresholds != current.newAPIThresholds
         case .subAPI:
             return draft.subAPIMonitorEnabled != current.subAPIMonitorEnabled
-                || draft.subAPIPanelURL != current.subAPIPanelURL
-                || draft.subAPIManagementKey != current.subAPIManagementKey
-                || draft.subAPIUsername != current.subAPIUsername
                 || draft.subAPIRefreshInterval != current.subAPIRefreshInterval
-                || draft.subAPIRequestTimeout != current.subAPIRequestTimeout
-                || draft.subAPIAllowInsecureTLS != current.subAPIAllowInsecureTLS
+                || draft.subAPIAccounts != current.subAPIAccounts
+                || draft.subAPIThresholds != current.subAPIThresholds
         }
     }
 
@@ -705,23 +945,15 @@ struct SettingsView: View {
             newDataSource: next.remoteCodexDataSource,
             oldSavedKey: current.cliproxyManagementKey
         )
-        let newAPIKeyForSave = CodexNotchSettings.apiKeyForSave(
-            draftKey: next.newAPIManagementKey,
-            oldPanelURL: current.newAPIPanelURL,
-            newPanelURL: next.newAPIPanelURL,
-            oldAllowsInsecureTLS: current.newAPIAllowInsecureTLS,
-            newAllowsInsecureTLS: next.newAPIAllowInsecureTLS,
-            enabled: next.newAPIMonitorEnabled,
-            oldSavedKey: current.newAPIManagementKey
+        let newAPIAccounts = sanitizedAccountsForSave(
+            next.newAPIAccounts,
+            current: current.newAPIAccounts,
+            source: .newAPI
         )
-        let subAPIKeyForSave = CodexNotchSettings.apiKeyForSave(
-            draftKey: next.subAPIManagementKey,
-            oldPanelURL: current.subAPIPanelURL,
-            newPanelURL: next.subAPIPanelURL,
-            oldAllowsInsecureTLS: current.subAPIAllowInsecureTLS,
-            newAllowsInsecureTLS: next.subAPIAllowInsecureTLS,
-            enabled: next.subAPIMonitorEnabled,
-            oldSavedKey: current.subAPIManagementKey
+        let subAPIAccounts = sanitizedAccountsForSave(
+            next.subAPIAccounts,
+            current: current.subAPIAccounts,
+            source: .subAPI
         )
         if !next.remoteMonitorEnabled {
             settings.remoteMonitorEnabled = false
@@ -753,22 +985,32 @@ struct SettingsView: View {
             settings.remoteMonitorEnabled = true
         }
 
-        settings.newAPIPanelURL = next.newAPIPanelURL
-        settings.newAPIUsername = next.newAPIMonitorEnabled ? next.newAPIUsername : ""
+        settings.setBalanceDefaultThresholds(next.newAPIThresholds, for: .newAPI)
+        settings.setBalanceAccounts(newAPIAccounts, for: .newAPI)
+        settings.newAPIPanelURL = newAPIAccounts.first?.panelURL ?? ""
+        settings.newAPIUsername = next.newAPIMonitorEnabled ? (newAPIAccounts.first?.username ?? "") : ""
         settings.newAPIRefreshInterval = next.newAPIRefreshInterval
-        settings.newAPIRequestTimeout = next.newAPIRequestTimeout
-        settings.newAPIAllowInsecureTLS = next.newAPIAllowInsecureTLS
-        settings.newAPIManagementKey = newAPIKeyForSave
+        settings.newAPIRequestTimeout = newAPIAccounts.first?.requestTimeout ?? next.newAPIRequestTimeout
+        settings.newAPIAllowInsecureTLS = newAPIAccounts.first?.allowInsecureTLS ?? next.newAPIAllowInsecureTLS
+        settings.newAPIManagementKey = legacyKeyForFirstAccount(
+            newAPIAccounts.first,
+            currentKey: current.newAPIManagementKey
+        )
         if next.newAPIMonitorEnabled {
             settings.newAPIMonitorEnabled = true
         }
 
-        settings.subAPIPanelURL = next.subAPIPanelURL
-        settings.subAPIUsername = next.subAPIMonitorEnabled ? next.subAPIUsername : ""
+        settings.setBalanceDefaultThresholds(next.subAPIThresholds, for: .subAPI)
+        settings.setBalanceAccounts(subAPIAccounts, for: .subAPI)
+        settings.subAPIPanelURL = subAPIAccounts.first?.panelURL ?? ""
+        settings.subAPIUsername = next.subAPIMonitorEnabled ? (subAPIAccounts.first?.username ?? "") : ""
         settings.subAPIRefreshInterval = next.subAPIRefreshInterval
-        settings.subAPIRequestTimeout = next.subAPIRequestTimeout
-        settings.subAPIAllowInsecureTLS = next.subAPIAllowInsecureTLS
-        settings.subAPIManagementKey = subAPIKeyForSave
+        settings.subAPIRequestTimeout = subAPIAccounts.first?.requestTimeout ?? next.subAPIRequestTimeout
+        settings.subAPIAllowInsecureTLS = subAPIAccounts.first?.allowInsecureTLS ?? next.subAPIAllowInsecureTLS
+        settings.subAPIManagementKey = legacyKeyForFirstAccount(
+            subAPIAccounts.first,
+            currentKey: current.subAPIManagementKey
+        )
         if next.subAPIMonitorEnabled {
             settings.subAPIMonitorEnabled = true
         }
@@ -784,6 +1026,52 @@ struct SettingsView: View {
 
     private func intervalText(_ value: TimeInterval) -> String {
         "\(Int(value)) 秒"
+    }
+
+    private func refreshSelectedTab() {
+        switch selectedTab {
+        case .codex, .launch:
+            onRefresh()
+        case .remoteCodex:
+            remoteViewModel.refreshNow()
+        case .newAPI:
+            newAPIViewModel.refreshNow()
+        case .subAPI:
+            subAPIViewModel.refreshNow()
+        }
+    }
+
+    private func sanitizedAccountsForSave(
+        _ accounts: [BalanceAccountConfiguration],
+        current: [BalanceAccountConfiguration],
+        source: BalanceMonitorSource
+    ) -> [BalanceAccountConfiguration] {
+        let currentByID = Dictionary(current.map { ($0.id, $0) }, uniquingKeysWith: { existing, _ in existing })
+        return accounts.map { account in
+            var copy = normalizedAccount(account, source: source)
+            guard let oldAccount = currentByID[copy.id] else {
+                return copy
+            }
+            if accountSecurityContextChanged(old: oldAccount, new: copy),
+               copy.secret == oldAccount.secret {
+                copy.secret = ""
+                copy.secretReadFailed = false
+            }
+            return copy
+        }
+    }
+
+    private func legacyKeyForFirstAccount(
+        _ account: BalanceAccountConfiguration?,
+        currentKey: String
+    ) -> String {
+        guard let account else {
+            return ""
+        }
+        if account.secretReadFailed && account.secret.isEmpty {
+            return currentKey
+        }
+        return account.secret
     }
 
 }

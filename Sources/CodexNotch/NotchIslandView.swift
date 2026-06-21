@@ -345,7 +345,13 @@ struct DetailPanelView: View {
             settings.newAPIMonitorEnabled ? newAPIViewModel.snapshot.accounts.count : nil,
             settings.subAPIMonitorEnabled ? subAPIViewModel.snapshot.accounts.count : nil
         ].compactMap { $0 }
-        return max(localHeight, IslandMetrics.remoteDetailHeight(accountRows: max(1, rows.max() ?? 1)))
+        return max(
+            localHeight,
+            IslandMetrics.remoteDetailHeight(
+                accountRows: max(1, rows.max() ?? 1),
+                usesTallRows: remoteViewModel.snapshot.accounts.contains { $0.quotaWindows.count > 2 }
+            )
+        )
     }
 
     private var header: some View {
@@ -970,23 +976,53 @@ private struct RemoteAccountRow: View {
                     .foregroundStyle(account.state.color)
                     .lineLimit(1)
                     .minimumScaleFactor(0.72)
-                Text(account.quotaSummaryText)
-                    .font(.system(size: 9.3, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(quotaColor)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+
+                quotaGrid
             }
-            .frame(width: 102, alignment: .trailing)
+            .frame(width: 148, alignment: .trailing)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
-        .frame(height: 62)
+        .frame(minHeight: quotaWindows.count > 2 ? 74 : 62)
         .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(Color.white.opacity(0.08), lineWidth: 1)
         )
+    }
+
+    private var quotaWindows: [RemoteQuotaWindow] {
+        account.quotaWindows.sortedForSummary
+    }
+
+    @ViewBuilder
+    private var quotaGrid: some View {
+        if quotaWindows.isEmpty {
+            Text(account.quotaSummaryText)
+                .font(.system(size: 9.3, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(quotaColor)
+                .lineLimit(1)
+        } else {
+            LazyVGrid(
+                columns: [
+                    GridItem(.flexible(minimum: 58), spacing: 4, alignment: .trailing),
+                    GridItem(.flexible(minimum: 58), spacing: 4, alignment: .trailing)
+                ],
+                alignment: .trailing,
+                spacing: 3
+            ) {
+                ForEach(quotaWindows) { window in
+                    Text("\(window.shortLabel) \(window.remainingText)")
+                        .font(.system(size: 8.4, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(window.reachesThreshold ? Color(red: 1.0, green: 0.55, blue: 0.25) : .white.opacity(0.62))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.64)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+            }
+        }
     }
 
     private var quotaColor: Color {

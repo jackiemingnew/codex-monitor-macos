@@ -53,16 +53,23 @@ final class CodexNotchSettings: ObservableObject {
         static let newAPIRefreshInterval = "newAPIRefreshInterval"
         static let newAPIRequestTimeout = "newAPIRequestTimeout"
         static let newAPIAllowInsecureTLS = "newAPIAllowInsecureTLS"
+        static let newAPIAccounts = "newAPIAccounts"
+        static let newAPIWarningThreshold = "newAPIWarningThreshold"
+        static let newAPIAlertThreshold = "newAPIAlertThreshold"
         static let subAPIMonitorEnabled = "subAPIMonitorEnabled"
         static let subAPIPanelURL = "subAPIPanelURL"
         static let subAPIUsername = "subAPIUsername"
         static let subAPIRefreshInterval = "subAPIRefreshInterval"
         static let subAPIRequestTimeout = "subAPIRequestTimeout"
         static let subAPIAllowInsecureTLS = "subAPIAllowInsecureTLS"
+        static let subAPIAccounts = "subAPIAccounts"
+        static let subAPIWarningThreshold = "subAPIWarningThreshold"
+        static let subAPIAlertThreshold = "subAPIAlertThreshold"
     }
 
     private let defaults: UserDefaults
     private let launchAtLoginManager: LaunchAtLoginManaging
+    private var isInitializing = true
 
     @Published var activeRefreshInterval: TimeInterval {
         didSet {
@@ -239,6 +246,18 @@ final class CodexNotchSettings: ObservableObject {
         }
     }
 
+    @Published var newAPIAccounts: [BalanceAccountConfiguration] {
+        didSet {
+            persistBalanceAccounts(newAPIAccounts, oldAccounts: oldValue, source: .newAPI)
+        }
+    }
+
+    @Published var newAPIThresholds: BalanceThresholdConfiguration {
+        didSet {
+            persistBalanceThresholds(newAPIThresholds, warningKey: Keys.newAPIWarningThreshold, alertKey: Keys.newAPIAlertThreshold)
+        }
+    }
+
     @Published var subAPIMonitorEnabled: Bool {
         didSet {
             defaults.set(subAPIMonitorEnabled, forKey: Keys.subAPIMonitorEnabled)
@@ -299,6 +318,18 @@ final class CodexNotchSettings: ObservableObject {
         }
     }
 
+    @Published var subAPIAccounts: [BalanceAccountConfiguration] {
+        didSet {
+            persistBalanceAccounts(subAPIAccounts, oldAccounts: oldValue, source: .subAPI)
+        }
+    }
+
+    @Published var subAPIThresholds: BalanceThresholdConfiguration {
+        didSet {
+            persistBalanceThresholds(subAPIThresholds, warningKey: Keys.subAPIWarningThreshold, alertKey: Keys.subAPIAlertThreshold)
+        }
+    }
+
     @Published private(set) var launchAtLoginEnabled: Bool
     @Published private(set) var launchAtLoginError: String?
     @Published private(set) var cliproxyKeychainError: String?
@@ -349,6 +380,12 @@ final class CodexNotchSettings: ObservableObject {
         self.newAPIRefreshInterval = Self.clamped(defaults.object(forKey: Keys.newAPIRefreshInterval) as? TimeInterval ?? 300, min: 60, max: 3_600)
         self.newAPIRequestTimeout = Self.clamped(defaults.object(forKey: Keys.newAPIRequestTimeout) as? TimeInterval ?? 6, min: 3, max: 30)
         self.newAPIAllowInsecureTLS = defaults.object(forKey: Keys.newAPIAllowInsecureTLS) as? Bool ?? false
+        self.newAPIAccounts = []
+        self.newAPIThresholds = Self.loadBalanceThresholds(
+            defaults: defaults,
+            warningKey: Keys.newAPIWarningThreshold,
+            alertKey: Keys.newAPIAlertThreshold
+        )
         self.subAPIMonitorEnabled = defaults.object(forKey: Keys.subAPIMonitorEnabled) as? Bool ?? false
         self.subAPIPanelURL = defaults.string(forKey: Keys.subAPIPanelURL) ?? ""
         self.subAPIUsername = defaults.string(forKey: Keys.subAPIUsername) ?? ""
@@ -359,7 +396,50 @@ final class CodexNotchSettings: ObservableObject {
         self.subAPIRefreshInterval = Self.clamped(defaults.object(forKey: Keys.subAPIRefreshInterval) as? TimeInterval ?? 300, min: 60, max: 3_600)
         self.subAPIRequestTimeout = Self.clamped(defaults.object(forKey: Keys.subAPIRequestTimeout) as? TimeInterval ?? 6, min: 3, max: 30)
         self.subAPIAllowInsecureTLS = defaults.object(forKey: Keys.subAPIAllowInsecureTLS) as? Bool ?? false
+        self.subAPIAccounts = []
+        self.subAPIThresholds = Self.loadBalanceThresholds(
+            defaults: defaults,
+            warningKey: Keys.subAPIWarningThreshold,
+            alertKey: Keys.subAPIAlertThreshold
+        )
         self.launchAtLoginEnabled = launchAtLoginManager.isEnabled
+        let loadedNewAPIAccounts = Self.loadBalanceAccounts(
+            defaults: defaults,
+            key: Keys.newAPIAccounts,
+            source: .newAPI,
+            legacy: BalanceAccountConfiguration(
+                id: "legacy-newapi",
+                source: .newAPI,
+                enabled: newAPIMonitorEnabled,
+                label: "NewAPI",
+                panelURL: newAPIPanelURL,
+                username: newAPIUsername,
+                secret: newAPIManagementKey,
+                allowInsecureTLS: newAPIAllowInsecureTLS,
+                requestTimeout: newAPIRequestTimeout
+            )
+        )
+        self.newAPIAccounts = loadedNewAPIAccounts.accounts
+        self.newAPIKeychainError = loadedNewAPIAccounts.keychainError
+        let loadedSubAPIAccounts = Self.loadBalanceAccounts(
+            defaults: defaults,
+            key: Keys.subAPIAccounts,
+            source: .subAPI,
+            legacy: BalanceAccountConfiguration(
+                id: "legacy-subapi",
+                source: .subAPI,
+                enabled: subAPIMonitorEnabled,
+                label: "Sub2API",
+                panelURL: subAPIPanelURL,
+                username: subAPIUsername,
+                secret: subAPIManagementKey,
+                allowInsecureTLS: subAPIAllowInsecureTLS,
+                requestTimeout: subAPIRequestTimeout
+            )
+        )
+        self.subAPIAccounts = loadedSubAPIAccounts.accounts
+        self.subAPIKeychainError = loadedSubAPIAccounts.keychainError
+        self.isInitializing = false
     }
 
     func setLaunchAtLoginEnabled(_ enabled: Bool) {
@@ -452,12 +532,116 @@ final class CodexNotchSettings: ObservableObject {
         return draftKey
     }
 
+    private static func loadBalanceThresholds(
+        defaults: UserDefaults,
+        warningKey: String,
+        alertKey: String
+    ) -> BalanceThresholdConfiguration {
+        BalanceThresholdConfiguration(
+            warningThreshold: defaults.object(forKey: warningKey) as? Double,
+            alertThreshold: defaults.object(forKey: alertKey) as? Double
+        ).normalized
+    }
+
+    private static func loadBalanceAccounts(
+        defaults: UserDefaults,
+        key: String,
+        source: BalanceMonitorSource,
+        legacy: BalanceAccountConfiguration
+    ) -> BalanceAccountsLoadResult {
+        let hasLegacyConfiguration = legacy.enabled
+            || !legacy.panelURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !legacy.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !legacy.secret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let service = balanceAccountKeychainService(for: source)
+        if let data = defaults.data(forKey: key),
+           let decoded = try? JSONDecoder().decode([BalanceAccountConfiguration].self, from: data) {
+            var keychainErrors: [String] = []
+            let accounts = decoded.map { account in
+                var copy = account
+                copy.source = source
+                do {
+                    copy.secret = try KeychainStore.read(service: service, account: copy.id)
+                } catch {
+                    copy.secret = ""
+                    copy.secretReadFailed = true
+                    keychainErrors.append("\(copy.displayLabel)：\(error.localizedDescription)")
+                }
+                return copy
+            }
+            return BalanceAccountsLoadResult(
+                accounts: accounts,
+                keychainError: keychainErrors.isEmpty ? nil : keychainErrors.joined(separator: "；")
+            )
+        }
+
+        return BalanceAccountsLoadResult(
+            accounts: hasLegacyConfiguration ? [legacy] : [],
+            keychainError: nil
+        )
+    }
+
+    private static func balanceAccountKeychainService(for source: BalanceMonitorSource) -> String {
+        switch source {
+        case .newAPI:
+            "com.alight.codexnotch.newapi.account-password"
+        case .subAPI:
+            "com.alight.codexnotch.subapi.account-password"
+        }
+    }
+
     func balanceMonitorEnabled(for source: BalanceMonitorSource) -> Bool {
         switch source {
         case .newAPI:
             newAPIMonitorEnabled
         case .subAPI:
             subAPIMonitorEnabled
+        }
+    }
+
+    func balanceAccounts(for source: BalanceMonitorSource) -> [BalanceAccountConfiguration] {
+        switch source {
+        case .newAPI:
+            newAPIAccounts
+        case .subAPI:
+            subAPIAccounts
+        }
+    }
+
+    func setBalanceAccounts(_ accounts: [BalanceAccountConfiguration], for source: BalanceMonitorSource) {
+        switch source {
+        case .newAPI:
+            let currentByID = Dictionary(newAPIAccounts.map { ($0.id, $0) }, uniquingKeysWith: { existing, _ in existing })
+            newAPIAccounts = accounts.map { account in
+                var copy = account
+                copy.source = .newAPI
+                return sanitizedBalanceAccount(copy, oldAccount: currentByID[copy.id])
+            }
+        case .subAPI:
+            let currentByID = Dictionary(subAPIAccounts.map { ($0.id, $0) }, uniquingKeysWith: { existing, _ in existing })
+            subAPIAccounts = accounts.map { account in
+                var copy = account
+                copy.source = .subAPI
+                return sanitizedBalanceAccount(copy, oldAccount: currentByID[copy.id])
+            }
+        }
+    }
+
+    func balanceDefaultThresholds(for source: BalanceMonitorSource) -> BalanceThresholdConfiguration {
+        switch source {
+        case .newAPI:
+            newAPIThresholds
+        case .subAPI:
+            subAPIThresholds
+        }
+    }
+
+    func setBalanceDefaultThresholds(_ thresholds: BalanceThresholdConfiguration, for source: BalanceMonitorSource) {
+        switch source {
+        case .newAPI:
+            newAPIThresholds = thresholds.normalized
+        case .subAPI:
+            subAPIThresholds = thresholds.normalized
         }
     }
 
@@ -547,6 +731,102 @@ final class CodexNotchSettings: ObservableObject {
                 subAPIKeychainError = error.localizedDescription
             }
         }
+    }
+
+    private func persistBalanceThresholds(
+        _ thresholds: BalanceThresholdConfiguration,
+        warningKey: String,
+        alertKey: String
+    ) {
+        let normalized = thresholds.normalized
+        if let warningThreshold = normalized.warningThreshold {
+            defaults.set(warningThreshold, forKey: warningKey)
+        } else {
+            defaults.removeObject(forKey: warningKey)
+        }
+        if let alertThreshold = normalized.alertThreshold {
+            defaults.set(alertThreshold, forKey: alertKey)
+        } else {
+            defaults.removeObject(forKey: alertKey)
+        }
+    }
+
+    private func persistBalanceAccounts(
+        _ accounts: [BalanceAccountConfiguration],
+        oldAccounts: [BalanceAccountConfiguration],
+        source: BalanceMonitorSource
+    ) {
+        guard !isInitializing else {
+            return
+        }
+        let service = Self.balanceAccountKeychainService(for: source)
+        var keychainError: String?
+        do {
+            for account in accounts {
+                if account.secretReadFailed && account.secret.isEmpty {
+                    continue
+                }
+                try KeychainStore.write(account.secret, service: service, account: account.id)
+            }
+            let newIDs = Set(accounts.map(\.id))
+            for oldAccount in oldAccounts where !newIDs.contains(oldAccount.id) {
+                try KeychainStore.delete(service: service, account: oldAccount.id)
+            }
+        } catch {
+            keychainError = error.localizedDescription
+        }
+
+        do {
+            let data = try JSONEncoder().encode(accounts)
+            switch source {
+            case .newAPI:
+                defaults.set(data, forKey: Keys.newAPIAccounts)
+                newAPIKeychainError = keychainError
+            case .subAPI:
+                defaults.set(data, forKey: Keys.subAPIAccounts)
+                subAPIKeychainError = keychainError
+            }
+        } catch {
+            switch source {
+            case .newAPI:
+                newAPIKeychainError = error.localizedDescription
+            case .subAPI:
+                subAPIKeychainError = error.localizedDescription
+            }
+        }
+    }
+
+    private func sanitizedBalanceAccount(
+        _ account: BalanceAccountConfiguration,
+        oldAccount: BalanceAccountConfiguration?
+    ) -> BalanceAccountConfiguration {
+        Self.sanitizedBalanceAccountForSave(account, oldAccount: oldAccount)
+    }
+
+    static func sanitizedBalanceAccountForSave(
+        _ account: BalanceAccountConfiguration,
+        oldAccount: BalanceAccountConfiguration?
+    ) -> BalanceAccountConfiguration {
+        var copy = account
+        copy.requestTimeout = Self.clamped(copy.requestTimeout, min: 3, max: 30)
+        if !copy.secret.isEmpty {
+            copy.secretReadFailed = false
+        }
+        guard let oldAccount else {
+            return copy
+        }
+        let originChanged = Self.originChanged(
+            oldURL: oldAccount.panelURL,
+            newURL: copy.panelURL,
+            oldOrigin: Self.apiOrigin(from: oldAccount.panelURL),
+            newOrigin: Self.apiOrigin(from: copy.panelURL)
+        )
+        let tlsModeChanged = oldAccount.allowInsecureTLS != copy.allowInsecureTLS
+        if (originChanged || tlsModeChanged), copy.secret == oldAccount.secret {
+            copy.secret = ""
+            copy.secretReadFailed = false
+        }
+        return copy
     }
 
     private func normalizeActiveRefreshInterval() {
@@ -735,4 +1015,9 @@ final class CodexNotchSettings: ObservableObject {
         let port = url.port.map { ":\($0)" } ?? ""
         return "\(scheme)://\(host.lowercased())\(port)"
     }
+}
+
+private struct BalanceAccountsLoadResult {
+    let accounts: [BalanceAccountConfiguration]
+    let keychainError: String?
 }

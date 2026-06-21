@@ -16,6 +16,7 @@ swiftc \
   -swift-version 6 \
   "${ROOT_DIR}/Sources/CodexNotch/Models.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/Formatters.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/DisplayRedactor.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/Shell.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/KeychainStore.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/CodexNotchSettings.swift" \

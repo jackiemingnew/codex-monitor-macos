@@ -235,6 +235,9 @@ final class CLIProxyAPIClient: NSObject, URLSessionDelegate {
               !host.isEmpty else {
             return nil
         }
+        guard components.user == nil, components.password == nil else {
+            return nil
+        }
 
         guard scheme == "https" || scheme == "http" else {
             return nil

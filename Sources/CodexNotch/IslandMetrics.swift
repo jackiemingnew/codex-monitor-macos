@@ -35,9 +35,10 @@ enum IslandMetrics {
         return max(minimumDetailHeight, ceil(contentHeight))
     }
 
-    static func remoteDetailHeight(accountRows: Int) -> CGFloat {
+    static func remoteDetailHeight(accountRows: Int, usesTallRows: Bool = false) -> CGFloat {
         let rows = max(1, min(4, accountRows))
-        let accountStackHeight = CGFloat(rows) * 62 + CGFloat(max(0, rows - 1)) * 7
+        let rowHeight: CGFloat = usesTallRows ? 74 : 62
+        let accountStackHeight = CGFloat(rows) * rowHeight + CGFloat(max(0, rows - 1)) * 7
         let cpaUsageHeight: CGFloat = 47
         let contentHeight = detailTopPadding
             + detailHeaderHeight

@@ -79,6 +79,18 @@ let exhaustedWeeklyWindow = RemoteQuotaWindow(
     usedPercent: 100,
     resetText: nil
 )
+let proQuotaAccount = remoteAccount(
+    id: "pro-four-windows",
+    state: .healthy,
+    quotaWindows: [
+        RemoteQuotaWindow(id: "primary", shortLabel: "5h", remainingPercent: 98, usedPercent: 2, resetText: nil),
+        RemoteQuotaWindow(id: "secondary", shortLabel: "7d", remainingPercent: 60, usedPercent: 40, resetText: nil),
+        RemoteQuotaWindow(id: "pro-20x", shortLabel: "Pro 20x", remainingPercent: 100, usedPercent: 0, resetText: nil),
+        RemoteQuotaWindow(id: "pro-5x", shortLabel: "Pro 5x", remainingPercent: 80, usedPercent: 20, resetText: nil)
+    ]
+)
+runner.check(proQuotaAccount.quotaSummaryText.contains("Pro 20x 100%"), "CLIProxyAPI quota summary should preserve Pro 20x quota")
+runner.check(proQuotaAccount.quotaSummaryText.contains("Pro 5x 80%"), "CLIProxyAPI quota summary should preserve Pro 5x quota")
 
 runner.check(RefreshCadence.pendingSnapshotDelay(for: 2) == 1, "coalesced snapshot refresh should wait at least one second")
 runner.check(RefreshCadence.pendingSnapshotDelay(for: 6) == 3, "coalesced snapshot refresh should cap short follow-up waits")
@@ -131,10 +143,58 @@ runner.check(reloadedSettings.notchDisplaySource == .remoteCodex, "collapsed not
 runner.check(reloadedSettings.newAPIMonitorEnabled, "NewAPI monitor enablement should persist")
 runner.check(reloadedSettings.newAPIPanelURL == "https://newapi.example.com", "NewAPI panel URL should persist")
 runner.check(reloadedSettings.newAPIUsername == "owner", "NewAPI username should persist")
+let migratedNewAPIAccounts = reloadedSettings.balanceAccounts(for: .newAPI)
+runner.check(migratedNewAPIAccounts.count == 1, "legacy NewAPI settings should migrate to one balance account")
+runner.check(migratedNewAPIAccounts.first?.panelURL == "https://newapi.example.com", "migrated NewAPI account should preserve panel URL")
+runner.check(migratedNewAPIAccounts.first?.username == "owner", "migrated NewAPI account should preserve username")
+runner.check(migratedNewAPIAccounts.first?.usesDefaultThresholds == true, "migrated NewAPI account should use default thresholds")
 runner.check(reloadedSettings.subAPIMonitorEnabled, "SubAPI monitor enablement should persist")
 runner.check(reloadedSettings.subAPIPanelURL == "https://subapi.example.com", "SubAPI panel URL should persist")
 runner.check(reloadedSettings.subAPIUsername == "user@example.com", "SubAPI login name should persist")
+let migratedSubAPIAccounts = reloadedSettings.balanceAccounts(for: .subAPI)
+runner.check(migratedSubAPIAccounts.count == 1, "legacy Sub2API settings should migrate to one balance account")
+runner.check(migratedSubAPIAccounts.first?.panelURL == "https://subapi.example.com", "migrated Sub2API account should preserve panel URL")
+runner.check(migratedSubAPIAccounts.first?.username == "user@example.com", "migrated Sub2API account should preserve login name")
+reloadedSettings.setBalanceAccounts([], for: .newAPI)
+let emptiedSettings = CodexNotchSettings(
+    defaults: settingsDefaults,
+    initialManagementKey: "",
+    initialNewAPIKey: "",
+    initialSubAPIKey: "",
+    launchAtLoginManager: FakeLaunchAtLoginManager()
+)
+runner.check(emptiedSettings.balanceAccounts(for: .newAPI).isEmpty, "explicitly saved empty NewAPI account list should not revive legacy settings")
 settingsDefaults.removePersistentDomain(forName: settingsSuiteName)
+
+let oldBalanceAccount = BalanceAccountConfiguration(
+    id: "account-1",
+    source: .newAPI,
+    panelURL: "https://old.example.com",
+    username: "owner",
+    secret: "same-password",
+    allowInsecureTLS: false
+)
+var changedOriginAccount = oldBalanceAccount
+changedOriginAccount.panelURL = "https://new.example.com"
+let sanitizedChangedOrigin = CodexNotchSettings.sanitizedBalanceAccountForSave(
+    changedOriginAccount,
+    oldAccount: oldBalanceAccount
+)
+runner.check(sanitizedChangedOrigin.secret.isEmpty, "changing a balance account origin should clear an unchanged password")
+var changedTLSAccount = oldBalanceAccount
+changedTLSAccount.allowInsecureTLS = true
+let sanitizedChangedTLS = CodexNotchSettings.sanitizedBalanceAccountForSave(
+    changedTLSAccount,
+    oldAccount: oldBalanceAccount
+)
+runner.check(sanitizedChangedTLS.secret.isEmpty, "changing a balance account TLS mode should clear an unchanged password")
+var retypedChangedOrigin = changedOriginAccount
+retypedChangedOrigin.secret = "retyped-password"
+let sanitizedRetypedOrigin = CodexNotchSettings.sanitizedBalanceAccountForSave(
+    retypedChangedOrigin,
+    oldAccount: oldBalanceAccount
+)
+runner.check(sanitizedRetypedOrigin.secret == "retyped-password", "retyped password should be kept after origin change")
 
 let shellTimeoutStart = Date()
 do {
@@ -153,12 +213,14 @@ do {
 }
 
 runner.check(CLIProxyAPIClient.managementBaseURL(from: "http://example.com:8317/management.html") == nil, "external plain HTTP panel URL must be rejected")
+runner.check(CLIProxyAPIClient.managementBaseURL(from: "https://panel.example.com@evil.example.com/management.html") == nil, "CLIProxyAPI panel URL must reject userinfo")
 
 let newAPIBaseURL = runner.require(
     BalanceAPIClient.apiBaseURL(from: "https://newapi.example.com/admin"),
     "NewAPI-compatible panel URL should normalize"
 )
 runner.check(newAPIBaseURL.absoluteString == "https://newapi.example.com", "NewAPI-compatible base URL should use the origin")
+runner.check(BalanceAPIClient.apiBaseURL(from: "https://newapi.example.com@evil.example.com/admin") == nil, "NewAPI-compatible panel URL must reject userinfo")
 
 let newAPILoginBody = try BalanceAPIClient.newAPILoginBody(
     for: BalanceAPIConfiguration(
@@ -192,6 +254,15 @@ runner.check(newAPIUserID == "42", "NewAPI login should return the user id requi
 let newAPIManagementHeaders = BalanceAPIClient.newAPIManagementHeaders(userID: newAPIUserID)
 runner.check(newAPIManagementHeaders["New-Api-User"] == "42", "NewAPI management requests should include the logged-in user id")
 runner.check(newAPIManagementHeaders["Accept"] == "application/json", "NewAPI management requests should accept JSON")
+
+let defaultThresholds = BalanceThresholdConfiguration(warningThreshold: 100, alertThreshold: 30)
+runner.check(defaultThresholds.state(for: 150) == .healthy, "balance above warning threshold should be healthy")
+runner.check(defaultThresholds.state(for: 99.99) == .warning, "balance below warning threshold should warn")
+runner.check(defaultThresholds.state(for: 29.99) == .error, "balance below alert threshold should be an error")
+runner.check(defaultThresholds.normalized.alertThreshold == 30, "already ordered thresholds should stay unchanged")
+let swappedThresholds = BalanceThresholdConfiguration(warningThreshold: 25, alertThreshold: 50).normalized
+runner.check(swappedThresholds.warningThreshold == 50, "normalized thresholds should keep warning at the larger value")
+runner.check(swappedThresholds.alertThreshold == 25, "normalized thresholds should keep alert at the smaller value")
 
 let newAPI2FAResponse = """
 {
@@ -363,6 +434,85 @@ runner.check(channelBalanceAccounts.count == 2, "NewAPI channel list should deco
 runner.check(channelBalanceAccounts[0].amountText == "$12.35", "NewAPI channel balance should format to dollars")
 runner.check(channelBalanceAccounts[1].state == .warning, "disabled NewAPI channel should become a warning balance account")
 
+let sameCurrencySnapshot = BalanceMonitorSnapshot(
+    source: .newAPI,
+    panelState: .healthy,
+    accounts: [
+        BalanceAccount(
+            id: "cny-1",
+            source: .newAPI,
+            name: "CNY 1",
+            kind: "用户额度",
+            statusCode: nil,
+            amountText: "¥100.00",
+            usedText: nil,
+            requestCount: nil,
+            updatedAt: nil,
+            state: .healthy,
+            balanceAmount: 100,
+            balanceUnitKey: "CNY",
+            balanceUnitSymbol: "¥"
+        ),
+        BalanceAccount(
+            id: "cny-2",
+            source: .newAPI,
+            name: "CNY 2",
+            kind: "用户额度",
+            statusCode: nil,
+            amountText: "¥30.50",
+            usedText: nil,
+            requestCount: nil,
+            updatedAt: nil,
+            state: .healthy,
+            balanceAmount: 30.5,
+            balanceUnitKey: "CNY",
+            balanceUnitSymbol: "¥"
+        )
+    ],
+    message: nil,
+    lastUpdated: nil
+)
+runner.check(sameCurrencySnapshot.totalAmountText == "¥130.50", "same-currency balances should be summed")
+let mixedCurrencySnapshot = BalanceMonitorSnapshot(
+    source: .newAPI,
+    panelState: .healthy,
+    accounts: [
+        BalanceAccount(
+            id: "cny",
+            source: .newAPI,
+            name: "CNY",
+            kind: "用户额度",
+            statusCode: nil,
+            amountText: "¥100.00",
+            usedText: nil,
+            requestCount: nil,
+            updatedAt: nil,
+            state: .healthy,
+            balanceAmount: 100,
+            balanceUnitKey: "CNY",
+            balanceUnitSymbol: "¥"
+        ),
+        BalanceAccount(
+            id: "usd",
+            source: .newAPI,
+            name: "USD",
+            kind: "用户额度",
+            statusCode: nil,
+            amountText: "$10.00",
+            usedText: nil,
+            requestCount: nil,
+            updatedAt: nil,
+            state: .healthy,
+            balanceAmount: 10,
+            balanceUnitKey: "USD",
+            balanceUnitSymbol: "$"
+        )
+    ],
+    message: nil,
+    lastUpdated: nil
+)
+runner.check(mixedCurrencySnapshot.totalAmountText == "¥100.00 + $10.00", "two-currency totals should be grouped instead of converted")
+
 let subAPIProfilePayload = """
 {
   "code": 0,
@@ -406,6 +556,18 @@ let subAPIQuotaAccounts = try BalanceAPIClient.decodeSubAPIPlatformQuotaAccounts
 runner.check(subAPIQuotaAccounts.count == 1, "Sub2API platform quota list should decode")
 runner.check(subAPIQuotaAccounts[0].displayName == "openai", "Sub2API platform quota should use platform name")
 runner.check(subAPIQuotaAccounts[0].amountText == "$3.50", "Sub2API platform quota should display the most constrained remaining quota")
+let subAPIQuotaAccountsForA = try BalanceAPIClient.decodeSubAPIPlatformQuotaAccounts(
+    subAPIPlatformQuotaPayload,
+    accountID: "account-a",
+    accountLabel: "A"
+)
+let subAPIQuotaAccountsForB = try BalanceAPIClient.decodeSubAPIPlatformQuotaAccounts(
+    subAPIPlatformQuotaPayload,
+    accountID: "account-b",
+    accountLabel: "B"
+)
+runner.check(subAPIQuotaAccountsForA[0].id != subAPIQuotaAccountsForB[0].id, "Sub2API platform quota row ids should include the parent account id")
+runner.check(subAPIQuotaAccountsForA[0].displayName == "A · openai", "Sub2API platform quota display name should include account label when available")
 
 let failedBalanceEnvelope = """
 {
@@ -419,6 +581,9 @@ do {
 } catch {
     runner.check(!error.localizedDescription.lowercased().contains("sk-sensitive"), "NewAPI-compatible error messages should redact token-like secrets")
 }
+let redactedJSONError = DisplayRedactor.redact(#"{"password":"secret-password","access_token":"sensitive-access-token","message":"bad"}"#)
+runner.check(!redactedJSONError.contains("secret-password"), "redaction should hide JSON password values")
+runner.check(!redactedJSONError.contains("sensitive-access-token"), "redaction should hide JSON access tokens")
 
 let localURL = runner.require(
     CLIProxyAPIClient.managementBaseURL(from: "http://127.0.0.1:8317/management.html"),

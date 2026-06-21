@@ -227,7 +227,7 @@ enum NotchDisplaySource: String, CaseIterable, Identifiable, Equatable {
     }
 }
 
-enum BalanceMonitorSource: String, CaseIterable, Identifiable, Equatable {
+enum BalanceMonitorSource: String, CaseIterable, Identifiable, Equatable, Codable {
     case newAPI
     case subAPI
 
