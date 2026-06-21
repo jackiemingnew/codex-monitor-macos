@@ -23,6 +23,9 @@ final class TestRunner {
 
 let runner = TestRunner()
 
+runner.check(AppInfo.version == "0.1.0", "app info should expose version 0.1.0")
+runner.check(AppInfo.displayVersion == "0.1.0", "app info should fall back to source version when bundle version is unavailable")
+
 final class FakeLaunchAtLoginManager: LaunchAtLoginManaging {
     var isEnabled: Bool
 

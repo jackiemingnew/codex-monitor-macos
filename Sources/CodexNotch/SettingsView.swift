@@ -49,6 +49,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
     case newAPI
     case subAPI
     case launch
+    case about
 
     var id: String { rawValue }
 
@@ -64,6 +65,8 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
             "Sub2API"
         case .launch:
             "启动与外观"
+        case .about:
+            "关于"
         }
     }
 
@@ -79,6 +82,8 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
             "person.2.fill"
         case .launch:
             "gearshape.fill"
+        case .about:
+            "info.circle.fill"
         }
     }
 }
@@ -368,6 +373,8 @@ struct SettingsView: View {
             )
         case .launch:
             launchAndAppearanceContent
+        case .about:
+            aboutContent
         }
     }
 
@@ -512,6 +519,53 @@ struct SettingsView: View {
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.red.opacity(0.85))
             }
+        }
+    }
+
+    private var aboutContent: some View {
+        Section("关于 codex监测") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .center, spacing: 12) {
+                    AppLogoMark(size: 48)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("codex监测")
+                            .font(.system(size: 18, weight: .bold))
+                        Text("Mac 刘海屏上的 Codex 与远程账号监测工具")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+                }
+
+                Divider()
+
+                infoRow(title: "版本", value: AppInfo.displayVersion)
+                infoRow(title: "本机监测", value: "Codex 运行状态、额度和 token 用量")
+                infoRow(title: "远程监测", value: "CLIProxyAPI、CPA Manager Plus、NewAPI、Sub2API")
+
+                Text("codex监测会读取本机 Codex 数据文件，也可以按需连接你配置的远程面板。请勿将真实密钥、账号密码或本机密钥数据库提交到公开仓库。")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 2)
+            }
+            .padding(.vertical, 4)
+        }
+    }
+
+    private func infoRow(title: String, value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 72, alignment: .leading)
+            Text(value)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.primary)
+                .textSelection(.enabled)
+            Spacer()
         }
     }
 
@@ -1421,7 +1475,7 @@ struct SettingsView: View {
 
     private func refreshSelectedTab() {
         switch selectedTab {
-        case .codex, .launch:
+        case .codex, .launch, .about:
             onRefresh()
         case .remoteCodex:
             remoteViewModel.refreshNow()
@@ -1465,6 +1519,54 @@ struct SettingsView: View {
         return account.secret
     }
 
+}
+
+private struct AppLogoMark: View {
+    let size: CGFloat
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color(red: 0.01, green: 0.012, blue: 0.015),
+                            Color(red: 0.035, green: 0.045, blue: 0.055)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+
+            Capsule()
+                .fill(Color.black.opacity(0.94))
+                .frame(width: size * 0.70, height: size * 0.40)
+
+            Circle()
+                .fill(Color(red: 0.20, green: 1.0, blue: 0.45))
+                .frame(width: size * 0.115, height: size * 0.115)
+                .shadow(color: Color(red: 0.20, green: 1.0, blue: 0.45).opacity(0.5), radius: size * 0.08)
+                .offset(x: -size * 0.22)
+
+            Path { path in
+                path.move(to: CGPoint(x: size * 0.46, y: size * 0.50))
+                path.addLine(to: CGPoint(x: size * 0.54, y: size * 0.50))
+                path.addLine(to: CGPoint(x: size * 0.60, y: size * 0.40))
+                path.addLine(to: CGPoint(x: size * 0.67, y: size * 0.61))
+                path.addLine(to: CGPoint(x: size * 0.76, y: size * 0.50))
+            }
+            .stroke(
+                Color(red: 0.30, green: 0.74, blue: 1.0),
+                style: StrokeStyle(lineWidth: max(1.5, size * 0.032), lineCap: .round, lineJoin: .round)
+            )
+
+            Rectangle()
+                .fill(Color(red: 0.0, green: 0.55, blue: 0.78))
+                .frame(width: size * 0.64, height: max(1, size * 0.018))
+                .offset(y: size * 0.28)
+        }
+        .frame(width: size, height: size)
+    }
 }
 
 private struct HelpLabel: View {
