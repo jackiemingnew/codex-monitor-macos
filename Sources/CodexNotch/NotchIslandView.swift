@@ -68,7 +68,7 @@ struct NotchIslandView: View {
                 viewModel.refreshAll()
             }
             Divider()
-            Button("退出 Codex 刘海") {
+            Button("退出 codex监测") {
                 NSApp.terminate(nil)
             }
         }

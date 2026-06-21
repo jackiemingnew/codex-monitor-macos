@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-APP_NAME="Codex Notch"
+APP_NAME="codex监测"
 BUNDLE_ID="com.alight.codexnotch"
 BUILD_DIR="$ROOT_DIR/.build/release"
 DIST_DIR="$ROOT_DIR/dist"
@@ -52,7 +52,7 @@ PLIST
 
 codesign --force --deep --sign - "$APP_DIR"
 
-rm -rf "$DMG_STAGE_DIR/$APP_NAME.app"
+rm -rf "$DMG_STAGE_DIR"
 mkdir -p "$DMG_STAGE_DIR"
 ditto "$APP_DIR" "$DMG_STAGE_DIR/$APP_NAME.app"
 hdiutil create -volname "$APP_NAME" -srcfolder "$DMG_STAGE_DIR" -ov -format UDZO "$DMG_PATH"

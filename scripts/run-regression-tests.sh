@@ -6,7 +6,7 @@ BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/codex-notch-regression.XXXXXX")"
 trap 'rm -rf "${BUILD_DIR}"' EXIT
 
 if [[ ! -x /usr/bin/sqlite3 ]]; then
-  echo "Missing /usr/bin/sqlite3, cannot run Codex Notch regression tests" >&2
+  echo "Missing /usr/bin/sqlite3, cannot run codex监测 regression tests" >&2
   exit 1
 fi
 

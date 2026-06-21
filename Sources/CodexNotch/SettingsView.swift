@@ -286,11 +286,8 @@ struct SettingsView: View {
     private var header: some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Codex 刘海设置")
+                Text("codex监测设置")
                     .font(.system(size: 18, weight: .bold))
-                Text("调整刷新、数据来源和启动行为")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
             }
 
             Spacer()
@@ -483,7 +480,7 @@ struct SettingsView: View {
 
         Section("启动与外观") {
             Toggle(isOn: $draft.launchAtLoginEnabled) {
-                HelpLabel(title: "开机自启", help: "登录 macOS 后自动启动 Codex 刘海。保存时才会调用系统启动项接口。")
+                HelpLabel(title: "开机自启", help: "登录 macOS 后自动启动 codex监测。保存时才会调用系统启动项接口。")
             }
             Toggle(isOn: $draft.enablePulse) {
                 HelpLabel(title: "运行指示灯动画", help: "控制运行中状态点和外部提醒状态点是否带轻微呼吸动画。关闭可进一步降低功耗。")
@@ -593,7 +590,6 @@ struct SettingsView: View {
                 .disabled(!enabled.wrappedValue)
 
             thresholdsEditor(
-                title: "默认阈值",
                 warning: Binding(
                     get: { defaultThresholds.wrappedValue.warningThreshold },
                     set: { defaultThresholds.wrappedValue.warningThreshold = $0 }
@@ -602,7 +598,7 @@ struct SettingsView: View {
                     get: { defaultThresholds.wrappedValue.alertThreshold },
                     set: { defaultThresholds.wrappedValue.alertThreshold = $0 }
                 ),
-                help: "账号没有单独设置阈值时使用这里的值。余额低于提醒阈值显示黄灯，低于告警阈值显示红灯。"
+                footnote: "留空表示不启用对应提醒。账号自定义阈值会覆盖默认阈值。"
             )
             .disabled(!enabled.wrappedValue)
 
@@ -840,10 +836,9 @@ struct SettingsView: View {
 
                         if !accountEditorDraft.usesDefaultThresholds {
                             thresholdsEditor(
-                                title: "账号阈值",
                                 warning: $accountEditorDraft.warningThreshold,
                                 alert: $accountEditorDraft.alertThreshold,
-                                help: "用于覆盖默认阈值。适合消费量差异较大的账号单独设置。"
+                                footnote: "留空表示不启用对应提醒。"
                             )
                         }
                     }
@@ -890,20 +885,18 @@ struct SettingsView: View {
     }
 
     private func thresholdsEditor(
-        title: String,
         warning: Binding<Double?>,
         alert: Binding<Double?>,
-        help: String
+        footnote: String
     ) -> some View {
         let validationMessage = BalanceThresholdConfiguration(
             warningThreshold: warning.wrappedValue,
             alertThreshold: alert.wrappedValue
         ).orderValidationMessage
         return VStack(alignment: .leading, spacing: 8) {
-            HelpLabel(title: title, help: help)
             thresholdFieldRow("提醒阈值", value: warning, help: "余额低于这个值时显示黄灯提醒。")
             thresholdFieldRow("告警阈值", value: alert, help: "余额低于这个值时显示红灯告警。必须小于提醒阈值。")
-            Text(validationMessage ?? "留空表示不启用对应提醒。账号自定义阈值会覆盖默认阈值。")
+            Text(validationMessage ?? footnote)
                 .font(.system(size: 10.5, weight: .medium))
                 .foregroundStyle(validationMessage == nil ? Color.secondary : Color.red)
         }

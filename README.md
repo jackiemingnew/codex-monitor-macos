@@ -1,6 +1,6 @@
-# Codex Notch
+# codex监测
 
-Codex Notch is a small native macOS overlay that sits around the MacBook notch like a compact dynamic island.
+codex监测 is a small native macOS overlay that sits around the MacBook notch like a compact dynamic island.
 
 It shows:
 
@@ -23,7 +23,7 @@ Click the island to expand or collapse it. Right-click it to refresh or quit.
 
 ```bash
 ./scripts/build-app.sh
-open "dist/Codex Notch.app"
+open "dist/codex监测.app"
 ```
 
 The bundled app is an accessory app (`LSUIElement=true`), so it does not show a Dock icon.

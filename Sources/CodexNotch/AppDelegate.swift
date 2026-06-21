@@ -23,7 +23,7 @@ struct CodexNotchApp {
         let delegate = AppDelegate()
         app.delegate = delegate
         app.setActivationPolicy(.accessory)
-        ProcessInfo.processInfo.disableAutomaticTermination("Codex Notch runs as a persistent notch overlay")
+        ProcessInfo.processInfo.disableAutomaticTermination("codex监测 runs as a persistent notch overlay")
         app.run()
     }
 }
@@ -46,8 +46,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let appItem = NSMenuItem()
         mainMenu.addItem(appItem)
-        let appMenu = NSMenu(title: "Codex Notch")
-        appMenu.addItem(withTitle: "退出 Codex 刘海", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let appMenu = NSMenu(title: "codex监测")
+        appMenu.addItem(withTitle: "退出 codex监测", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
 
         let editItem = NSMenuItem()
@@ -443,7 +443,7 @@ final class SettingsWindowController {
             backing: .buffered,
             defer: false
         )
-        window.title = "Codex 刘海设置"
+        window.title = "codex监测设置"
         window.contentView = hostingView
         window.isReleasedWhenClosed = false
         return window
