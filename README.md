@@ -158,10 +158,24 @@ dist/codex-monitor-0.1.0-amd64.dmg
 .build/release/CodexNotch --print-snapshot
 ```
 
+该输出是人类可读格式，`task=` 行保持兼容：最后一列仍为 token 数。
+
 打印快速快照：
 
 ```bash
 .build/release/CodexNotch --print-fast-snapshot
+```
+
+打印稳定 JSON 快照，包含每个任务的 `subagents` 活跃子代理数量：
+
+```bash
+.build/release/CodexNotch --print-snapshot-json
+```
+
+快速 JSON 快照：
+
+```bash
+.build/release/CodexNotch --print-fast-snapshot-json
 ```
 
 运行回归测试：
@@ -342,10 +356,24 @@ Print a full local snapshot:
 .build/release/CodexNotch --print-snapshot
 ```
 
+This is human-readable output. For compatibility, `task=` lines still end with the token count.
+
 Print a fast local snapshot:
 
 ```bash
 .build/release/CodexNotch --print-fast-snapshot
+```
+
+Print a stable JSON snapshot, including each task's `subagents` active subagent count:
+
+```bash
+.build/release/CodexNotch --print-snapshot-json
+```
+
+Print a fast JSON snapshot:
+
+```bash
+.build/release/CodexNotch --print-fast-snapshot-json
 ```
 
 Run regression tests:

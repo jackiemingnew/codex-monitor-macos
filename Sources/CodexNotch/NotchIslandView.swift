@@ -894,8 +894,8 @@ private struct TaskRow: View {
 
                 Spacer(minLength: 8)
 
-                if task.activeSubagentCount > 0 {
-                    Text("子代理 \(task.activeSubagentCount)")
+                if let badgeText = TaskBadgeFormatter.subagentBadgeText(for: task.activeSubagentCount) {
+                    Text(badgeText)
                         .font(.system(size: 9, weight: .bold, design: .rounded))
                         .foregroundStyle(Color(red: 0.61, green: 0.95, blue: 0.68))
                         .lineLimit(1)

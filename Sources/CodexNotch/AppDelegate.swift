@@ -5,16 +5,19 @@ import SwiftUI
 @main
 struct CodexNotchApp {
     static func main() {
-        if CommandLine.arguments.contains("--print-snapshot") || CommandLine.arguments.contains("--print-fast-snapshot") {
-            let includePeriodUsage = !CommandLine.arguments.contains("--print-fast-snapshot")
+        let arguments = CommandLine.arguments
+        let shouldPrintHumanSnapshot = arguments.contains("--print-snapshot") || arguments.contains("--print-fast-snapshot")
+        let shouldPrintJSONSnapshot = arguments.contains("--print-snapshot-json") || arguments.contains("--print-fast-snapshot-json")
+        if shouldPrintHumanSnapshot || shouldPrintJSONSnapshot {
+            let includePeriodUsage = !(arguments.contains("--print-fast-snapshot") || arguments.contains("--print-fast-snapshot-json"))
             let snapshot = CodexUsageStore().loadSnapshot(includePeriodUsage: includePeriodUsage)
-            print("primary=\(Formatters.percent(snapshot.primaryPercent)) secondary=\(Formatters.percent(snapshot.secondaryPercent)) running=\(snapshot.isRunning)")
-            print("usage24h=\(snapshot.usage24h) usage7d=\(snapshot.usage7d) usage30d=\(snapshot.usage30d)")
-            for task in snapshot.tasks.prefix(4) {
-                print("task=\(task.status.label) \(task.title) \(task.tokenCount) subagents=\(task.activeSubagentCount)")
-            }
-            if let error = snapshot.errorMessage {
-                print("error=\(error)")
+            if shouldPrintJSONSnapshot {
+                FileHandle.standardOutput.write(SnapshotOutputFormatter.jsonData(for: snapshot))
+                FileHandle.standardOutput.write(Data("\n".utf8))
+            } else {
+                for line in SnapshotOutputFormatter.humanLines(for: snapshot) {
+                    print(line)
+                }
             }
             return
         }

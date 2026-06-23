@@ -26,6 +26,52 @@ let runner = TestRunner()
 runner.check(AppInfo.version == "0.1.0", "app info should expose version 0.1.0")
 runner.check(AppInfo.displayVersion == "0.1.0", "app info should fall back to source version when bundle version is unavailable")
 
+let snapshotFormatterTask = CodexTask(
+    id: "snapshot-task",
+    title: "父任务",
+    status: .running,
+    detail: "gpt-5.5 · 高推理",
+    tokenCount: 12345,
+    updatedAt: Date(timeIntervalSince1970: 0),
+    activeSubagentCount: 3
+)
+let snapshotFormatterSnapshot = UsageSnapshot(
+    primaryPercent: 88,
+    secondaryPercent: 66,
+    usage24h: 111,
+    usage7d: 222,
+    usage30d: 333,
+    tasks: [snapshotFormatterTask],
+    isRunning: true,
+    lastUpdated: Date(timeIntervalSince1970: 0),
+    errorMessage: nil
+)
+let humanSnapshotLines = SnapshotOutputFormatter.humanLines(for: snapshotFormatterSnapshot)
+runner.check(
+    humanSnapshotLines.contains("task=运行中 父任务 12345"),
+    "human snapshot task line should preserve the token count as the final field"
+)
+runner.check(
+    !humanSnapshotLines.contains { $0.contains("subagents=") },
+    "human snapshot output should not append subagent fields to task lines"
+)
+let jsonSnapshot = try JSONSerialization.jsonObject(
+    with: SnapshotOutputFormatter.jsonData(for: snapshotFormatterSnapshot)
+) as? [String: Any]
+let jsonSnapshotTasks = jsonSnapshot?["tasks"] as? [[String: Any]]
+runner.check(
+    jsonSnapshotTasks?.first?["subagents"] as? Int == 3,
+    "JSON snapshot output should expose active subagent counts"
+)
+runner.check(
+    TaskBadgeFormatter.subagentBadgeText(for: 3) == "子代理 3",
+    "task row subagent badge should use compact text"
+)
+runner.check(
+    TaskBadgeFormatter.subagentBadgeText(for: 0) == nil,
+    "task row subagent badge should stay hidden for zero active subagents"
+)
+
 final class FakeLaunchAtLoginManager: LaunchAtLoginManaging {
     var isEnabled: Bool
 
