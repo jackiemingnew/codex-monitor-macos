@@ -11,7 +11,7 @@ struct CodexNotchApp {
             print("primary=\(Formatters.percent(snapshot.primaryPercent)) secondary=\(Formatters.percent(snapshot.secondaryPercent)) running=\(snapshot.isRunning)")
             print("usage24h=\(snapshot.usage24h) usage7d=\(snapshot.usage7d) usage30d=\(snapshot.usage30d)")
             for task in snapshot.tasks.prefix(4) {
-                print("task=\(task.status.label) \(task.title) \(task.tokenCount)")
+                print("task=\(task.status.label) \(task.title) \(task.tokenCount) subagents=\(task.activeSubagentCount)")
             }
             if let error = snapshot.errorMessage {
                 print("error=\(error)")

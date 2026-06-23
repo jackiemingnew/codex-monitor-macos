@@ -895,10 +895,12 @@ private struct TaskRow: View {
                 Spacer(minLength: 8)
 
                 if task.activeSubagentCount > 0 {
-                    Text("活跃子代理 \(task.activeSubagentCount)")
+                    Text("子代理 \(task.activeSubagentCount)")
                         .font(.system(size: 9, weight: .bold, design: .rounded))
                         .foregroundStyle(Color(red: 0.61, green: 0.95, blue: 0.68))
                         .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .layoutPriority(2)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 2)
                         .background(
@@ -910,6 +912,7 @@ private struct TaskRow: View {
                 Text(Formatters.compactTokens(task.tokenCount))
                     .font(.system(size: 10, weight: .semibold, design: .rounded))
                     .foregroundStyle(.white.opacity(0.66))
+                    .fixedSize(horizontal: true, vertical: false)
             }
         }
         .padding(.horizontal, 10)
