@@ -91,7 +91,7 @@ final class NotchOverlayController {
     private lazy var subAPIViewModel = BalanceMonitorViewModel(source: .subAPI, settings: settings)
     private let overlayState = OverlayState()
     private let window: NSPanel
-    private let detailWindow: NSPanel
+    private var detailWindow: NSPanel?
     private lazy var settingsController = SettingsWindowController(
         settings: settings,
         remoteViewModel: remoteViewModel,
@@ -107,12 +107,6 @@ final class NotchOverlayController {
     init() {
         window = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: IslandMetrics.width, height: IslandMetrics.collapsedHeight),
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: false
-        )
-        detailWindow = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: IslandMetrics.width, height: IslandMetrics.detailHeight),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -143,19 +137,6 @@ final class NotchOverlayController {
             .stationary,
             .ignoresCycle
         ]
-
-        detailWindow.backgroundColor = .clear
-        detailWindow.isOpaque = false
-        detailWindow.hasShadow = false
-        detailWindow.level = .statusBar
-        detailWindow.ignoresMouseEvents = false
-        detailWindow.isMovableByWindowBackground = false
-        detailWindow.collectionBehavior = [
-            .canJoinAllSpaces,
-            .fullScreenAuxiliary,
-            .stationary,
-            .ignoresCycle
-        ]
     }
 
     private func configureContent() {
@@ -175,6 +156,31 @@ final class NotchOverlayController {
         hostingView.wantsLayer = true
         hostingView.layer?.backgroundColor = NSColor.clear.cgColor
         window.contentView = hostingView
+    }
+
+    private func ensureDetailWindow() -> NSPanel {
+        if let detailWindow {
+            return detailWindow
+        }
+
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: IslandMetrics.width, height: currentDetailHeight),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.hasShadow = false
+        panel.level = .statusBar
+        panel.ignoresMouseEvents = false
+        panel.isMovableByWindowBackground = false
+        panel.collectionBehavior = [
+            .canJoinAllSpaces,
+            .fullScreenAuxiliary,
+            .stationary,
+            .ignoresCycle
+        ]
 
         let detailView = DetailPanelView(
             viewModel: viewModel,
@@ -202,7 +208,9 @@ final class NotchOverlayController {
         detailHostingView.frame = NSRect(x: 0, y: 0, width: IslandMetrics.width, height: currentDetailHeight)
         detailHostingView.wantsLayer = true
         detailHostingView.layer?.backgroundColor = NSColor.clear.cgColor
-        detailWindow.contentView = detailHostingView
+        panel.contentView = detailHostingView
+        detailWindow = panel
+        return panel
     }
 
     private func observeState() {
@@ -307,23 +315,43 @@ final class NotchOverlayController {
         }
 
         let location = NSEvent.mouseLocation
-        if window.frame.contains(location) || detailWindow.frame.contains(location) {
+        if window.frame.contains(location) || detailWindow?.frame.contains(location) == true {
             return
         }
         overlayState.isExpanded = false
     }
 
     private func setDetailVisible(_ visible: Bool) {
+        viewModel.setDetailVisible(visible)
         updateFrames()
         if visible {
+            let detailWindow = ensureDetailWindow()
+            updateFrames()
+            refreshDetailData()
             if window.childWindows?.contains(detailWindow) != true {
                 window.addChildWindow(detailWindow, ordered: .below)
             }
             detailWindow.order(.below, relativeTo: window.windowNumber)
             window.orderFrontRegardless()
         } else {
-            window.removeChildWindow(detailWindow)
-            detailWindow.orderOut(nil)
+            if let detailWindow {
+                window.removeChildWindow(detailWindow)
+                detailWindow.orderOut(nil)
+            }
+        }
+    }
+
+    private func refreshDetailData() {
+        viewModel.refreshAll()
+
+        if settings.remoteMonitorEnabled {
+            remoteViewModel.refreshNow()
+        }
+        if settings.newAPIMonitorEnabled {
+            newAPIViewModel.refreshNow()
+        }
+        if settings.subAPIMonitorEnabled {
+            subAPIViewModel.refreshNow()
         }
     }
 
@@ -332,6 +360,7 @@ final class NotchOverlayController {
             return
         }
 
+        let detailWindow = ensureDetailWindow()
         if window.childWindows?.contains(detailWindow) != true {
             window.addChildWindow(detailWindow, ordered: .below)
         }
@@ -340,11 +369,11 @@ final class NotchOverlayController {
     }
 
     private func updateFrames() {
-        guard let screen = NSScreen.main ?? NSScreen.screens.first else {
+        guard let screen = primaryDisplayScreen() ?? NSScreen.screens.first else {
             return
         }
 
-        let detailHeight = currentDetailHeight
+        let detailHeight = detailWindow == nil && !overlayState.isExpanded ? localDetailHeight : currentDetailHeight
         let x = screen.frame.midX - IslandMetrics.width / 2
         let islandY = screen.frame.maxY - IslandMetrics.collapsedHeight
         let islandFrame = NSRect(x: x, y: islandY, width: IslandMetrics.width, height: IslandMetrics.collapsedHeight)
@@ -357,8 +386,18 @@ final class NotchOverlayController {
 
         window.setFrame(islandFrame, display: true, animate: false)
         window.contentView?.frame = NSRect(x: 0, y: 0, width: IslandMetrics.width, height: IslandMetrics.collapsedHeight)
-        detailWindow.setFrame(detailFrame, display: true, animate: false)
-        detailWindow.contentView?.frame = NSRect(x: 0, y: 0, width: IslandMetrics.width, height: detailHeight)
+        detailWindow?.setFrame(detailFrame, display: true, animate: false)
+        detailWindow?.contentView?.frame = NSRect(x: 0, y: 0, width: IslandMetrics.width, height: detailHeight)
+    }
+
+    private func primaryDisplayScreen() -> NSScreen? {
+        let primaryDisplayID = CGMainDisplayID()
+        return NSScreen.screens.first { screen in
+            guard let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+                return false
+            }
+            return screenNumber.uint32Value == primaryDisplayID
+        }
     }
 
     private func showSettings() {
@@ -382,10 +421,7 @@ final class NotchOverlayController {
     }
 
     private var currentDetailHeight: CGFloat {
-        let localHeight = IslandMetrics.detailHeight(
-            taskRows: IslandMetrics.visibleTaskRows,
-            showsPeriodUsage: settings.showPeriodUsage
-        )
+        let localHeight = localDetailHeight
         let enabledExternalRows = [
             settings.remoteMonitorEnabled ? remoteViewModel.snapshot.accounts.count : nil,
             settings.newAPIMonitorEnabled ? newAPIViewModel.snapshot.accounts.count : nil,
@@ -397,6 +433,13 @@ final class NotchOverlayController {
         }
         let remoteRows = max(1, enabledExternalRows.max() ?? 1)
         return max(localHeight, IslandMetrics.remoteDetailHeight(accountRows: remoteRows))
+    }
+
+    private var localDetailHeight: CGFloat {
+        IslandMetrics.detailHeight(
+            taskRows: IslandMetrics.visibleTaskRows,
+            showsPeriodUsage: settings.showPeriodUsage
+        )
     }
 }
 

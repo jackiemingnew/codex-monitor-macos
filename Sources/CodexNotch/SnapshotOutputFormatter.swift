@@ -10,11 +10,17 @@ enum SnapshotOutputFormatter {
     static func humanLines(for snapshot: UsageSnapshot, taskLimit: Int = 4) -> [String] {
         var lines = [
             "primary=\(Formatters.percent(snapshot.primaryPercent)) secondary=\(Formatters.percent(snapshot.secondaryPercent)) running=\(snapshot.isRunning)",
-            "usage24h=\(snapshot.usage24h) usage7d=\(snapshot.usage7d) usage30d=\(snapshot.usage30d)"
+            "usage24h=\(snapshot.usage24h) usage7d=\(snapshot.usage7d) usage30d=\(snapshot.usage30d)",
+            "monitor snapshot_ms=\(optionalInt(snapshot.monitorStats.lastSnapshotDurationMs)) usage_ms=\(optionalInt(snapshot.monitorStats.lastUsageDurationMs)) delta_ms=\(optionalInt(snapshot.monitorStats.lastDeltaDurationMs)) rate=\(snapshot.monitorStats.lastRateLimitSource) watched=\(snapshot.monitorStats.watchedPathCount) context_scans=\(snapshot.monitorStats.jsonlContextScans) model_tokens=\(snapshot.monitorStats.monitorModelTokens)"
         ]
 
         for task in snapshot.tasks.prefix(taskLimit) {
-            lines.append("task=\(task.status.label) \(task.title) \(task.tokenCount)")
+            lines.append(
+                "task=\(task.status.label) \(task.title) \(task.tokenCount) "
+                    + "delta10m=\(Formatters.signedCompactTokens(task.delta10mTokens)) "
+                    + "delta1h=\(Formatters.signedCompactTokens(task.delta1hTokens)) "
+                    + "ctx=\(Formatters.compactTokenRatio(task.contextInputTokens, task.contextWindowTokens))"
+            )
         }
 
         if let error = snapshot.errorMessage {
@@ -34,12 +40,17 @@ enum SnapshotOutputFormatter {
             usage30d: snapshot.usage30d,
             lastUpdated: ISO8601DateFormatter().string(from: snapshot.lastUpdated),
             error: snapshot.errorMessage,
+            monitor: SnapshotMonitorJSON(stats: snapshot.monitorStats),
             tasks: snapshot.tasks.prefix(taskLimit).map(SnapshotTaskJSON.init(task:))
         )
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         return (try? encoder.encode(payload)) ?? Data(#"{"error":"Unable to encode snapshot"}"#.utf8)
+    }
+
+    private static func optionalInt(_ value: Int?) -> String {
+        value.map(String.init) ?? "--"
     }
 }
 
@@ -52,6 +63,7 @@ private struct SnapshotJSON: Encodable {
     let usage30d: Int
     let lastUpdated: String
     let error: String?
+    let monitor: SnapshotMonitorJSON
     let tasks: [SnapshotTaskJSON]
 
     enum CodingKeys: String, CodingKey {
@@ -63,7 +75,38 @@ private struct SnapshotJSON: Encodable {
         case usage30d = "usage_30d"
         case lastUpdated = "last_updated"
         case error
+        case monitor
         case tasks
+    }
+}
+
+private struct SnapshotMonitorJSON: Encodable {
+    let lastSnapshotDurationMs: Int?
+    let lastUsageDurationMs: Int?
+    let lastDeltaDurationMs: Int?
+    let lastRateLimitSource: String
+    let watchedPathCount: Int
+    let jsonlContextScans: Int
+    let monitorModelTokens: Int
+
+    init(stats: MonitorPerformanceStats) {
+        self.lastSnapshotDurationMs = stats.lastSnapshotDurationMs
+        self.lastUsageDurationMs = stats.lastUsageDurationMs
+        self.lastDeltaDurationMs = stats.lastDeltaDurationMs
+        self.lastRateLimitSource = stats.lastRateLimitSource
+        self.watchedPathCount = stats.watchedPathCount
+        self.jsonlContextScans = stats.jsonlContextScans
+        self.monitorModelTokens = stats.monitorModelTokens
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case lastSnapshotDurationMs = "last_snapshot_duration_ms"
+        case lastUsageDurationMs = "last_usage_duration_ms"
+        case lastDeltaDurationMs = "last_delta_duration_ms"
+        case lastRateLimitSource = "last_rate_limit_source"
+        case watchedPathCount = "watched_path_count"
+        case jsonlContextScans = "jsonl_context_scans"
+        case monitorModelTokens = "monitor_model_tokens"
     }
 }
 
@@ -75,6 +118,12 @@ private struct SnapshotTaskJSON: Encodable {
     let detail: String
     let tokens: Int
     let subagents: Int
+    let delta10mTokens: Int?
+    let delta1hTokens: Int?
+    let contextInputTokens: Int?
+    let contextWindowTokens: Int?
+    let contextPercent: Double?
+    let contextUpdatedAt: String?
     let updatedAt: String
 
     init(task: CodexTask) {
@@ -85,6 +134,12 @@ private struct SnapshotTaskJSON: Encodable {
         self.detail = task.detail
         self.tokens = task.tokenCount
         self.subagents = task.activeSubagentCount
+        self.delta10mTokens = task.delta10mTokens
+        self.delta1hTokens = task.delta1hTokens
+        self.contextInputTokens = task.contextInputTokens
+        self.contextWindowTokens = task.contextWindowTokens
+        self.contextPercent = task.contextPercent
+        self.contextUpdatedAt = task.contextUpdatedAt.map { ISO8601DateFormatter().string(from: $0) }
         self.updatedAt = ISO8601DateFormatter().string(from: task.updatedAt)
     }
 
@@ -96,6 +151,12 @@ private struct SnapshotTaskJSON: Encodable {
         case detail
         case tokens
         case subagents
+        case delta10mTokens = "delta_10m_tokens"
+        case delta1hTokens = "delta_1h_tokens"
+        case contextInputTokens = "context_input_tokens"
+        case contextWindowTokens = "context_window_tokens"
+        case contextPercent = "context_percent"
+        case contextUpdatedAt = "context_updated_at"
         case updatedAt = "updated_at"
     }
 }

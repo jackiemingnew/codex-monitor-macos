@@ -30,6 +30,22 @@ private struct CollapsedMetric: Identifiable {
     let color: Color
 }
 
+private enum MonitorTheme {
+    static let panelFill = Color(red: 0.15, green: 0.18, blue: 0.20)
+    static let panelStroke = Color.white.opacity(0.14)
+    static let sectionFill = Color.white.opacity(0.055)
+    static let rowFill = Color.white.opacity(0.036)
+    static let rowSelectedFill = Color.white.opacity(0.105)
+    static let separator = Color.white.opacity(0.105)
+    static let textPrimary = Color.white.opacity(0.92)
+    static let textSecondary = Color.white.opacity(0.58)
+    static let textTertiary = Color.white.opacity(0.40)
+    static let healthy = Color(red: 0.34, green: 0.92, blue: 0.46)
+    static let running = Color(red: 0.44, green: 0.86, blue: 0.92)
+    static let warning = Color(red: 1.0, green: 0.70, blue: 0.28)
+    static let critical = Color(red: 1.0, green: 0.38, blue: 0.38)
+}
+
 struct NotchIslandView: View {
     @ObservedObject var viewModel: UsageViewModel
     @ObservedObject var remoteViewModel: RemoteMonitorViewModel
@@ -78,36 +94,43 @@ struct NotchIslandView: View {
     }
 
     private var islandBackground: some View {
-        BottomRoundedRectangle(radius: 21)
-            .fill(Color.black.opacity(0.985))
+        RoundedRectangle(cornerRadius: 15, style: .continuous)
+            .fill(
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.20, green: 0.24, blue: 0.28).opacity(0.92),
+                        Color(red: 0.09, green: 0.10, blue: 0.12).opacity(0.96)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
             .frame(
-                width: IslandMetrics.width,
-                height: IslandMetrics.collapsedHeight,
+                width: IslandMetrics.collapsedPillWidth,
+                height: IslandMetrics.collapsedHeight - 8,
                 alignment: .top
             )
-            .overlay(alignment: .top) {
-                centerNotchMask
+            .overlay {
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .stroke(MonitorTheme.panelStroke, lineWidth: 1)
             }
-    }
-
-    private var centerNotchMask: some View {
-        BottomRoundedRectangle(radius: 20)
-            .fill(Color.black)
-            .frame(width: IslandMetrics.notchWidth, height: IslandMetrics.collapsedHeight)
-            .offset(x: 0, y: 0)
+            .shadow(color: .black.opacity(0.26), radius: 12, x: 0, y: 5)
+            .padding(.top, 4)
     }
 
     private var collapsedContent: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: 10) {
             statusBlock
-                .frame(width: IslandMetrics.shoulderWidth, height: IslandMetrics.collapsedHeight - 4)
-
-            Color.clear
-                .frame(width: IslandMetrics.notchWidth, height: IslandMetrics.collapsedHeight)
 
             rateLimitBlock
-                .frame(width: IslandMetrics.shoulderWidth, height: IslandMetrics.collapsedHeight - 4)
         }
+        .padding(.horizontal, 13)
+        .padding(.top, 4)
+        .frame(
+            width: IslandMetrics.collapsedPillWidth,
+            height: IslandMetrics.collapsedHeight - 8,
+            alignment: .center
+        )
         .frame(width: IslandMetrics.width, height: IslandMetrics.collapsedHeight, alignment: .top)
     }
 
@@ -118,24 +141,22 @@ struct NotchIslandView: View {
             } else {
                 SeverityDot(severity: collapsedSeverity, pulse: pulse, enablePulse: settings.enablePulse)
             }
-            Text(collapsedTitle)
-                .font(.system(size: 10.2, weight: .bold))
+            Text(collapsedStateLabel)
+                .font(.system(size: 10.2, weight: .bold, design: .monospaced))
                 .foregroundStyle(collapsedTitleColor)
                 .lineLimit(1)
                 .minimumScaleFactor(0.72)
         }
-        .frame(maxWidth: .infinity, alignment: .trailing)
-        .padding(.trailing, 4)
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     private var rateLimitBlock: some View {
-        VStack(alignment: .leading, spacing: 1) {
+        HStack(spacing: 8) {
             ForEach(collapsedMetrics) { metric in
                 CollapsedMetricRow(metric: metric)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.leading, 4)
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     private var effectiveDisplaySource: NotchDisplaySource {
@@ -183,6 +204,13 @@ struct NotchIslandView: View {
         }
     }
 
+    private var collapsedStateLabel: String {
+        guard effectiveDisplaySource == .codex else {
+            return collapsedTitle
+        }
+        return snapshot.isRunning ? "RUN" : "IDLE"
+    }
+
     private var collapsedTitleColor: Color {
         if effectiveDisplaySource == .codex {
             return snapshot.isRunning ? .white.opacity(0.94) : .white.opacity(0.74)
@@ -213,25 +241,43 @@ struct NotchIslandView: View {
     private var collapsedMetrics: [CollapsedMetric] {
         switch effectiveDisplaySource {
         case .automatic, .codex:
-            return [
+            let currentTokens = snapshot.tasks.first?.tokenCount ?? 0
+            var metrics = [
                 CollapsedMetric(
                     id: "5h",
                     label: "5h",
                     value: Formatters.percent(snapshot.primaryPercent),
-                    color: Color(red: 0.61, green: 0.95, blue: 0.68)
+                    color: MonitorTheme.healthy
                 ),
                 CollapsedMetric(
                     id: "7d",
                     label: "7d",
                     value: Formatters.percent(snapshot.secondaryPercent),
-                    color: Color(red: 0.50, green: 0.78, blue: 1.00)
+                    color: MonitorTheme.running
+                ),
+                CollapsedMetric(
+                    id: "tok",
+                    label: "Tok",
+                    value: currentTokens > 0 ? Formatters.compactTokens(currentTokens) : "--",
+                    color: MonitorTheme.textPrimary
                 )
             ]
+            if let delta10m = snapshot.tasks.first?.delta10mTokens {
+                metrics.append(
+                    CollapsedMetric(
+                        id: "delta10m",
+                        label: "+10m",
+                        value: Formatters.signedCompactTokens(delta10m),
+                        color: delta10m > 0 ? MonitorTheme.running : MonitorTheme.textSecondary
+                    )
+                )
+            }
+            return metrics
         case .remoteCodex:
             let remote = remoteViewModel.snapshot
             return [
-                CollapsedMetric(id: "ok", label: "正", value: "\(remote.healthyCount)", color: Color(red: 0.61, green: 0.95, blue: 0.68)),
-                CollapsedMetric(id: "bad", label: "异", value: "\(remote.quotaCount + remote.abnormalCount)", color: collapsedSeverity == .error ? Color(red: 1.0, green: 0.28, blue: 0.30) : Color(red: 1.0, green: 0.55, blue: 0.25))
+                CollapsedMetric(id: "ok", label: "正", value: "\(remote.healthyCount)", color: MonitorTheme.healthy),
+                CollapsedMetric(id: "bad", label: "异", value: "\(remote.quotaCount + remote.abnormalCount)", color: collapsedSeverity == .error ? MonitorTheme.critical : MonitorTheme.warning)
             ]
         case .newAPI:
             return balanceCollapsedMetrics(newAPIViewModel.snapshot)
@@ -242,8 +288,8 @@ struct NotchIslandView: View {
 
     private func balanceCollapsedMetrics(_ snapshot: BalanceMonitorSnapshot) -> [CollapsedMetric] {
         [
-            CollapsedMetric(id: "\(snapshot.source.rawValue)-accounts", label: "账", value: "\(snapshot.accounts.count)", color: Color(red: 0.61, green: 0.95, blue: 0.68)),
-            CollapsedMetric(id: "\(snapshot.source.rawValue)-amount", label: "余", value: snapshot.totalAmountText, color: Color(red: 0.50, green: 0.78, blue: 1.00))
+            CollapsedMetric(id: "\(snapshot.source.rawValue)-accounts", label: "账", value: "\(snapshot.accounts.count)", color: MonitorTheme.healthy),
+            CollapsedMetric(id: "\(snapshot.source.rawValue)-amount", label: "余", value: snapshot.totalAmountText, color: MonitorTheme.running)
         ]
     }
 }
@@ -252,23 +298,18 @@ private struct CollapsedMetricRow: View {
     let metric: CollapsedMetric
 
     var body: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: 3) {
             Text(metric.label)
-                .frame(width: 16, alignment: .leading)
-                .foregroundStyle(.white.opacity(0.60))
-
-            Color.clear
-                .frame(width: 3)
+                .foregroundStyle(MonitorTheme.textTertiary)
 
             Text(metric.value)
-                .frame(width: 35, alignment: .trailing)
                 .foregroundStyle(metric.color)
                 .lineLimit(1)
                 .minimumScaleFactor(0.66)
         }
-        .font(.system(size: 9.0, weight: .bold, design: .rounded))
+        .font(.system(size: 9.4, weight: .bold, design: .monospaced))
         .monospacedDigit()
-        .frame(width: 54, alignment: .leading)
+        .fixedSize(horizontal: true, vertical: false)
     }
 }
 
@@ -292,7 +333,21 @@ struct DetailPanelView: View {
     var body: some View {
         ZStack(alignment: .top) {
             BottomRoundedRectangle(radius: 24)
-                .fill(Color.black.opacity(0.985))
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color(red: 0.26, green: 0.30, blue: 0.33).opacity(0.94),
+                            Color(red: 0.10, green: 0.12, blue: 0.14).opacity(0.98)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .overlay(
+                    BottomRoundedRectangle(radius: 24)
+                        .stroke(MonitorTheme.panelStroke, lineWidth: 1)
+                )
+                .shadow(color: .black.opacity(0.34), radius: 20, x: 0, y: 10)
 
             VStack(spacing: 10) {
                 header
@@ -357,17 +412,20 @@ struct DetailPanelView: View {
     private var header: some View {
         HStack(alignment: .center, spacing: 6) {
             Text(headerTitle)
-                .font(.system(size: 11, weight: .heavy))
-                .foregroundStyle(.white.opacity(0.82))
+                .font(.system(size: 16, weight: .heavy))
+                .foregroundStyle(MonitorTheme.textPrimary)
                 .lineLimit(1)
                 .frame(height: IslandMetrics.detailHeaderHeight, alignment: .center)
 
             Spacer()
 
             Text(headerStatus)
-                .font(.system(size: 10, weight: .bold))
+                .font(.system(size: 10.5, weight: .bold))
                 .foregroundStyle(headerStatusColor)
                 .lineLimit(1)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(headerStatusColor.opacity(0.13), in: Capsule())
                 .frame(height: IslandMetrics.detailHeaderHeight, alignment: .center)
 
             Button(action: refreshCurrentPage) {
@@ -390,7 +448,7 @@ struct DetailPanelView: View {
     private var headerTitle: String {
         switch selectedPage {
         case .codex:
-            snapshot.isRunning ? "正在运行" : "最近活动"
+            "Codex Monitor"
         case .remoteCodex:
             "CLIProxyAPI 账号"
         case .newAPI:
@@ -403,7 +461,7 @@ struct DetailPanelView: View {
     private var headerStatus: String {
         switch selectedPage {
         case .codex:
-            return snapshot.isRunning ? "\(snapshot.tasks.filter { $0.status == .running }.count) 个任务" : "空闲"
+            return snapshot.isRunning ? "Running" : "Idle"
         case .remoteCodex:
             if remoteViewModel.snapshot.usageUnavailableForSource {
                 return "仅账号"
@@ -422,7 +480,7 @@ struct DetailPanelView: View {
     private var headerStatusColor: Color {
         switch selectedPage {
         case .codex:
-            snapshot.isRunning ? Color(red: 0.61, green: 0.95, blue: 0.68) : .white.opacity(0.48)
+            snapshot.isRunning ? MonitorTheme.running : MonitorTheme.textTertiary
         case .remoteCodex:
             remoteStatusColor
         case .newAPI:
@@ -496,17 +554,17 @@ struct DetailPanelView: View {
                 } label: {
                     ZStack {
                         RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .fill(selectedPage == page ? Color.white.opacity(0.12) : Color.white.opacity(0.035))
+                            .fill(selectedPage == page ? Color.white.opacity(0.12) : Color.white.opacity(0.030))
 
                         Text(page.title)
-                            .font(.system(size: 10, weight: .bold))
+                            .font(.system(size: 10, weight: .bold, design: .rounded))
                     }
                     .frame(maxWidth: .infinity, minHeight: IslandMetrics.detailPageSwitcherHeight)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .frame(maxWidth: .infinity)
-                .foregroundStyle(selectedPage == page ? .white.opacity(0.92) : .white.opacity(0.48))
+                .foregroundStyle(selectedPage == page ? MonitorTheme.textPrimary : MonitorTheme.textSecondary)
             }
         }
         .frame(height: IslandMetrics.detailPageSwitcherHeight)
@@ -544,25 +602,145 @@ struct DetailPanelView: View {
     }
 
     private var localContent: some View {
-        VStack(spacing: 10) {
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(spacing: 7) {
-                    ForEach(displayedTasks) { task in
-                        TaskRow(task: task)
-                    }
-
-                    if displayedTasks.isEmpty {
-                        emptyState
-                    }
-                }
-            }
-            .frame(maxHeight: .infinity, alignment: .top)
+        VStack(spacing: 8) {
+            localQuotaStrip
+            localMetricStrip
+            localTaskTable
+                .frame(maxHeight: .infinity, alignment: .top)
 
             if settings.showPeriodUsage {
                 periodUsage
             }
         }
         .frame(maxHeight: .infinity, alignment: .bottom)
+    }
+
+    private var localQuotaStrip: some View {
+        HStack(spacing: 14) {
+            QuotaBarCell(
+                label: "5h Quota",
+                value: Formatters.percent(snapshot.primaryPercent),
+                percent: snapshot.primaryPercent,
+                color: quotaColor(for: snapshot.primaryPercent)
+            )
+            QuotaBarCell(
+                label: "7d Quota",
+                value: Formatters.percent(snapshot.secondaryPercent),
+                percent: snapshot.secondaryPercent,
+                color: quotaColor(for: snapshot.secondaryPercent)
+            )
+            CompactStatusCell(
+                label: "Running",
+                value: "\(runningTaskCount)",
+                detail: "\(displayedTasks.count) sessions"
+            )
+            .frame(width: 96)
+            CompactStatusCell(
+                label: "Ctx",
+                value: currentContextPercentText,
+                detail: currentContextTokenRatioText
+            )
+            .frame(width: 116)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(MonitorTheme.sectionFill, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(MonitorTheme.separator, lineWidth: 1)
+        )
+    }
+
+    private var localMetricStrip: some View {
+        HStack(spacing: 0) {
+            MetricReadout(label: "Active Sessions", value: "\(displayedTasks.count)")
+            verticalSeparator
+            MetricReadout(label: "Subagents", value: "\(activeSubagentTotal)")
+            verticalSeparator
+            MetricReadout(label: "Usage 24h", value: Formatters.compactTokens(snapshot.usage24h))
+            verticalSeparator
+            MetricReadout(label: "Current", value: Formatters.compactTokens(currentTaskTokens))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(MonitorTheme.separator, lineWidth: 1)
+        )
+    }
+
+    private var localTaskTable: some View {
+        VStack(spacing: 0) {
+            TaskTableHeader()
+            Rectangle()
+                .fill(MonitorTheme.separator)
+                .frame(height: 1)
+
+            if displayedTasks.isEmpty {
+                emptyState
+                    .padding(.top, 8)
+            } else {
+                ScrollView(.vertical, showsIndicators: false) {
+                    LazyVStack(spacing: 0) {
+                        ForEach(Array(displayedTasks.enumerated()), id: \.element.id) { index, task in
+                            TaskTableRow(task: task, isSelected: index == 0)
+                        }
+                    }
+                }
+            }
+        }
+        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(MonitorTheme.separator, lineWidth: 1)
+        )
+    }
+
+    private var runningTaskCount: Int {
+        displayedTasks.filter { $0.status == .running }.count
+    }
+
+    private var activeSubagentTotal: Int {
+        displayedTasks.reduce(0) { $0 + $1.activeSubagentCount }
+    }
+
+    private var currentTaskTokens: Int {
+        displayedTasks.first?.tokenCount ?? 0
+    }
+
+    private var currentContextTask: CodexTask? {
+        displayedTasks.first { $0.contextInputTokens != nil && $0.contextWindowTokens != nil }
+    }
+
+    private var currentContextPercentText: String {
+        Formatters.percent(currentContextTask?.contextPercent)
+    }
+
+    private var currentContextTokenRatioText: String {
+        Formatters.compactTokenRatio(
+            currentContextTask?.contextInputTokens,
+            currentContextTask?.contextWindowTokens
+        )
+    }
+
+    private var verticalSeparator: some View {
+        Rectangle()
+            .fill(MonitorTheme.separator)
+            .frame(width: 1, height: 34)
+    }
+
+    private func quotaColor(for percent: Int?) -> Color {
+        guard let percent else {
+            return MonitorTheme.textTertiary
+        }
+        if percent <= 5 {
+            return MonitorTheme.critical
+        }
+        if percent <= 20 {
+            return MonitorTheme.warning
+        }
+        return MonitorTheme.healthy
     }
 
     private var remoteContent: some View {
@@ -759,6 +937,7 @@ struct DetailPanelView: View {
             PeriodUsageCell(label: "7天", value: Formatters.compactTokens(snapshot.usage7d))
             PeriodUsageCell(label: "30天", value: Formatters.compactTokens(snapshot.usage30d))
         }
+        .padding(.horizontal, 2)
         .padding(.top, 1)
     }
 }
@@ -864,6 +1043,243 @@ private struct RefreshIcon: View {
         let cycle = 0.85
         let progress = date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: cycle) / cycle
         return progress * 360
+    }
+}
+
+private struct QuotaBarCell: View {
+    let label: String
+    let value: String
+    let percent: Int?
+    let color: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(label)
+                    .font(.system(size: 10.5, weight: .bold))
+                    .foregroundStyle(MonitorTheme.textPrimary)
+                Spacer(minLength: 8)
+                Text(value)
+                    .font(.system(size: 10.5, weight: .heavy, design: .monospaced))
+                    .foregroundStyle(color)
+                    .monospacedDigit()
+            }
+
+            SegmentedQuotaBar(value: percent, color: color)
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
+private struct SegmentedQuotaBar: View {
+    let value: Int?
+    let color: Color
+    private let segments = 12
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(0..<segments, id: \.self) { index in
+                RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                    .fill(index < filledSegments ? color : Color.white.opacity(0.13))
+                    .frame(height: 7)
+            }
+        }
+    }
+
+    private var filledSegments: Int {
+        guard let value else {
+            return 0
+        }
+        return max(0, min(segments, Int((Double(value) / 100.0 * Double(segments)).rounded())))
+    }
+}
+
+private struct CompactStatusCell: View {
+    let label: String
+    let value: String
+    let detail: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label)
+                .font(.system(size: 10.5, weight: .bold))
+                .foregroundStyle(MonitorTheme.textPrimary)
+            Text(value)
+                .font(.system(size: 18, weight: .heavy, design: .rounded))
+                .foregroundStyle(MonitorTheme.textPrimary)
+                .monospacedDigit()
+            Text(detail)
+                .font(.system(size: 9.2, weight: .semibold))
+                .foregroundStyle(MonitorTheme.textTertiary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.74)
+        }
+    }
+}
+
+private struct MetricReadout: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label)
+                .font(.system(size: 9.8, weight: .semibold))
+                .foregroundStyle(MonitorTheme.textSecondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+            Text(value)
+                .font(.system(size: 16, weight: .heavy, design: .rounded))
+                .foregroundStyle(MonitorTheme.textPrimary)
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 10)
+    }
+}
+
+private struct TaskTableHeader: View {
+    var body: some View {
+        HStack(spacing: 0) {
+            tableHeaderText("Session")
+                .frame(maxWidth: .infinity, alignment: .leading)
+            tableHeaderText("Status")
+                .frame(width: 58, alignment: .leading)
+            tableHeaderText("+10m")
+                .frame(width: 56, alignment: .trailing)
+            tableHeaderText("+1h")
+                .frame(width: 56, alignment: .trailing)
+            tableHeaderText("Ctx")
+                .frame(width: 66, alignment: .trailing)
+            tableHeaderText("Total")
+                .frame(width: 72, alignment: .trailing)
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 26)
+    }
+
+    private func tableHeaderText(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 10, weight: .bold, design: .monospaced))
+            .foregroundStyle(MonitorTheme.textSecondary)
+    }
+}
+
+private struct TaskTableRow: View {
+    let task: CodexTask
+    let isSelected: Bool
+
+    var body: some View {
+        HStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 7, height: 7)
+                    .shadow(color: statusColor.opacity(task.status == .running ? 0.55 : 0.18), radius: 4, x: 0, y: 0)
+
+                Text(task.title)
+                    .font(.system(size: 11.2, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(MonitorTheme.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                if let badgeText = TaskBadgeFormatter.subagentBadgeText(for: task.activeSubagentCount) {
+                    Text(badgeText)
+                        .font(.system(size: 8.4, weight: .bold, design: .monospaced))
+                        .foregroundStyle(MonitorTheme.running)
+                        .lineLimit(1)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(MonitorTheme.running.opacity(0.12), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            StatusPill(status: task.status)
+                .frame(width: 58, alignment: .leading)
+
+            Text(Formatters.signedCompactTokens(task.delta10mTokens))
+                .font(.system(size: 10.3, weight: .heavy, design: .monospaced))
+                .foregroundStyle(deltaColor(task.delta10mTokens))
+                .frame(width: 56, alignment: .trailing)
+                .lineLimit(1)
+                .minimumScaleFactor(0.62)
+
+            Text(Formatters.signedCompactTokens(task.delta1hTokens))
+                .font(.system(size: 10.3, weight: .heavy, design: .monospaced))
+                .foregroundStyle(deltaColor(task.delta1hTokens))
+                .frame(width: 56, alignment: .trailing)
+                .lineLimit(1)
+                .minimumScaleFactor(0.62)
+
+            Text(Formatters.percent(task.contextPercent))
+                .font(.system(size: 10.3, weight: .heavy, design: .monospaced))
+                .foregroundStyle(task.contextPercent == nil ? MonitorTheme.textTertiary : MonitorTheme.running)
+                .frame(width: 66, alignment: .trailing)
+                .lineLimit(1)
+                .minimumScaleFactor(0.62)
+
+            Text(Formatters.compactTokens(task.tokenCount))
+                .font(.system(size: 10.5, weight: .heavy, design: .monospaced))
+                .foregroundStyle(MonitorTheme.textPrimary)
+                .frame(width: 72, alignment: .trailing)
+                .lineLimit(1)
+                .minimumScaleFactor(0.62)
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 34)
+        .background(isSelected ? MonitorTheme.rowSelectedFill : Color.clear)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(MonitorTheme.separator)
+                .frame(height: 1)
+        }
+    }
+
+    private var statusColor: Color {
+        switch task.status {
+        case .running:
+            MonitorTheme.running
+        case .recent:
+            MonitorTheme.healthy
+        case .idle:
+            MonitorTheme.textTertiary
+        }
+    }
+
+    private func deltaColor(_ value: Int?) -> Color {
+        guard let value else {
+            return MonitorTheme.textTertiary
+        }
+        return value > 0 ? MonitorTheme.running : MonitorTheme.textSecondary
+    }
+}
+
+private struct StatusPill: View {
+    let status: TaskStatus
+
+    var body: some View {
+        Text(status.label)
+            .font(.system(size: 9.2, weight: .heavy, design: .rounded))
+            .foregroundStyle(color)
+            .lineLimit(1)
+            .minimumScaleFactor(0.72)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(color.opacity(0.13), in: Capsule())
+    }
+
+    private var color: Color {
+        switch status {
+        case .running:
+            MonitorTheme.running
+        case .recent:
+            MonitorTheme.healthy
+        case .idle:
+            MonitorTheme.textTertiary
+        }
     }
 }
 
@@ -1115,16 +1531,21 @@ private struct PeriodUsageCell: View {
     let value: String
 
     var body: some View {
-        VStack(spacing: 3) {
+        VStack(spacing: 4) {
             Text(label)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.52))
+                .font(.system(size: 9.6, weight: .semibold))
+                .foregroundStyle(MonitorTheme.textSecondary)
             Text(value)
-                .font(.system(size: 11, weight: .heavy, design: .rounded))
-                .foregroundStyle(.white.opacity(0.92))
+                .font(.system(size: 11.5, weight: .heavy, design: .monospaced))
+                .foregroundStyle(MonitorTheme.textPrimary)
+                .monospacedDigit()
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 8)
-        .background(Color.white.opacity(0.026), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .padding(.vertical, 7)
+        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(MonitorTheme.separator, lineWidth: 1)
+        )
     }
 }

@@ -22,6 +22,30 @@ enum Formatters {
         return "\(value)%"
     }
 
+    static func percent(_ value: Double?) -> String {
+        guard let value, value.isFinite else {
+            return "--"
+        }
+        return String(format: "%.1f%%", value)
+    }
+
+    static func signedCompactTokens(_ value: Int?) -> String {
+        guard let value else {
+            return "--"
+        }
+        guard value > 0 else {
+            return "0"
+        }
+        return "+\(compactTokens(value))"
+    }
+
+    static func compactTokenRatio(_ numerator: Int?, _ denominator: Int?) -> String {
+        guard let numerator, let denominator, denominator > 0 else {
+            return "--"
+        }
+        return "\(compactTokens(numerator))/\(compactTokens(denominator))"
+    }
+
     static func shortTitle(_ title: String) -> String {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {

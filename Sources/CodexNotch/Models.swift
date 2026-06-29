@@ -46,6 +46,7 @@ struct UsageSnapshot: Equatable {
     var isRunning: Bool
     var lastUpdated: Date
     var errorMessage: String?
+    var monitorStats: MonitorPerformanceStats = .empty
 
     static let empty = UsageSnapshot(
         primaryPercent: nil,
@@ -57,6 +58,26 @@ struct UsageSnapshot: Equatable {
         isRunning: false,
         lastUpdated: Date(),
         errorMessage: nil
+    )
+}
+
+struct MonitorPerformanceStats: Equatable, Sendable {
+    var lastSnapshotDurationMs: Int?
+    var lastUsageDurationMs: Int?
+    var lastDeltaDurationMs: Int?
+    var lastRateLimitSource: String
+    var watchedPathCount: Int
+    var jsonlContextScans: Int
+    var monitorModelTokens: Int
+
+    static let empty = MonitorPerformanceStats(
+        lastSnapshotDurationMs: nil,
+        lastUsageDurationMs: nil,
+        lastDeltaDurationMs: nil,
+        lastRateLimitSource: "none",
+        watchedPathCount: 0,
+        jsonlContextScans: 0,
+        monitorModelTokens: 0
     )
 }
 
@@ -76,6 +97,12 @@ struct CodexTask: Identifiable, Equatable {
     let tokenCount: Int
     let updatedAt: Date
     let activeSubagentCount: Int
+    let delta10mTokens: Int?
+    let delta1hTokens: Int?
+    let contextInputTokens: Int?
+    let contextWindowTokens: Int?
+    let contextPercent: Double?
+    let contextUpdatedAt: Date?
 
     init(
         id: String,
@@ -84,7 +111,13 @@ struct CodexTask: Identifiable, Equatable {
         detail: String,
         tokenCount: Int,
         updatedAt: Date,
-        activeSubagentCount: Int = 0
+        activeSubagentCount: Int = 0,
+        delta10mTokens: Int? = nil,
+        delta1hTokens: Int? = nil,
+        contextInputTokens: Int? = nil,
+        contextWindowTokens: Int? = nil,
+        contextPercent: Double? = nil,
+        contextUpdatedAt: Date? = nil
     ) {
         self.id = id
         self.title = title
@@ -93,6 +126,159 @@ struct CodexTask: Identifiable, Equatable {
         self.tokenCount = tokenCount
         self.updatedAt = updatedAt
         self.activeSubagentCount = activeSubagentCount
+        self.delta10mTokens = delta10mTokens
+        self.delta1hTokens = delta1hTokens
+        self.contextInputTokens = contextInputTokens
+        self.contextWindowTokens = contextWindowTokens
+        self.contextPercent = contextPercent
+        self.contextUpdatedAt = contextUpdatedAt
+    }
+}
+
+struct TokenContextUsage: Equatable {
+    let inputTokens: Int
+    let windowTokens: Int
+    let percent: Double
+    let updatedAt: Date
+}
+
+enum TokenContextUsageParser {
+    static func parse(line: String) -> TokenContextUsage? {
+        guard line.contains(#""token_count""#) else {
+            return nil
+        }
+
+        if let timestamp = jsonStringValue(for: "timestamp", in: line),
+           let updatedAt = parseTimestamp(timestamp),
+           let inputTokens = lastTokenUsageIntValue(for: "input_tokens", in: line),
+           let windowTokens = intValue(for: "model_context_window", in: line),
+           inputTokens > 0,
+           windowTokens > 0 {
+            return TokenContextUsage(
+                inputTokens: inputTokens,
+                windowTokens: windowTokens,
+                percent: Double(inputTokens) / Double(windowTokens) * 100.0,
+                updatedAt: updatedAt
+            )
+        }
+
+        guard let data = line.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let timestamp = object["timestamp"] as? String,
+              let updatedAt = parseTimestamp(timestamp),
+              let payload = object["payload"] as? [String: Any],
+              payload["type"] as? String == "token_count",
+              let info = payload["info"] as? [String: Any],
+              let lastUsage = (info["last_token_usage"] ?? info["lastTokenUsage"]) as? [String: Any] else {
+            return nil
+        }
+
+        let inputTokens = intValue(lastUsage["input_tokens"] ?? lastUsage["inputTokens"])
+        let windowTokens = intValue(
+            payload["model_context_window"]
+                ?? payload["modelContextWindow"]
+                ?? info["model_context_window"]
+                ?? info["modelContextWindow"]
+        )
+        guard let inputTokens,
+              let windowTokens,
+              inputTokens > 0,
+              windowTokens > 0 else {
+            return nil
+        }
+
+        return TokenContextUsage(
+            inputTokens: inputTokens,
+            windowTokens: windowTokens,
+            percent: Double(inputTokens) / Double(windowTokens) * 100.0,
+            updatedAt: updatedAt
+        )
+    }
+
+    private static func lastTokenUsageIntValue(for key: String, in line: String) -> Int? {
+        guard let usageRange = line.range(of: #""last_token_usage""#) else {
+            return nil
+        }
+        return intValue(for: key, in: line[usageRange.upperBound...])
+    }
+
+    private static func intValue(for key: String, in line: String) -> Int? {
+        intValue(for: key, in: line[line.startIndex...])
+    }
+
+    private static func intValue(for key: String, in text: Substring) -> Int? {
+        guard let keyRange = text.range(of: #"""# + key + #"""#),
+              let colonRange = text[keyRange.upperBound...].range(of: ":") else {
+            return nil
+        }
+
+        var index = colonRange.upperBound
+        while index < text.endIndex, text[index].isWhitespace {
+            index = text.index(after: index)
+        }
+
+        let start = index
+        while index < text.endIndex, text[index].isNumber {
+            index = text.index(after: index)
+        }
+
+        guard start < index else {
+            return nil
+        }
+        return Int(text[start..<index])
+    }
+
+    private static func jsonStringValue(for key: String, in line: String) -> String? {
+        guard let keyRange = line.range(of: #"""# + key + #"""#),
+              let colonRange = line[keyRange.upperBound...].range(of: ":"),
+              let quoteStart = line[colonRange.upperBound...].firstIndex(of: "\"") else {
+            return nil
+        }
+
+        var index = line.index(after: quoteStart)
+        var value = ""
+        var isEscaped = false
+
+        while index < line.endIndex {
+            let character = line[index]
+            if isEscaped {
+                value.append(character)
+                isEscaped = false
+            } else if character == "\\" {
+                isEscaped = true
+            } else if character == "\"" {
+                return value
+            } else {
+                value.append(character)
+            }
+            index = line.index(after: index)
+        }
+
+        return nil
+    }
+
+    private static func parseTimestamp(_ value: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: value) {
+            return date
+        }
+
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: value)
+    }
+
+    private static func intValue(_ value: Any?) -> Int? {
+        if let int = value as? Int {
+            return int
+        }
+        if let double = value as? Double {
+            return Int(double.rounded())
+        }
+        if let number = value as? NSNumber {
+            return number.intValue
+        }
+        return nil
     }
 }
 

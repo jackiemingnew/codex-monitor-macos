@@ -23,9 +23,9 @@ private enum RefreshPreset: String, CaseIterable, Identifiable {
         case .realtime:
             (active: 2, idle: 4, usage: 20, watcher: 8, gap: 1)
         case .balanced:
-            (active: 3, idle: 6, usage: 30, watcher: 12, gap: 3)
+            (active: 15, idle: 90, usage: 180, watcher: 90, gap: 10)
         case .economy:
-            (active: 8, idle: 20, usage: 90, watcher: 30, gap: 8)
+            (active: 30, idle: 180, usage: 300, watcher: 180, gap: 15)
         }
     }
 
@@ -39,7 +39,7 @@ private enum RefreshPreset: String, CaseIterable, Identifiable {
     }
 
     static func matching(_ draft: SettingsDraft) -> RefreshPreset {
-        allCases.first { $0.matches(draft) } ?? .balanced
+        allCases.first { $0.matches(draft) } ?? .economy
     }
 }
 
@@ -100,11 +100,11 @@ private struct AccountEditorContext: Identifiable {
 }
 
 private struct SettingsDraft: Equatable {
-    var activeRefreshInterval: TimeInterval = 3
-    var idleRefreshInterval: TimeInterval = 6
-    var usageRefreshInterval: TimeInterval = 30
-    var watcherRefreshInterval: TimeInterval = 12
-    var fileChangeRefreshMinimumGap: TimeInterval = 3
+    var activeRefreshInterval: TimeInterval = 30
+    var idleRefreshInterval: TimeInterval = 180
+    var usageRefreshInterval: TimeInterval = 300
+    var watcherRefreshInterval: TimeInterval = 180
+    var fileChangeRefreshMinimumGap: TimeInterval = 15
     var rateLimitSource: RateLimitSourcePreference = .appServerFirst
     var showPeriodUsage = true
     var taskHistoryRange: TaskHistoryRange = .threeDays
@@ -191,7 +191,7 @@ private struct SettingsDraft: Equatable {
     }
 
     mutating func resetRefreshDefaults() {
-        applyPreset(.balanced)
+        applyPreset(.economy)
     }
 }
 
@@ -203,7 +203,7 @@ struct SettingsView: View {
     let onRefresh: () -> Void
 
     @State private var draft = SettingsDraft()
-    @State private var selectedPreset: RefreshPreset = .balanced
+    @State private var selectedPreset: RefreshPreset = .economy
     @State private var selectedTab: SettingsTab = .codex
     @State private var accountEditorContext: AccountEditorContext?
     @State private var accountEditorID: String?
@@ -387,9 +387,9 @@ struct SettingsView: View {
             )
             presetControls
             intervalStepper("运行中", value: $draft.activeRefreshInterval, range: 2...30, help: "检测到 Codex 正在执行任务时的状态刷新间隔。数值越小越实时，功耗也越高。")
-            intervalStepper("空闲", value: $draft.idleRefreshInterval, range: 4...120, help: "Codex 没有运行中任务时的状态刷新间隔。")
+            intervalStepper("空闲", value: $draft.idleRefreshInterval, range: 4...300, help: "Codex 没有运行中任务时的状态刷新间隔。")
             intervalStepper("历史用量", value: $draft.usageRefreshInterval, range: 15...300, help: "统计 Codex 24小时、7天、30天 token 用量的刷新间隔。")
-            intervalStepper("文件监听", value: $draft.watcherRefreshInterval, range: 8...120, help: "扫描 Codex 会话文件变化的保底间隔，用于补偿文件事件丢失。")
+            intervalStepper("文件监听", value: $draft.watcherRefreshInterval, range: 8...300, help: "扫描 Codex 会话文件变化的保底间隔，用于补偿文件事件丢失。")
             intervalStepper("补刷节流", value: $draft.fileChangeRefreshMinimumGap, range: 1...30, help: "文件变化很多时，连续触发刷新之间的最小间隔。")
         }
 
@@ -1203,7 +1203,7 @@ struct SettingsView: View {
         HStack(spacing: 10) {
             Button("恢复默认刷新") {
                 draft.resetRefreshDefaults()
-                selectedPreset = .balanced
+                selectedPreset = .economy
             }
 
             if hasChanges {

@@ -378,11 +378,12 @@ final class CodexNotchSettings: ObservableObject {
             vault: &loadedVault
         ) || migratedSecretVault
         self.secretVault = loadedVault
-        self.activeRefreshInterval = Self.clamped(defaults.object(forKey: Keys.activeRefreshInterval) as? TimeInterval ?? 3, min: 2, max: 30)
-        self.idleRefreshInterval = Self.clamped(defaults.object(forKey: Keys.idleRefreshInterval) as? TimeInterval ?? 6, min: 4, max: 120)
-        self.usageRefreshInterval = Self.clamped(defaults.object(forKey: Keys.usageRefreshInterval) as? TimeInterval ?? 30, min: 15, max: 300)
-        self.watcherRefreshInterval = Self.clamped(defaults.object(forKey: Keys.watcherRefreshInterval) as? TimeInterval ?? 12, min: 8, max: 120)
-        self.fileChangeRefreshMinimumGap = Self.clamped(defaults.object(forKey: Keys.fileChangeRefreshMinimumGap) as? TimeInterval ?? 3, min: 1, max: 30)
+        Self.migrateLegacyRefreshDefaultsIfNeeded(defaults: defaults)
+        self.activeRefreshInterval = Self.clamped(defaults.object(forKey: Keys.activeRefreshInterval) as? TimeInterval ?? 30, min: 2, max: 30)
+        self.idleRefreshInterval = Self.clamped(defaults.object(forKey: Keys.idleRefreshInterval) as? TimeInterval ?? 180, min: 4, max: 300)
+        self.usageRefreshInterval = Self.clamped(defaults.object(forKey: Keys.usageRefreshInterval) as? TimeInterval ?? 300, min: 15, max: 300)
+        self.watcherRefreshInterval = Self.clamped(defaults.object(forKey: Keys.watcherRefreshInterval) as? TimeInterval ?? 180, min: 8, max: 300)
+        self.fileChangeRefreshMinimumGap = Self.clamped(defaults.object(forKey: Keys.fileChangeRefreshMinimumGap) as? TimeInterval ?? 15, min: 1, max: 30)
         self.rateLimitSource = RateLimitSourcePreference(rawValue: defaults.string(forKey: Keys.rateLimitSource) ?? "") ?? .appServerFirst
         self.showPeriodUsage = defaults.object(forKey: Keys.showPeriodUsage) as? Bool ?? true
         self.enablePulse = defaults.object(forKey: Keys.enablePulse) as? Bool ?? true
@@ -502,11 +503,49 @@ final class CodexNotchSettings: ObservableObject {
     }
 
     func resetRefreshDefaults() {
-        activeRefreshInterval = 3
-        idleRefreshInterval = 6
-        usageRefreshInterval = 30
-        watcherRefreshInterval = 12
-        fileChangeRefreshMinimumGap = 3
+        activeRefreshInterval = 30
+        idleRefreshInterval = 180
+        usageRefreshInterval = 300
+        watcherRefreshInterval = 180
+        fileChangeRefreshMinimumGap = 15
+    }
+
+    private static func migrateLegacyRefreshDefaultsIfNeeded(defaults: UserDefaults) {
+        let legacyProfiles: [[(key: String, value: TimeInterval)]] = [
+            [
+                (Keys.activeRefreshInterval, 3),
+                (Keys.idleRefreshInterval, 6),
+                (Keys.usageRefreshInterval, 30),
+                (Keys.watcherRefreshInterval, 12),
+                (Keys.fileChangeRefreshMinimumGap, 3)
+            ],
+            [
+                (Keys.activeRefreshInterval, 15),
+                (Keys.idleRefreshInterval, 90),
+                (Keys.usageRefreshInterval, 300),
+                (Keys.watcherRefreshInterval, 120),
+                (Keys.fileChangeRefreshMinimumGap, 10)
+            ]
+        ]
+
+        guard legacyProfiles.contains(where: { profile in
+            profile.allSatisfy { storedTimeInterval(defaults: defaults, key: $0.key) == $0.value }
+        }) else {
+            return
+        }
+
+        defaults.set(30, forKey: Keys.activeRefreshInterval)
+        defaults.set(180, forKey: Keys.idleRefreshInterval)
+        defaults.set(300, forKey: Keys.usageRefreshInterval)
+        defaults.set(180, forKey: Keys.watcherRefreshInterval)
+        defaults.set(15, forKey: Keys.fileChangeRefreshMinimumGap)
+    }
+
+    private static func storedTimeInterval(defaults: UserDefaults, key: String) -> TimeInterval? {
+        guard let number = defaults.object(forKey: key) as? NSNumber else {
+            return nil
+        }
+        return number.doubleValue
     }
 
     static func managementKeyForSave(
@@ -931,7 +970,7 @@ final class CodexNotchSettings: ObservableObject {
         let value = normalized(
             idleRefreshInterval,
             min: 4,
-            max: 120,
+            max: 300,
             key: Keys.idleRefreshInterval
         )
         if idleRefreshInterval != value {
@@ -955,7 +994,7 @@ final class CodexNotchSettings: ObservableObject {
         let value = normalized(
             watcherRefreshInterval,
             min: 8,
-            max: 120,
+            max: 300,
             key: Keys.watcherRefreshInterval
         )
         if watcherRefreshInterval != value {

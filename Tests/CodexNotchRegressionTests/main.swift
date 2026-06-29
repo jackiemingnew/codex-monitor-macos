@@ -33,7 +33,13 @@ let snapshotFormatterTask = CodexTask(
     detail: "gpt-5.5 · 高推理",
     tokenCount: 12345,
     updatedAt: Date(timeIntervalSince1970: 0),
-    activeSubagentCount: 3
+    activeSubagentCount: 3,
+    delta10mTokens: 1200,
+    delta1hTokens: 3456,
+    contextInputTokens: 58609,
+    contextWindowTokens: 258400,
+    contextPercent: 22.681501547987615,
+    contextUpdatedAt: Date(timeIntervalSince1970: 10)
 )
 let snapshotFormatterSnapshot = UsageSnapshot(
     primaryPercent: 88,
@@ -44,12 +50,25 @@ let snapshotFormatterSnapshot = UsageSnapshot(
     tasks: [snapshotFormatterTask],
     isRunning: true,
     lastUpdated: Date(timeIntervalSince1970: 0),
-    errorMessage: nil
+    errorMessage: nil,
+    monitorStats: MonitorPerformanceStats(
+        lastSnapshotDurationMs: 42,
+        lastUsageDurationMs: 84,
+        lastDeltaDurationMs: 5,
+        lastRateLimitSource: "local-jsonl",
+        watchedPathCount: 7,
+        jsonlContextScans: 2,
+        monitorModelTokens: 0
+    )
 )
 let humanSnapshotLines = SnapshotOutputFormatter.humanLines(for: snapshotFormatterSnapshot)
 runner.check(
-    humanSnapshotLines.contains("task=运行中 父任务 12345"),
-    "human snapshot task line should preserve the token count as the final field"
+    humanSnapshotLines.contains("monitor snapshot_ms=42 usage_ms=84 delta_ms=5 rate=local-jsonl watched=7 context_scans=2 model_tokens=0"),
+    "human snapshot output should expose monitor self cost"
+)
+runner.check(
+    humanSnapshotLines.contains("task=运行中 父任务 12345 delta10m=+1.2千 delta1h=+3.5千 ctx=6万/26万"),
+    "human snapshot task line should expose token deltas and context ratio"
 )
 runner.check(
     !humanSnapshotLines.contains { $0.contains("subagents=") },
@@ -58,11 +77,68 @@ runner.check(
 let jsonSnapshot = try JSONSerialization.jsonObject(
     with: SnapshotOutputFormatter.jsonData(for: snapshotFormatterSnapshot)
 ) as? [String: Any]
+let jsonMonitor = jsonSnapshot?["monitor"] as? [String: Any]
+runner.check(
+    jsonMonitor?["last_snapshot_duration_ms"] as? Int == 42,
+    "JSON snapshot output should expose snapshot duration"
+)
+runner.check(
+    jsonMonitor?["last_usage_duration_ms"] as? Int == 84,
+    "JSON snapshot output should expose usage duration"
+)
+runner.check(
+    jsonMonitor?["last_delta_duration_ms"] as? Int == 5,
+    "JSON snapshot output should expose delta duration"
+)
+runner.check(
+    jsonMonitor?["last_rate_limit_source"] as? String == "local-jsonl",
+    "JSON snapshot output should expose rate limit source"
+)
+runner.check(
+    jsonMonitor?["watched_path_count"] as? Int == 7,
+    "JSON snapshot output should expose watched path count"
+)
+runner.check(
+    jsonMonitor?["jsonl_context_scans"] as? Int == 2,
+    "JSON snapshot output should expose context scan count"
+)
+runner.check(
+    jsonMonitor?["monitor_model_tokens"] as? Int == 0,
+    "JSON snapshot output should report zero monitor model tokens"
+)
 let jsonSnapshotTasks = jsonSnapshot?["tasks"] as? [[String: Any]]
 runner.check(
     jsonSnapshotTasks?.first?["subagents"] as? Int == 3,
     "JSON snapshot output should expose active subagent counts"
 )
+runner.check(
+    jsonSnapshotTasks?.first?["delta_10m_tokens"] as? Int == 1200,
+    "JSON snapshot output should expose 10 minute token deltas"
+)
+runner.check(
+    jsonSnapshotTasks?.first?["delta_1h_tokens"] as? Int == 3456,
+    "JSON snapshot output should expose 1 hour token deltas"
+)
+runner.check(
+    jsonSnapshotTasks?.first?["context_input_tokens"] as? Int == 58609,
+    "JSON snapshot output should expose context input tokens"
+)
+runner.check(
+    jsonSnapshotTasks?.first?["context_window_tokens"] as? Int == 258400,
+    "JSON snapshot output should expose model context window tokens"
+)
+runner.check(
+    (jsonSnapshotTasks?.first?["context_percent"] as? Double).map { abs($0 - 22.681501547987615) < 0.000001 } == true,
+    "JSON snapshot output should expose context percentage"
+)
+let tokenContextLine = #"{"timestamp":"2026-06-29T15:01:43.961Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":39217907,"cached_input_tokens":35158912,"output_tokens":176936,"reasoning_output_tokens":60714,"total_tokens":39394843},"last_token_usage":{"input_tokens":57907,"cached_input_tokens":55168,"output_tokens":644,"reasoning_output_tokens":230,"total_tokens":58551},"model_context_window":258400},"rate_limits":{"limit_id":"codex"}}}"#
+let parsedContext = runner.require(
+    TokenContextUsageParser.parse(line: tokenContextLine),
+    "token context parser should read token_count context payloads"
+)
+runner.check(parsedContext.inputTokens == 57907, "token context parser should use last_token_usage input tokens")
+runner.check(parsedContext.windowTokens == 258400, "token context parser should read model_context_window")
+runner.check(abs(parsedContext.percent - 22.40982972136223) < 0.000001, "token context parser should calculate context percentage")
 runner.check(
     TaskBadgeFormatter.subagentBadgeText(for: 3) == "子代理 3",
     "task row subagent badge should use compact text"
@@ -203,7 +279,74 @@ settings.watcherRefreshInterval = settings.watcherRefreshInterval
 settings.fileChangeRefreshMinimumGap = settings.fileChangeRefreshMinimumGap
 settings.cliproxyRefreshInterval = settings.cliproxyRefreshInterval
 settings.cliproxyRequestTimeout = settings.cliproxyRequestTimeout
-runner.check(settings.activeRefreshInterval == 3, "saving unchanged refresh intervals should not recurse or change values")
+runner.check(settings.activeRefreshInterval == 30, "saving unchanged refresh intervals should keep the folded low-power active default")
+runner.check(settings.idleRefreshInterval == 180, "saving unchanged refresh intervals should keep the folded low-power idle default")
+runner.check(settings.usageRefreshInterval == 300, "saving unchanged refresh intervals should keep the low-power usage default")
+runner.check(settings.watcherRefreshInterval == 180, "saving unchanged refresh intervals should keep the folded low-power watcher default")
+runner.check(settings.fileChangeRefreshMinimumGap == 15, "saving unchanged refresh intervals should keep the folded low-power debounce default")
+settings.activeRefreshInterval = 2
+settings.idleRefreshInterval = 4
+settings.usageRefreshInterval = 15
+settings.watcherRefreshInterval = 8
+settings.fileChangeRefreshMinimumGap = 1
+settings.resetRefreshDefaults()
+runner.check(settings.activeRefreshInterval == 30, "reset refresh defaults should restore folded low-power active refresh")
+runner.check(settings.idleRefreshInterval == 180, "reset refresh defaults should restore folded low-power idle refresh")
+runner.check(settings.usageRefreshInterval == 300, "reset refresh defaults should restore low-power usage refresh")
+runner.check(settings.watcherRefreshInterval == 180, "reset refresh defaults should restore folded low-power watcher refresh")
+runner.check(settings.fileChangeRefreshMinimumGap == 15, "reset refresh defaults should restore folded low-power debounce")
+
+let legacyRefreshSuiteName = "CodexNotchLegacyRefresh-\(UUID().uuidString)"
+let legacyRefreshDefaults = runner.require(
+    UserDefaults(suiteName: legacyRefreshSuiteName),
+    "legacy refresh defaults should be available"
+)
+legacyRefreshDefaults.removePersistentDomain(forName: legacyRefreshSuiteName)
+legacyRefreshDefaults.set(3, forKey: "activeRefreshInterval")
+legacyRefreshDefaults.set(6, forKey: "idleRefreshInterval")
+legacyRefreshDefaults.set(30, forKey: "usageRefreshInterval")
+legacyRefreshDefaults.set(12, forKey: "watcherRefreshInterval")
+legacyRefreshDefaults.set(3, forKey: "fileChangeRefreshMinimumGap")
+let migratedLegacyRefreshSettings = CodexNotchSettings(
+    defaults: legacyRefreshDefaults,
+    initialManagementKey: "",
+    initialNewAPIKey: "",
+    initialSubAPIKey: "",
+    secretStores: SecretStoreFactory(keychain: MemorySecretStore(), database: MemorySecretStore()),
+    launchAtLoginManager: FakeLaunchAtLoginManager()
+)
+runner.check(migratedLegacyRefreshSettings.activeRefreshInterval == 30, "legacy refresh defaults should migrate to folded low-power active refresh")
+runner.check(migratedLegacyRefreshSettings.idleRefreshInterval == 180, "legacy refresh defaults should migrate to folded low-power idle refresh")
+runner.check(migratedLegacyRefreshSettings.usageRefreshInterval == 300, "legacy refresh defaults should migrate to low-power usage refresh")
+runner.check(migratedLegacyRefreshSettings.watcherRefreshInterval == 180, "legacy refresh defaults should migrate to folded low-power watcher refresh")
+runner.check(migratedLegacyRefreshSettings.fileChangeRefreshMinimumGap == 15, "legacy refresh defaults should migrate to folded low-power debounce")
+legacyRefreshDefaults.removePersistentDomain(forName: legacyRefreshSuiteName)
+
+let previousLowPowerSuiteName = "CodexNotchPreviousLowPower-\(UUID().uuidString)"
+let previousLowPowerDefaults = runner.require(
+    UserDefaults(suiteName: previousLowPowerSuiteName),
+    "previous low-power defaults should be available"
+)
+previousLowPowerDefaults.removePersistentDomain(forName: previousLowPowerSuiteName)
+previousLowPowerDefaults.set(15, forKey: "activeRefreshInterval")
+previousLowPowerDefaults.set(90, forKey: "idleRefreshInterval")
+previousLowPowerDefaults.set(300, forKey: "usageRefreshInterval")
+previousLowPowerDefaults.set(120, forKey: "watcherRefreshInterval")
+previousLowPowerDefaults.set(10, forKey: "fileChangeRefreshMinimumGap")
+let migratedPreviousLowPowerSettings = CodexNotchSettings(
+    defaults: previousLowPowerDefaults,
+    initialManagementKey: "",
+    initialNewAPIKey: "",
+    initialSubAPIKey: "",
+    secretStores: SecretStoreFactory(keychain: MemorySecretStore(), database: MemorySecretStore()),
+    launchAtLoginManager: FakeLaunchAtLoginManager()
+)
+runner.check(migratedPreviousLowPowerSettings.activeRefreshInterval == 30, "previous low-power defaults should migrate to folded low-power active refresh")
+runner.check(migratedPreviousLowPowerSettings.idleRefreshInterval == 180, "previous low-power defaults should migrate to folded low-power idle refresh")
+runner.check(migratedPreviousLowPowerSettings.usageRefreshInterval == 300, "previous low-power defaults should migrate to low-power usage refresh")
+runner.check(migratedPreviousLowPowerSettings.watcherRefreshInterval == 180, "previous low-power defaults should migrate to folded low-power watcher refresh")
+runner.check(migratedPreviousLowPowerSettings.fileChangeRefreshMinimumGap == 15, "previous low-power defaults should migrate to folded low-power debounce")
+previousLowPowerDefaults.removePersistentDomain(forName: previousLowPowerSuiteName)
 
 runner.check(settings.remoteCodexDataSource == .cpaManagerPlus, "remote Codex monitor should default to CPA Manager Plus data")
 runner.check(settings.notchDisplaySource == .codex, "collapsed notch display should default to local Codex")

@@ -8,15 +8,18 @@ private enum UsageScanPolicy {
         "/usr/bin/rg"
     ]
     static let runningActivityWindow = 10 * 60
+    static let fastSnapshotTokenScanLimit: UInt64 = 2 * 1024 * 1024
     static let largeSessionTokenScanLimit: UInt64 = 20 * 1024 * 1024
     static let staleSessionTokenScanLimit: UInt64 = 2 * 1024 * 1024
     static let recentSessionScanWindow: TimeInterval = 10 * 60
     static let periodUsageTailLineLimit = 4_000
+    static let contextUsageTailLineLimit = 200
+    static let contextVisibleTaskLimit = 4
     static let estimatedTokenLineBytes: UInt64 = 1_300
     static let periodUsageCacheTTL: TimeInterval = 120
     static let ripgrepTimeout: DispatchTimeInterval = .seconds(12)
-    static let appServerSuccessCacheTTL: TimeInterval = 30
-    static let appServerFailureCacheTTL: TimeInterval = 45
+    static let appServerSuccessCacheTTL: TimeInterval = 5 * 60
+    static let appServerFailureCacheTTL: TimeInterval = 5 * 60
 }
 
 final class CodexUsageStore: @unchecked Sendable {
@@ -31,6 +34,7 @@ final class CodexUsageStore: @unchecked Sendable {
     private let codexDirectory: URL
     private let stateDatabase: String
     private let logsDatabase: String
+    private let deltaDatabase: String
     private let sessionIndexPath: String
     private let appServerExecutable = "/Applications/Codex.app/Contents/Resources/codex"
     private let ripgrepCandidates: [String]
@@ -54,13 +58,20 @@ final class CodexUsageStore: @unchecked Sendable {
     private var appServerRateLimitCache: AppServerRateLimitCache?
     private var periodUsageCache: PeriodUsageCache?
     private var sessionTokenTotalCache: [String: SessionTokenTotalCache] = [:]
+    private var sessionContextUsageCache: [String: SessionContextUsageCache] = [:]
 
     init(
         codexDirectory: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex"),
+        deltaDatabase: String? = nil,
         ripgrepCandidates: [String] = UsageScanPolicy.ripgrepCandidates
     ) {
         self.codexDirectory = codexDirectory
         self.ripgrepCandidates = ripgrepCandidates
+        self.deltaDatabase = Self.expandedPath(
+            deltaDatabase
+                ?? ProcessInfo.processInfo.environment["CODEX_USAGE_DELTA_DB"]
+                ?? codexDirectory.appendingPathComponent("context-guard/usage-deltas.sqlite").path
+        )
         self.stateDatabase = Self.latestSQLiteDatabase(
             in: codexDirectory,
             prefix: "state_",
@@ -72,6 +83,15 @@ final class CodexUsageStore: @unchecked Sendable {
             fallback: "logs_2.sqlite"
         )
         self.sessionIndexPath = codexDirectory.appendingPathComponent("session_index.jsonl").path
+    }
+
+    private static func expandedPath(_ path: String) -> String {
+        guard path.hasPrefix("~/") else {
+            return path
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(String(path.dropFirst(2)))
+            .path
     }
 
     private static func latestSQLiteDatabase(in directory: URL, prefix: String, fallback: String) -> String {
@@ -107,15 +127,18 @@ final class CodexUsageStore: @unchecked Sendable {
         bypassFastCache: Bool = false,
         rateLimitSource: RateLimitSourcePreference = .appServerFirst,
         taskHistoryRange: TaskHistoryRange = .threeDays,
+        contextTaskLimit: Int = UsageScanPolicy.contextVisibleTaskLimit,
         now: Date = Date()
     ) -> UsageSnapshot {
+        let snapshotStartedAt = Date()
         if !bypassFastCache,
            !includePeriodUsage,
            let cachedSnapshot = cachedFastSnapshot(
                 now: now,
                 fallbackUsage: fallbackUsage,
                 rateLimitSource: rateLimitSource,
-                taskHistoryRange: taskHistoryRange
+                taskHistoryRange: taskHistoryRange,
+                contextTaskLimit: contextTaskLimit
            ) {
             return cachedSnapshot
         }
@@ -141,30 +164,50 @@ final class CodexUsageStore: @unchecked Sendable {
                 ? (loadUsageTotals(now: now, fallbackThreads: threads) ?? fallbackUsage ?? .zero)
                 : (fallbackUsage ?? .zero)
             let rateLimitPaths = candidateRateLimitPaths(from: threads)
-            let rateLimits = loadRateLimits(from: rateLimitPaths, source: rateLimitSource, now: now)
-            let tasks = buildTasks(from: threads, activeThreadIDs: activeThreadIDs, now: now)
+            let rateLimitResult = loadRateLimits(from: rateLimitPaths, source: rateLimitSource, now: now)
+            let deltaStartedAt = Date()
+            let deltas = loadTokenDeltas(for: threads, now: now)
+            let deltaDurationMs = elapsedMilliseconds(since: deltaStartedAt)
+            let taskResult = buildTasks(
+                from: threads,
+                activeThreadIDs: activeThreadIDs,
+                deltas: deltas,
+                now: now,
+                contextTaskLimit: contextTaskLimit
+            )
             cacheFastSnapshot(
                 threads: threads,
                 activeThreadIDs: activeThreadIDs,
-                rateLimits: rateLimits,
+                rateLimits: rateLimitResult.snapshot,
                 signaturePaths: rateLimitPaths,
+                rateLimitSourceName: rateLimitResult.source,
                 rateLimitSource: rateLimitSource,
                 taskHistoryRange: taskHistoryRange
             )
+            let snapshotDurationMs = elapsedMilliseconds(since: snapshotStartedAt)
 
             return UsageSnapshot(
-                primaryPercent: rateLimits.primaryDisplayPercent(now: now),
-                secondaryPercent: rateLimits.secondaryDisplayPercent(now: now),
+                primaryPercent: rateLimitResult.snapshot.primaryDisplayPercent(now: now),
+                secondaryPercent: rateLimitResult.snapshot.secondaryDisplayPercent(now: now),
                 usage24h: usage.day,
                 usage7d: usage.week,
                 usage30d: usage.month,
-                tasks: tasks,
-                isRunning: tasks.contains { $0.status == .running },
+                tasks: taskResult.tasks,
+                isRunning: taskResult.tasks.contains { $0.status == .running },
                 lastUpdated: now,
-                errorMessage: nil
+                errorMessage: nil,
+                monitorStats: MonitorPerformanceStats(
+                    lastSnapshotDurationMs: snapshotDurationMs,
+                    lastUsageDurationMs: includePeriodUsage ? snapshotDurationMs : nil,
+                    lastDeltaDurationMs: deltaDurationMs,
+                    lastRateLimitSource: rateLimitResult.source,
+                    watchedPathCount: 0,
+                    jsonlContextScans: taskResult.contextScans,
+                    monitorModelTokens: 0
+                )
             )
         } catch {
-            return errorSnapshot(error, now: now)
+            return errorSnapshot(error, now: now, snapshotDurationMs: elapsedMilliseconds(since: snapshotStartedAt))
         }
     }
 
@@ -184,14 +227,20 @@ final class CodexUsageStore: @unchecked Sendable {
     }
 
     func rateLimitWatchPaths() -> [String] {
-        let threads = (try? loadRecentThreads()) ?? []
+        let threads = Array(((try? loadRecentThreads(range: .day)) ?? []).prefix(4))
         return uniqueExistingPaths(
-            candidateRateLimitPaths(from: threads, recentLimit: 10)
-                + recentSessionActivityWatchPaths()
+            candidateRateLimitPaths(from: threads, recentLimit: 4)
+                + recentSessionActivityWatchPaths(limit: 8)
+                + sqliteFileSet(deltaDatabase)
         )
     }
 
-    private func errorSnapshot(_ error: Error, now: Date) -> UsageSnapshot {
+    @discardableResult
+    func refreshAppServerRateLimits(now: Date = Date()) -> RateLimitSnapshot? {
+        loadAppServerRateLimits(now: now, allowBlocking: true)
+    }
+
+    private func errorSnapshot(_ error: Error, now: Date, snapshotDurationMs: Int? = nil) -> UsageSnapshot {
         UsageSnapshot(
             primaryPercent: nil,
             secondaryPercent: nil,
@@ -201,7 +250,16 @@ final class CodexUsageStore: @unchecked Sendable {
             tasks: [],
             isRunning: false,
             lastUpdated: now,
-            errorMessage: error.localizedDescription
+            errorMessage: error.localizedDescription,
+            monitorStats: MonitorPerformanceStats(
+                lastSnapshotDurationMs: snapshotDurationMs,
+                lastUsageDurationMs: nil,
+                lastDeltaDurationMs: nil,
+                lastRateLimitSource: "error",
+                watchedPathCount: 0,
+                jsonlContextScans: 0,
+                monitorModelTokens: 0
+            )
         )
     }
 
@@ -224,7 +282,8 @@ final class CodexUsageStore: @unchecked Sendable {
         now: Date,
         fallbackUsage: PeriodUsage?,
         rateLimitSource: RateLimitSourcePreference,
-        taskHistoryRange: TaskHistoryRange
+        taskHistoryRange: TaskHistoryRange,
+        contextTaskLimit: Int
     ) -> UsageSnapshot? {
         cacheLock.lock()
         let cache = fastCache
@@ -239,17 +298,37 @@ final class CodexUsageStore: @unchecked Sendable {
         }
 
         let usage = fallbackUsage ?? .zero
-        let tasks = buildTasks(from: cache.threads, activeThreadIDs: cache.activeThreadIDs, now: now)
+        let snapshotStartedAt = Date()
+        let deltaStartedAt = Date()
+        let deltas = loadTokenDeltas(for: cache.threads, now: now)
+        let deltaDurationMs = elapsedMilliseconds(since: deltaStartedAt)
+        let taskResult = buildTasks(
+            from: cache.threads,
+            activeThreadIDs: cache.activeThreadIDs,
+            deltas: deltas,
+            now: now,
+            contextTaskLimit: contextTaskLimit
+        )
+        let snapshotDurationMs = elapsedMilliseconds(since: snapshotStartedAt)
         return UsageSnapshot(
             primaryPercent: cache.rateLimits.primaryDisplayPercent(now: now),
             secondaryPercent: cache.rateLimits.secondaryDisplayPercent(now: now),
             usage24h: usage.day,
             usage7d: usage.week,
             usage30d: usage.month,
-            tasks: tasks,
-            isRunning: tasks.contains { $0.status == .running },
+            tasks: taskResult.tasks,
+            isRunning: taskResult.tasks.contains { $0.status == .running },
             lastUpdated: now,
-            errorMessage: nil
+            errorMessage: nil,
+            monitorStats: MonitorPerformanceStats(
+                lastSnapshotDurationMs: snapshotDurationMs,
+                lastUsageDurationMs: nil,
+                lastDeltaDurationMs: deltaDurationMs,
+                lastRateLimitSource: cache.rateLimitSourceName,
+                watchedPathCount: 0,
+                jsonlContextScans: taskResult.contextScans,
+                monitorModelTokens: 0
+            )
         )
     }
 
@@ -258,6 +337,7 @@ final class CodexUsageStore: @unchecked Sendable {
         activeThreadIDs: Set<String>,
         rateLimits: RateLimitSnapshot,
         signaturePaths: [String],
+        rateLimitSourceName: String,
         rateLimitSource: RateLimitSourcePreference,
         taskHistoryRange: TaskHistoryRange
     ) {
@@ -274,6 +354,7 @@ final class CodexUsageStore: @unchecked Sendable {
             threads: threads,
             activeThreadIDs: activeThreadIDs,
             rateLimits: rateLimits,
+            rateLimitSourceName: rateLimitSourceName,
             rateLimitSource: rateLimitSource,
             taskHistoryRange: taskHistoryRange
         )
@@ -559,7 +640,7 @@ final class CodexUsageStore: @unchecked Sendable {
             return databaseTokens
         }
 
-        if databaseTokens > 0, signature.size > UsageScanPolicy.largeSessionTokenScanLimit {
+        if databaseTokens > 0, signature.size > UsageScanPolicy.fastSnapshotTokenScanLimit {
             return databaseTokens
         }
 
@@ -875,16 +956,70 @@ final class CodexUsageStore: @unchecked Sendable {
         }
 
         for thread in recordsByPath.values {
-            if thread.tokensUsed > 0 {
-                add(
-                    tokens: thread.tokensUsed,
-                    date: Date(timeIntervalSince1970: TimeInterval(thread.updatedAt))
-                )
+            let signature = fileSignature(thread.rolloutPath)
+            if signature.exists,
+               signature.size <= UsageScanPolicy.largeSessionTokenScanLimit {
+                if let scanned = loadPeriodUsageFromRolloutTail(now: now, path: thread.rolloutPath),
+                   scanned.foundTokenEvents {
+                    day += scanned.usage.day
+                    week += scanned.usage.week
+                    month += scanned.usage.month
+                }
                 continue
             }
+
+            guard thread.tokensUsed > 0 else {
+                continue
+            }
+            add(
+                tokens: thread.tokensUsed,
+                date: Date(timeIntervalSince1970: TimeInterval(thread.updatedAt))
+            )
         }
 
         return PeriodUsage(day: day, week: week, month: month)
+    }
+
+    private func loadPeriodUsageFromRolloutTail(
+        now: Date,
+        path: String
+    ) -> (usage: PeriodUsage, foundTokenEvents: Bool)? {
+        guard let output = tokenCountLines(
+            from: path,
+            lineLimit: UsageScanPolicy.periodUsageTailLineLimit
+        ) else {
+            return nil
+        }
+
+        let dayStart = now.addingTimeInterval(-24 * 60 * 60)
+        let weekStart = now.addingTimeInterval(-7 * 24 * 60 * 60)
+        let monthStart = now.addingTimeInterval(-30 * 24 * 60 * 60)
+
+        var day = 0
+        var week = 0
+        var month = 0
+        var foundTokenEvents = false
+
+        for line in output.split(separator: "\n", omittingEmptySubsequences: true) {
+            guard let event = parseTokenCountEvent(String(line)) else {
+                continue
+            }
+
+            foundTokenEvents = true
+            guard event.date >= monthStart else {
+                continue
+            }
+
+            month += event.tokens
+            if event.date >= weekStart {
+                week += event.tokens
+            }
+            if event.date >= dayStart {
+                day += event.tokens
+            }
+        }
+
+        return (PeriodUsage(day: day, week: week, month: month), foundTokenEvents)
     }
 
     private func loadPeriodUsageWithRipgrep(now: Date, paths: [String]) -> PeriodUsage? {
@@ -1052,13 +1187,120 @@ final class CodexUsageStore: @unchecked Sendable {
         })
     }
 
-    private func buildTasks(from threads: [ThreadRecord], activeThreadIDs: Set<String>, now: Date) -> [CodexTask] {
-        let tasks = threads.map { thread -> CodexTask in
+    private func loadTokenDeltas(for threads: [ThreadRecord], now: Date) -> [String: TokenDeltaWindow] {
+        let currentRows = threads
+            .filter { !$0.id.isEmpty && $0.tokensUsed >= 0 }
+            .map { thread in
+                "(\(sqliteLiteral(thread.id.lowercased())), \(max(0, thread.tokensUsed)))"
+            }
+
+        guard !currentRows.isEmpty,
+              FileManager.default.fileExists(atPath: deltaDatabase) else {
+            return [:]
+        }
+
+        let nowMs = Int64((now.timeIntervalSince1970 * 1_000).rounded())
+        let tenMinutesAgo = nowMs - Int64(10 * 60 * 1_000)
+        let oneHourAgo = nowMs - Int64(60 * 60 * 1_000)
+        let query = """
+        WITH current_rows(thread_id, tokens_used) AS (
+          VALUES \(currentRows.joined(separator: ",\n                 "))
+        ),
+        rows_with_baselines AS (
+          SELECT
+            current_rows.thread_id,
+            current_rows.tokens_used,
+            (
+              SELECT baseline.tokens_used
+              FROM (
+                SELECT h.tokens_used, h.observed_at_ms
+                FROM token_snapshot_history AS h
+                WHERE h.thread_id = current_rows.thread_id
+                  AND h.observed_at_ms <= \(tenMinutesAgo)
+                UNION ALL
+                SELECT s.tokens_used, s.observed_at_ms
+                FROM token_snapshots AS s
+                WHERE s.thread_id = current_rows.thread_id
+                  AND s.observed_at_ms <= \(tenMinutesAgo)
+              ) AS baseline
+              ORDER BY baseline.observed_at_ms DESC
+              LIMIT 1
+            ) AS baseline_10m,
+            (
+              SELECT baseline.tokens_used
+              FROM (
+                SELECT h.tokens_used, h.observed_at_ms
+                FROM token_snapshot_history AS h
+                WHERE h.thread_id = current_rows.thread_id
+                  AND h.observed_at_ms <= \(oneHourAgo)
+                UNION ALL
+                SELECT s.tokens_used, s.observed_at_ms
+                FROM token_snapshots AS s
+                WHERE s.thread_id = current_rows.thread_id
+                  AND s.observed_at_ms <= \(oneHourAgo)
+              ) AS baseline
+              ORDER BY baseline.observed_at_ms DESC
+              LIMIT 1
+            ) AS baseline_1h
+          FROM current_rows
+        )
+        SELECT
+          thread_id,
+          CASE
+            WHEN baseline_10m IS NULL THEN NULL
+            WHEN tokens_used >= baseline_10m THEN tokens_used - baseline_10m
+            ELSE 0
+          END AS delta_10m_tokens,
+          CASE
+            WHEN baseline_1h IS NULL THEN NULL
+            WHEN tokens_used >= baseline_1h THEN tokens_used - baseline_1h
+            ELSE 0
+          END AS delta_1h_tokens
+        FROM rows_with_baselines;
+        """
+
+        guard let records = try? Shell.sqliteJSON(
+            database: deltaDatabase,
+            query: query,
+            as: [TokenDeltaRecord].self,
+            readOnly: true
+        ) else {
+            return [:]
+        }
+
+        return Dictionary(
+            records.map {
+                (
+                    $0.threadId.lowercased(),
+                    TokenDeltaWindow(delta10mTokens: $0.delta10mTokens, delta1hTokens: $0.delta1hTokens)
+                )
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
+    }
+
+    private func buildTasks(
+        from threads: [ThreadRecord],
+        activeThreadIDs: Set<String>,
+        deltas: [String: TokenDeltaWindow],
+        now: Date,
+        contextTaskLimit: Int = UsageScanPolicy.contextVisibleTaskLimit
+    ) -> BuildTasksResult {
+        var contextScanCount = 0
+        let tasks = threads.enumerated().map { index, thread -> CodexTask in
             let updatedAt = Date(timeIntervalSince1970: TimeInterval(thread.updatedAt))
             let status: TaskStatus = activeThreadIDs.contains(thread.id) ? .running : .recent
             let model = thread.model ?? "模型未知"
             let effort = localizedEffort(thread.reasoningEffort)
             let detail = "\(model) · \(effort) · \(Formatters.relativeAge(updatedAt, now: now))前"
+            let delta = deltas[thread.id.lowercased()]
+            let shouldLoadContext = status == .running || index < contextTaskLimit
+            let contextResult = shouldLoadContext
+                ? contextUsage(for: thread.rolloutPath)
+                : (usage: nil, didScan: false)
+            if contextResult.didScan {
+                contextScanCount += 1
+            }
 
             return CodexTask(
                 id: thread.id,
@@ -1067,15 +1309,24 @@ final class CodexUsageStore: @unchecked Sendable {
                 detail: detail,
                 tokenCount: thread.tokensUsed,
                 updatedAt: updatedAt,
-                activeSubagentCount: thread.activeSubagentCount
+                activeSubagentCount: thread.activeSubagentCount,
+                delta10mTokens: delta?.delta10mTokens,
+                delta1hTokens: delta?.delta1hTokens,
+                contextInputTokens: contextResult.usage?.inputTokens,
+                contextWindowTokens: contextResult.usage?.windowTokens,
+                contextPercent: contextResult.usage?.percent,
+                contextUpdatedAt: contextResult.usage?.updatedAt
             )
         }
 
         let running = tasks.filter { $0.status == .running }
         if !running.isEmpty {
-            return running + tasks.filter { $0.status != .running }
+            return BuildTasksResult(
+                tasks: running + tasks.filter { $0.status != .running },
+                contextScans: contextScanCount
+            )
         }
-        return tasks
+        return BuildTasksResult(tasks: tasks, contextScans: contextScanCount)
     }
 
     private func sessionLooksActive(path: String, fallbackUpdatedAt: Int, now: Date) -> Bool {
@@ -1551,7 +1802,7 @@ final class CodexUsageStore: @unchecked Sendable {
         var seen = Set<String>()
         var paths: [String] = []
 
-        for path in threads.map(\.rolloutPath) + recentSessionPaths(limit: recentLimit) {
+        for path in threads.map(\.rolloutPath) + recentTaskSessionPaths(limit: recentLimit) {
             guard !path.isEmpty, seen.insert(path).inserted else {
                 continue
             }
@@ -1687,13 +1938,30 @@ final class CodexUsageStore: @unchecked Sendable {
         }
     }
 
-    private func loadRateLimits(from paths: [String], source: RateLimitSourcePreference, now: Date) -> RateLimitSnapshot {
+    private func loadRateLimits(from paths: [String], source: RateLimitSourcePreference, now: Date) -> RateLimitLoadResult {
+        let local = loadLatestRateLimits(from: paths)
         switch source {
         case .appServerFirst:
-            loadAppServerRateLimits(now: now) ?? loadLatestRateLimits(from: paths)
+            if hasRateLimitData(local) {
+                return RateLimitLoadResult(snapshot: local, source: "local-jsonl")
+            }
+            if let appServer = loadAppServerRateLimits(now: now, allowBlocking: false) {
+                return RateLimitLoadResult(snapshot: appServer, source: "app-server-cache")
+            }
+            return RateLimitLoadResult(snapshot: local, source: "none")
         case .localFilesOnly:
-            loadLatestRateLimits(from: paths)
+            return RateLimitLoadResult(
+                snapshot: local,
+                source: hasRateLimitData(local) ? "local-jsonl" : "none"
+            )
         }
+    }
+
+    private func hasRateLimitData(_ snapshot: RateLimitSnapshot) -> Bool {
+        snapshot.primaryPercent != nil
+            || snapshot.secondaryPercent != nil
+            || snapshot.primaryResetsAt != nil
+            || snapshot.secondaryResetsAt != nil
     }
 
     private func loadLatestRateLimits(from paths: [String]) -> RateLimitSnapshot {
@@ -1722,7 +1990,7 @@ final class CodexUsageStore: @unchecked Sendable {
         )
     }
 
-    private func loadAppServerRateLimits(now: Date) -> RateLimitSnapshot? {
+    private func loadAppServerRateLimits(now: Date, allowBlocking: Bool) -> RateLimitSnapshot? {
         cacheLock.lock()
         let cached = appServerRateLimitCache
         cacheLock.unlock()
@@ -1736,6 +2004,10 @@ final class CodexUsageStore: @unchecked Sendable {
             default:
                 break
             }
+        }
+
+        guard allowBlocking else {
+            return nil
         }
 
         guard FileManager.default.fileExists(atPath: appServerExecutable) else {
@@ -1876,6 +2148,49 @@ final class CodexUsageStore: @unchecked Sendable {
         }
     }
 
+    private func contextUsage(for rolloutPath: String) -> (usage: TokenContextUsage?, didScan: Bool) {
+        guard !rolloutPath.isEmpty else {
+            return (nil, false)
+        }
+
+        let signature = fileSignature(rolloutPath)
+        guard signature.exists else {
+            return (nil, false)
+        }
+        cacheLock.lock()
+        let cached = sessionContextUsageCache[rolloutPath]
+        cacheLock.unlock()
+
+        if let cached, cached.signature == signature {
+            return (cached.usage, false)
+        }
+
+        let usage = scanContextUsage(from: rolloutPath)
+        cacheLock.lock()
+        sessionContextUsageCache[rolloutPath] = SessionContextUsageCache(signature: signature, usage: usage)
+        cacheLock.unlock()
+        return (usage, true)
+    }
+
+    private func scanContextUsage(from rolloutPath: String) -> TokenContextUsage? {
+        guard let output = tokenCountLines(
+            from: rolloutPath,
+            lineLimit: UsageScanPolicy.contextUsageTailLineLimit
+        ) else {
+            return nil
+        }
+
+        let lines = output.split(separator: "\n", omittingEmptySubsequences: true).reversed()
+        for line in lines {
+            guard let usage = TokenContextUsageParser.parse(line: String(line)) else {
+                continue
+            }
+            return usage
+        }
+
+        return nil
+    }
+
     private func parseTokenCountEvent(_ line: String) -> (date: Date, tokens: Int)? {
         if lineContainsTokenCountPayload(line),
            let timestamp = fastJSONStringValue(for: "timestamp", in: line),
@@ -2006,6 +2321,10 @@ final class CodexUsageStore: @unchecked Sendable {
         return FileSignature(path: path, exists: true, size: size, modifiedAt: modifiedAt)
     }
 
+    private func sqliteLiteral(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "''"))'"
+    }
+
     private func intValue(_ value: Any?) -> Int? {
         if let int = value as? Int {
             return int
@@ -2033,6 +2352,10 @@ final class CodexUsageStore: @unchecked Sendable {
         }
         return min(100, max(0, 100 - usedPercent))
     }
+
+    private func elapsedMilliseconds(since start: Date) -> Int {
+        max(0, Int((Date().timeIntervalSince(start) * 1_000).rounded()))
+    }
 }
 
 private struct FastSnapshotCache {
@@ -2042,8 +2365,19 @@ private struct FastSnapshotCache {
     let threads: [ThreadRecord]
     let activeThreadIDs: Set<String>
     let rateLimits: RateLimitSnapshot
+    let rateLimitSourceName: String
     let rateLimitSource: RateLimitSourcePreference
     let taskHistoryRange: TaskHistoryRange
+}
+
+private struct RateLimitLoadResult {
+    let snapshot: RateLimitSnapshot
+    let source: String
+}
+
+private struct BuildTasksResult {
+    let tasks: [CodexTask]
+    let contextScans: Int
 }
 
 private struct RecentPathsCache {
@@ -2057,6 +2391,28 @@ private struct SessionTokenTotalCache {
     let tokens: Int
     let pendingLine: String
     let foundTokenEvent: Bool
+}
+
+private struct SessionContextUsageCache {
+    let signature: FileSignature
+    let usage: TokenContextUsage?
+}
+
+private struct TokenDeltaWindow {
+    let delta10mTokens: Int?
+    let delta1hTokens: Int?
+}
+
+private struct TokenDeltaRecord: Decodable {
+    let threadId: String
+    let delta10mTokens: Int?
+    let delta1hTokens: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case threadId = "thread_id"
+        case delta10mTokens = "delta_10m_tokens"
+        case delta1hTokens = "delta_1h_tokens"
+    }
 }
 
 private struct SessionTokenScanResult {
