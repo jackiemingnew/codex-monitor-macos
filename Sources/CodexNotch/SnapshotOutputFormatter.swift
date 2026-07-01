@@ -19,7 +19,7 @@ enum SnapshotOutputFormatter {
             lines.append(
                 "task=\(task.status.label) \(task.title) \(task.tokenCount) "
                     + "delta10m=\(Formatters.signedCompactTokens(task.delta10mTokens)) "
-                    + "delta1h=\(Formatters.signedCompactTokens(task.delta1hTokens)) "
+                    + "today=\(Formatters.compactTokensWithShare(tokens: task.todayTokens, sharePercent: task.todaySharePercent)) "
                     + "ctx=\(Formatters.compactTokenRatio(task.contextInputTokens, task.contextWindowTokens))"
             )
         }
@@ -160,6 +160,8 @@ private struct SnapshotTaskJSON: Encodable {
     let subagents: Int
     let delta10mTokens: Int?
     let delta1hTokens: Int?
+    let todayTokens: Int?
+    let todaySharePercent: Double?
     let contextInputTokens: Int?
     let contextWindowTokens: Int?
     let contextPercent: Double?
@@ -176,6 +178,8 @@ private struct SnapshotTaskJSON: Encodable {
         self.subagents = task.activeSubagentCount
         self.delta10mTokens = task.delta10mTokens
         self.delta1hTokens = task.delta1hTokens
+        self.todayTokens = task.todayTokens
+        self.todaySharePercent = task.todaySharePercent
         self.contextInputTokens = task.contextInputTokens
         self.contextWindowTokens = task.contextWindowTokens
         self.contextPercent = task.contextPercent
@@ -193,6 +197,8 @@ private struct SnapshotTaskJSON: Encodable {
         case subagents
         case delta10mTokens = "delta_10m_tokens"
         case delta1hTokens = "delta_1h_tokens"
+        case todayTokens = "today_tokens"
+        case todaySharePercent = "today_share_percent"
         case contextInputTokens = "context_input_tokens"
         case contextWindowTokens = "context_window_tokens"
         case contextPercent = "context_percent"

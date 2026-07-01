@@ -649,14 +649,22 @@ struct DetailPanelView: View {
                 label: "5h Quota",
                 value: Formatters.percent(snapshot.primaryPercent),
                 percent: snapshot.primaryPercent,
-                resetText: quotaResetText(for: snapshot.primaryResetsAt, percent: snapshot.primaryPercent),
+                resetText: quotaResetText(
+                    for: snapshot.primaryResetsAt,
+                    percent: snapshot.primaryPercent,
+                    style: .time
+                ),
                 color: quotaColor(for: snapshot.primaryPercent)
             )
             QuotaBarCell(
                 label: "7d Quota",
                 value: Formatters.percent(snapshot.secondaryPercent),
                 percent: snapshot.secondaryPercent,
-                resetText: quotaResetText(for: snapshot.secondaryResetsAt, percent: snapshot.secondaryPercent),
+                resetText: quotaResetText(
+                    for: snapshot.secondaryResetsAt,
+                    percent: snapshot.secondaryPercent,
+                    style: .date
+                ),
                 color: quotaColor(for: snapshot.secondaryPercent)
             )
             CompactStatusCell(
@@ -801,11 +809,15 @@ struct DetailPanelView: View {
         return MonitorTheme.healthy
     }
 
-    private func quotaResetText(for resetAt: Int?, percent: Int?) -> String? {
+    private func quotaResetText(
+        for resetAt: Int?,
+        percent: Int?,
+        style: Formatters.QuotaResetDisplayStyle
+    ) -> String? {
         guard percent != nil else {
             return nil
         }
-        return Formatters.quotaResetText(resetAt)
+        return Formatters.quotaResetText(resetAt, style: style)
     }
 
     private var codexRadarHeaderStatus: String {
@@ -951,7 +963,7 @@ struct DetailPanelView: View {
 
     private func codexRadarFooter(_ radar: CodexRadarSnapshot) -> some View {
         HStack(spacing: 8) {
-            Text(radar.attributionText)
+            Text("\(radar.attributionText) · \(radar.dataSource.displayLabel)")
                 .font(.system(size: 9.4, weight: .medium))
                 .foregroundStyle(MonitorTheme.textTertiary)
                 .lineLimit(1)
@@ -1357,7 +1369,7 @@ private struct QuotaBarCell: View {
                     .monospacedDigit()
                 if let resetText {
                     Text(resetText)
-                        .font(.system(size: 8.2, weight: .medium))
+                        .font(.system(size: 9.2, weight: .medium))
                         .foregroundStyle(MonitorTheme.textTertiary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.72)
@@ -1488,8 +1500,8 @@ private struct TaskTableHeader: View {
                 .frame(width: 58, alignment: .leading)
             tableHeaderText("+10m")
                 .frame(width: 56, alignment: .trailing)
-            tableHeaderText("+1h")
-                .frame(width: 56, alignment: .trailing)
+            tableHeaderText("Today")
+                .frame(width: 78, alignment: .trailing)
             tableHeaderText("Ctx")
                 .frame(width: 66, alignment: .trailing)
             tableHeaderText("Total")
@@ -1547,12 +1559,12 @@ private struct TaskTableRow: View {
                 .minimumScaleFactor(0.62)
                 .monospacedDigit()
 
-            Text(Formatters.signedCompactTokens(task.delta1hTokens))
-                .font(.system(size: 10.2, weight: .semibold))
-                .foregroundStyle(deltaColor(task.delta1hTokens))
-                .frame(width: 56, alignment: .trailing)
+            Text(Formatters.compactTokensWithShare(tokens: task.todayTokens, sharePercent: task.todaySharePercent))
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(todayColor)
+                .frame(width: 78, alignment: .trailing)
                 .lineLimit(1)
-                .minimumScaleFactor(0.62)
+                .minimumScaleFactor(0.56)
                 .monospacedDigit()
 
             Text(Formatters.percent(task.contextPercent))
@@ -1588,6 +1600,13 @@ private struct TaskTableRow: View {
         case .recent, .idle:
             MonitorTheme.neutral
         }
+    }
+
+    private var todayColor: Color {
+        guard let tokens = task.todayTokens else {
+            return MonitorTheme.textTertiary
+        }
+        return tokens > 0 ? MonitorTheme.running : MonitorTheme.textSecondary
     }
 
     private func deltaColor(_ value: Int?) -> Color {

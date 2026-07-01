@@ -1,5 +1,19 @@
 import Foundation
 
+enum CodexRadarDataSource: String, Codable, Equatable, Sendable {
+    case authorizedAPI
+    case publicSummary
+
+    var displayLabel: String {
+        switch self {
+        case .authorizedAPI:
+            "API"
+        case .publicSummary:
+            "Public summary"
+        }
+    }
+}
+
 enum CodexRadarPanelState: Equatable, Sendable {
     case disabled
     case loading
@@ -43,6 +57,7 @@ struct CodexRadarSnapshot: Equatable, Sendable {
     var windowMessage: String?
     var predictionSummary: String?
     var costUSD: Double?
+    var dataSource: CodexRadarDataSource
     var attributionText: String
     var attributionRequired: Bool
     var siteURL: URL
@@ -60,6 +75,7 @@ struct CodexRadarSnapshot: Equatable, Sendable {
         windowMessage: nil,
         predictionSummary: nil,
         costUSD: nil,
+        dataSource: .authorizedAPI,
         attributionText: defaultAttributionText,
         attributionRequired: true,
         siteURL: siteURL,
@@ -78,6 +94,7 @@ struct CodexRadarSnapshot: Equatable, Sendable {
         windowMessage: nil,
         predictionSummary: nil,
         costUSD: nil,
+        dataSource: .authorizedAPI,
         attributionText: defaultAttributionText,
         attributionRequired: true,
         siteURL: siteURL,
@@ -100,7 +117,11 @@ struct CodexRadarSnapshot: Equatable, Sendable {
         return copy
     }
 
-    static func decodePublicSummary(from data: Data, fetchedAt: Date? = nil) throws -> CodexRadarSnapshot {
+    static func decodePublicSummary(
+        from data: Data,
+        fetchedAt: Date? = nil,
+        dataSource: CodexRadarDataSource = .publicSummary
+    ) throws -> CodexRadarSnapshot {
         let summary = try JSONDecoder().decode(CodexRadarPublicSummary.self, from: data)
         let attribution = summary.apiAccess?.requirements
         let attributionText = attribution?.attributionText?.nilIfBlank ?? defaultAttributionText
@@ -131,6 +152,7 @@ struct CodexRadarSnapshot: Equatable, Sendable {
             windowMessage: summary.window?.message?.nilIfBlank,
             predictionSummary: summary.prediction?.summary?.nilIfBlank,
             costUSD: costUSD,
+            dataSource: dataSource,
             attributionText: attributionText,
             attributionRequired: attribution?.attributionRequired ?? true,
             siteURL: siteURL,

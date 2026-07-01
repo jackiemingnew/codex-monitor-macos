@@ -114,6 +114,7 @@ private struct SettingsDraft: Equatable {
     var showPeriodUsage = true
     var showSparkQuota = false
     var codexRadarEnabled = true
+    var codexRadarAPIToken = ""
     var taskHistoryRange: TaskHistoryRange = .threeDays
     var notchDisplaySource: NotchDisplaySource = .codex
     var remoteMonitorEnabled = false
@@ -156,6 +157,7 @@ private struct SettingsDraft: Equatable {
         showPeriodUsage = settings.showPeriodUsage
         showSparkQuota = settings.showSparkQuota
         codexRadarEnabled = settings.codexRadarEnabled
+        codexRadarAPIToken = CodexRadarTokenProvider.loadSavedToken()
         taskHistoryRange = settings.taskHistoryRange
         notchDisplaySource = settings.notchDisplaySource
         remoteMonitorEnabled = settings.remoteMonitorEnabled
@@ -219,6 +221,7 @@ struct SettingsView: View {
     @State private var accountEditorID: String?
     @State private var accountEditorDraft = BalanceAccountConfiguration(source: .newAPI)
     @State private var deleteCandidate: AccountDeleteCandidate?
+    @State private var codexRadarTokenError: String?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -502,16 +505,30 @@ struct SettingsView: View {
     private var codexRadarSettingsContent: some View {
         Section("Codex Radar") {
             Toggle(isOn: $draft.codexRadarEnabled) {
-                HelpLabel(title: "启用 Codex Radar", help: "启用后详情页会出现 Codex Radar tab，用于展示 codexradar.com 的公开 summary 数据。")
+                HelpLabel(title: "启用 Codex Radar", help: "启用后详情页会出现 Codex Radar tab，默认优先读取 codexradar.com 授权 API。")
             }
 
-            Text("数据来自公开 summary，每天最多两次自动刷新：北京时间 08:20 和 14:20。手动刷新会限制为至少间隔 5 分钟。")
+            Text("默认使用 CodexRadar API；没有本机 token 时会自动降级到 public summary。每天最多两次自动刷新：北京时间 08:20 和 14:20。")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
+            labeledSecureField(
+                "API Token",
+                text: $draft.codexRadarAPIToken,
+                placeholder: "留空时读取环境变量或降级公开 summary",
+                help: "读取顺序：CODEXRADAR_API_TOKEN 环境变量、本机 token 文件、公开 summary 降级。本机 token 只保存到当前用户的 Application Support 目录。"
+            )
+            .disabled(!draft.codexRadarEnabled)
+
+            if let codexRadarTokenError {
+                Text("Radar token 保存失败：\(codexRadarTokenError)")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.red.opacity(0.85))
+            }
+
             HStack {
-                HelpLabel(title: "公开来源", help: "只读取 https://codexradar.com/current.json，不调用需要授权的 full API，也不保存账号、token、cookie 或身份信息。")
+                HelpLabel(title: "数据源", help: "有 token 时读取 https://codexradar.com/api/v1/current；没有 token 时读取 https://codexradar.com/current.json。不会缓存 Authorization header。")
                 Spacer()
                 Text(codexRadarStatusText)
                     .font(.system(size: 11, weight: .semibold))
@@ -1409,7 +1426,9 @@ struct SettingsView: View {
         case .loading:
             "读取中"
         case .ready:
-            codexRadarViewModel.snapshot.models.isEmpty ? "无模型数据" : "已更新"
+            codexRadarViewModel.snapshot.models.isEmpty
+                ? "\(codexRadarViewModel.snapshot.dataSource.displayLabel) 无模型数据"
+                : "\(codexRadarViewModel.snapshot.dataSource.displayLabel) 已更新"
         case .stale:
             "数据可能过期"
         case .error:
@@ -1576,6 +1595,13 @@ struct SettingsView: View {
         settings.showPeriodUsage = next.showPeriodUsage
         settings.showSparkQuota = next.showSparkQuota
         settings.codexRadarEnabled = next.codexRadarEnabled
+        do {
+            try CodexRadarTokenProvider.saveToken(next.codexRadarAPIToken)
+            codexRadarTokenError = nil
+        } catch {
+            codexRadarTokenError = error.localizedDescription
+            return
+        }
         settings.taskHistoryRange = next.taskHistoryRange
         settings.notchDisplaySource = next.notchDisplaySource
 

@@ -101,6 +101,9 @@ final class UsageViewModel: ObservableObject {
                 mergedSnapshot.usage24h = self.snapshot.usage24h
                 mergedSnapshot.usage7d = self.snapshot.usage7d
                 mergedSnapshot.usage30d = self.snapshot.usage30d
+                mergedSnapshot.tasks = mergedSnapshot.tasks.map {
+                    $0.withTodaySharePercent(totalTokens: mergedSnapshot.usage24h)
+                }
                 mergedSnapshot.monitorStats.lastUsageDurationMs = self.snapshot.monitorStats.lastUsageDurationMs
                 mergedSnapshot.monitorStats.watchedPathCount = self.snapshot.monitorStats.watchedPathCount
                 self.snapshot = mergedSnapshot
@@ -149,6 +152,9 @@ final class UsageViewModel: ObservableObject {
                     self.snapshot.usage24h = usage.day
                     self.snapshot.usage7d = usage.week
                     self.snapshot.usage30d = usage.month
+                    self.snapshot.tasks = self.snapshot.tasks.map {
+                        $0.withTodaySharePercent(totalTokens: usage.day)
+                    }
                 }
                 self.snapshot.monitorStats.lastUsageDurationMs = durationMs
                 self.isRefreshingUsage = false
@@ -480,6 +486,8 @@ final class UsageViewModel: ObservableObject {
                         activeSubagentCount: task.activeSubagentCount,
                         delta10mTokens: task.delta10mTokens,
                         delta1hTokens: task.delta1hTokens,
+                        todayTokens: task.todayTokens,
+                        todaySharePercent: task.todaySharePercent,
                         contextInputTokens: task.contextInputTokens,
                         contextWindowTokens: task.contextWindowTokens,
                         contextPercent: task.contextPercent,

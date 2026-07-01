@@ -1,6 +1,11 @@
 import Foundation
 
 enum Formatters {
+    enum QuotaResetDisplayStyle {
+        case time
+        case date
+    }
+
     static func compactTokens(_ value: Int) -> String {
         let absolute = abs(value)
         if absolute >= 100_000_000 {
@@ -43,8 +48,23 @@ enum Formatters {
         return String(format: "%.1f%%", value)
     }
 
+    static func wholePercent(_ value: Double?) -> String {
+        guard let value, value.isFinite else {
+            return "--"
+        }
+        return "\(Int(value.rounded()))%"
+    }
+
+    static func compactTokensWithShare(tokens: Int?, sharePercent: Double?) -> String {
+        guard let tokens else {
+            return "--"
+        }
+        return "\(compactTokens(tokens)) \(wholePercent(sharePercent))"
+    }
+
     static func quotaResetText(
         _ resetAt: Int?,
+        style: QuotaResetDisplayStyle = .time,
         now: Date = Date(),
         timeZone: TimeZone = .current
     ) -> String? {
@@ -52,11 +72,21 @@ enum Formatters {
             return nil
         }
 
+        let resetDate = Date(timeIntervalSince1970: TimeInterval(resetAt))
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = timeZone
-        formatter.dateFormat = "HH:mm"
-        return "\(formatter.string(from: Date(timeIntervalSince1970: TimeInterval(resetAt)))) 恢复"
+        switch style {
+        case .time:
+            formatter.dateFormat = "HH:mm"
+        case .date:
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = timeZone
+            let currentYear = calendar.component(.year, from: now)
+            let resetYear = calendar.component(.year, from: resetDate)
+            formatter.dateFormat = currentYear == resetYear ? "M/d" : "yyyy/M/d"
+        }
+        return "\(formatter.string(from: resetDate)) 恢复"
     }
 
     static func signedCompactTokens(_ value: Int?) -> String {

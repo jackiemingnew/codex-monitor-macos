@@ -107,6 +107,8 @@ struct CodexTask: Identifiable, Equatable {
     let activeSubagentCount: Int
     let delta10mTokens: Int?
     let delta1hTokens: Int?
+    let todayTokens: Int?
+    let todaySharePercent: Double?
     let contextInputTokens: Int?
     let contextWindowTokens: Int?
     let contextPercent: Double?
@@ -122,6 +124,8 @@ struct CodexTask: Identifiable, Equatable {
         activeSubagentCount: Int = 0,
         delta10mTokens: Int? = nil,
         delta1hTokens: Int? = nil,
+        todayTokens: Int? = nil,
+        todaySharePercent: Double? = nil,
         contextInputTokens: Int? = nil,
         contextWindowTokens: Int? = nil,
         contextPercent: Double? = nil,
@@ -136,10 +140,43 @@ struct CodexTask: Identifiable, Equatable {
         self.activeSubagentCount = activeSubagentCount
         self.delta10mTokens = delta10mTokens
         self.delta1hTokens = delta1hTokens
+        self.todayTokens = todayTokens
+        self.todaySharePercent = todaySharePercent
         self.contextInputTokens = contextInputTokens
         self.contextWindowTokens = contextWindowTokens
         self.contextPercent = contextPercent
         self.contextUpdatedAt = contextUpdatedAt
+    }
+
+    func withTodaySharePercent(totalTokens: Int) -> CodexTask {
+        CodexTask(
+            id: id,
+            title: title,
+            status: status,
+            detail: detail,
+            tokenCount: tokenCount,
+            updatedAt: updatedAt,
+            activeSubagentCount: activeSubagentCount,
+            delta10mTokens: delta10mTokens,
+            delta1hTokens: delta1hTokens,
+            todayTokens: todayTokens,
+            todaySharePercent: Self.sharePercent(tokens: todayTokens, totalTokens: totalTokens),
+            contextInputTokens: contextInputTokens,
+            contextWindowTokens: contextWindowTokens,
+            contextPercent: contextPercent,
+            contextUpdatedAt: contextUpdatedAt
+        )
+    }
+
+    static func sharePercent(tokens: Int?, totalTokens: Int) -> Double? {
+        guard let tokens, totalTokens > 0 else {
+            return nil
+        }
+        let percent = Double(max(0, tokens)) / Double(totalTokens) * 100
+        guard percent.isFinite else {
+            return nil
+        }
+        return min(100, max(0, percent))
     }
 }
 

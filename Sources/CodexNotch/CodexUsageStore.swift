@@ -173,6 +173,7 @@ final class CodexUsageStore: @unchecked Sendable {
                 from: threads,
                 activeThreadIDs: activeThreadIDs,
                 deltas: deltas,
+                todayTotalTokens: usage.day,
                 now: now,
                 contextTaskLimit: contextTaskLimit
             )
@@ -316,6 +317,7 @@ final class CodexUsageStore: @unchecked Sendable {
             from: cache.threads,
             activeThreadIDs: cache.activeThreadIDs,
             deltas: deltas,
+            todayTotalTokens: usage.day,
             now: now,
             contextTaskLimit: contextTaskLimit
         )
@@ -1216,6 +1218,7 @@ final class CodexUsageStore: @unchecked Sendable {
         let nowMs = Int64((now.timeIntervalSince1970 * 1_000).rounded())
         let tenMinutesAgo = nowMs - Int64(10 * 60 * 1_000)
         let oneHourAgo = nowMs - Int64(60 * 60 * 1_000)
+        let twentyFourHoursAgo = nowMs - Int64(24 * 60 * 60 * 1_000)
         let query = """
         WITH current_rows(thread_id, tokens_used) AS (
           VALUES \(currentRows.joined(separator: ",\n                 "))
@@ -1255,7 +1258,23 @@ final class CodexUsageStore: @unchecked Sendable {
               ) AS baseline
               ORDER BY baseline.observed_at_ms DESC
               LIMIT 1
-            ) AS baseline_1h
+            ) AS baseline_1h,
+            (
+              SELECT baseline.tokens_used
+              FROM (
+                SELECT h.tokens_used, h.observed_at_ms
+                FROM token_snapshot_history AS h
+                WHERE h.thread_id = current_rows.thread_id
+                  AND h.observed_at_ms <= \(twentyFourHoursAgo)
+                UNION ALL
+                SELECT s.tokens_used, s.observed_at_ms
+                FROM token_snapshots AS s
+                WHERE s.thread_id = current_rows.thread_id
+                  AND s.observed_at_ms <= \(twentyFourHoursAgo)
+              ) AS baseline
+              ORDER BY baseline.observed_at_ms DESC
+              LIMIT 1
+            ) AS baseline_24h
           FROM current_rows
         )
         SELECT
@@ -1269,7 +1288,12 @@ final class CodexUsageStore: @unchecked Sendable {
             WHEN baseline_1h IS NULL THEN NULL
             WHEN tokens_used >= baseline_1h THEN tokens_used - baseline_1h
             ELSE 0
-          END AS delta_1h_tokens
+          END AS delta_1h_tokens,
+          CASE
+            WHEN baseline_24h IS NULL THEN NULL
+            WHEN tokens_used >= baseline_24h THEN tokens_used - baseline_24h
+            ELSE 0
+          END AS delta_24h_tokens
         FROM rows_with_baselines;
         """
 
@@ -1286,7 +1310,11 @@ final class CodexUsageStore: @unchecked Sendable {
             records.map {
                 (
                     $0.threadId.lowercased(),
-                    TokenDeltaWindow(delta10mTokens: $0.delta10mTokens, delta1hTokens: $0.delta1hTokens)
+                    TokenDeltaWindow(
+                        delta10mTokens: $0.delta10mTokens,
+                        delta1hTokens: $0.delta1hTokens,
+                        delta24hTokens: $0.delta24hTokens
+                    )
                 )
             },
             uniquingKeysWith: { first, _ in first }
@@ -1386,6 +1414,7 @@ final class CodexUsageStore: @unchecked Sendable {
         from threads: [ThreadRecord],
         activeThreadIDs: Set<String>,
         deltas: [String: TokenDeltaWindow],
+        todayTotalTokens: Int,
         now: Date,
         contextTaskLimit: Int = UsageScanPolicy.contextVisibleTaskLimit
     ) -> BuildTasksResult {
@@ -1415,6 +1444,11 @@ final class CodexUsageStore: @unchecked Sendable {
                 activeSubagentCount: thread.activeSubagentCount,
                 delta10mTokens: delta?.delta10mTokens,
                 delta1hTokens: delta?.delta1hTokens,
+                todayTokens: delta?.delta24hTokens,
+                todaySharePercent: CodexTask.sharePercent(
+                    tokens: delta?.delta24hTokens,
+                    totalTokens: todayTotalTokens
+                ),
                 contextInputTokens: contextResult.usage?.inputTokens,
                 contextWindowTokens: contextResult.usage?.windowTokens,
                 contextPercent: contextResult.usage?.percent,
@@ -1907,6 +1941,9 @@ final class CodexUsageStore: @unchecked Sendable {
 
         for path in threads.map(\.rolloutPath) + recentTaskSessionPaths(limit: recentLimit) {
             guard !path.isEmpty, seen.insert(path).inserted else {
+                continue
+            }
+            guard sessionMeta(from: path)?.isSubagent != true else {
                 continue
             }
             paths.append(path)
@@ -2663,17 +2700,26 @@ private struct SessionContextUsageCache {
 private struct TokenDeltaWindow {
     let delta10mTokens: Int?
     let delta1hTokens: Int?
+    let delta24hTokens: Int?
+
+    init(delta10mTokens: Int?, delta1hTokens: Int?, delta24hTokens: Int? = nil) {
+        self.delta10mTokens = delta10mTokens
+        self.delta1hTokens = delta1hTokens
+        self.delta24hTokens = delta24hTokens
+    }
 }
 
 private struct TokenDeltaRecord: Decodable {
     let threadId: String
     let delta10mTokens: Int?
     let delta1hTokens: Int?
+    let delta24hTokens: Int?
 
     enum CodingKeys: String, CodingKey {
         case threadId = "thread_id"
         case delta10mTokens = "delta_10m_tokens"
         case delta1hTokens = "delta_1h_tokens"
+        case delta24hTokens = "delta_24h_tokens"
     }
 }
 

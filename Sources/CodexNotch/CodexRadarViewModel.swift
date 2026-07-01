@@ -115,10 +115,14 @@ final class CodexRadarViewModel: ObservableObject {
 
         refreshTask = Task.detached(priority: .utility) {
             do {
-                let data = try await client.fetchPublicSummary()
+                let result = try await client.fetchSummary()
                 let fetchedAt = Date()
-                let nextSnapshot = try CodexRadarSnapshot.decodePublicSummary(from: data, fetchedAt: fetchedAt)
-                try CodexRadarCache.save(data: data, fetchedAt: fetchedAt, to: cacheDirectory)
+                let nextSnapshot = try CodexRadarSnapshot.decodePublicSummary(
+                    from: result.data,
+                    fetchedAt: fetchedAt,
+                    dataSource: result.source
+                )
+                try CodexRadarCache.save(data: result.data, fetchedAt: fetchedAt, source: result.source, to: cacheDirectory)
                 await MainActor.run {
                     guard generation == self.refreshGeneration else {
                         return
@@ -239,17 +243,21 @@ private enum CodexRadarCache {
             return nil
         }
         let metadata = loadMetadata(from: metadataURL)
-        guard let snapshot = try? CodexRadarSnapshot.decodePublicSummary(from: data, fetchedAt: metadata?.lastFetchAt) else {
+        guard let snapshot = try? CodexRadarSnapshot.decodePublicSummary(
+            from: data,
+            fetchedAt: metadata?.lastFetchAt,
+            dataSource: metadata?.source ?? .publicSummary
+        ) else {
             return nil
         }
         return CodexRadarCacheEntry(snapshot: snapshot)
     }
 
-    static func save(data: Data, fetchedAt: Date, to directory: URL) throws {
+    static func save(data: Data, fetchedAt: Date, source: CodexRadarDataSource, to directory: URL) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try data.write(to: directory.appendingPathComponent("current.json"), options: .atomic)
 
-        let metadata = CodexRadarCacheMetadata(lastFetchAt: fetchedAt)
+        let metadata = CodexRadarCacheMetadata(lastFetchAt: fetchedAt, source: source)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         let metadataData = try encoder.encode(metadata)
@@ -268,4 +276,5 @@ private enum CodexRadarCache {
 
 private struct CodexRadarCacheMetadata: Codable {
     let lastFetchAt: Date
+    let source: CodexRadarDataSource?
 }

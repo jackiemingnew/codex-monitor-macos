@@ -39,6 +39,8 @@ let snapshotFormatterTask = CodexTask(
     activeSubagentCount: 3,
     delta10mTokens: 1200,
     delta1hTokens: 3456,
+    todayTokens: 12,
+    todaySharePercent: 10.81081081081081,
     contextInputTokens: 58609,
     contextWindowTokens: 258400,
     contextPercent: 22.681501547987615,
@@ -91,8 +93,8 @@ runner.check(
     "human snapshot output should expose monitor self cost"
 )
 runner.check(
-    humanSnapshotLines.contains("task=运行中 父任务 12345 delta10m=+1.2千 delta1h=+3.5千 ctx=6万/26万"),
-    "human snapshot task line should expose token deltas and context ratio"
+    humanSnapshotLines.contains("task=运行中 父任务 12345 delta10m=+1.2千 today=12 11% ctx=6万/26万"),
+    "human snapshot task line should expose short delta, Today usage share, and context ratio"
 )
 runner.check(
     !humanSnapshotLines.contains { $0.contains("subagents=") },
@@ -130,6 +132,24 @@ runner.check(
         timeZone: TimeZone(secondsFromGMT: 0)!
     ) == "13:46 恢复",
     "quota reset formatter should display future reset time"
+)
+runner.check(
+    Formatters.quotaResetText(
+        1_783_518_400,
+        style: .date,
+        now: Date(timeIntervalSince1970: 1_783_000_000),
+        timeZone: TimeZone(secondsFromGMT: 0)!
+    ) == "7/8 恢复",
+    "quota reset formatter should display same-year reset date"
+)
+runner.check(
+    Formatters.quotaResetText(
+        1_798_859_045,
+        style: .date,
+        now: Date(timeIntervalSince1970: 1_798_675_200),
+        timeZone: TimeZone(secondsFromGMT: 0)!
+    ) == "2027/1/2 恢复",
+    "quota reset formatter should include year for cross-year reset date"
 )
 runner.check(
     Formatters.quotaResetText(
@@ -179,6 +199,14 @@ runner.check(
 runner.check(
     jsonSnapshotTasks?.first?["delta_1h_tokens"] as? Int == 3456,
     "JSON snapshot output should expose 1 hour token deltas"
+)
+runner.check(
+    jsonSnapshotTasks?.first?["today_tokens"] as? Int == 12,
+    "JSON snapshot output should expose Today token usage"
+)
+runner.check(
+    (jsonSnapshotTasks?.first?["today_share_percent"] as? Double).map { abs($0 - 10.81081081081081) < 0.000001 } == true,
+    "JSON snapshot output should expose Today usage share percent"
 )
 runner.check(
     jsonSnapshotTasks?.first?["context_input_tokens"] as? Int == 58609,
@@ -320,7 +348,11 @@ let codexRadarFixture = """
 }
 """.data(using: .utf8)!
 let radarFetchedAt = dateFromISO8601("2026-07-01T06:28:00+08:00", message: "Codex Radar fetched timestamp should parse")
-let radarSnapshot = try CodexRadarSnapshot.decodePublicSummary(from: codexRadarFixture, fetchedAt: radarFetchedAt)
+let radarSnapshot = try CodexRadarSnapshot.decodePublicSummary(
+    from: codexRadarFixture,
+    fetchedAt: radarFetchedAt,
+    dataSource: .authorizedAPI
+)
 runner.check(radarSnapshot.models.count == 5, "Codex Radar summary should expose five model cards")
 runner.check(radarSnapshot.models.map(\.label) == [
     "GPT-5.5 xhigh",
@@ -337,6 +369,7 @@ runner.check(radarSnapshot.quotaRows.first?.tier == "20x Pro", "Codex Radar quot
 runner.check(radarSnapshot.quotaRows.first?.fiveH == 276.44, "Codex Radar quota row should decode 5h estimate")
 runner.check(radarSnapshot.quotaRows.first?.sevenD == 1658.63, "Codex Radar quota row should decode 7d estimate")
 runner.check(radarSnapshot.costUSD == 132.690071, "Codex Radar cost should prefer quota_radar cost")
+runner.check(radarSnapshot.dataSource == .authorizedAPI, "Codex Radar snapshot should preserve the authorized API source")
 runner.check(
     radarSnapshot.displayUpdatedAt == dateFromISO8601("2026-06-30T22:27:57Z", message: "Codex Radar display timestamp should parse"),
     "Codex Radar display timestamp should prefer the freshest source data timestamp"
@@ -387,8 +420,12 @@ runner.check(
     "Codex Radar client should allow the public summary URL"
 )
 runner.check(
+    CodexRadarClient.isAllowedAuthorizedAPIURL(URL(string: "https://codexradar.com/api/v1/current")!),
+    "Codex Radar client should allow the authorized current API URL"
+)
+runner.check(
     !CodexRadarClient.isAllowedPublicSummaryURL(URL(string: "https://codexradar.com/api/v1/current")!),
-    "Codex Radar client should reject the full API URL"
+    "Codex Radar public summary allowlist should not allow the API URL"
 )
 runner.check(
     !CodexRadarClient.isAllowedPublicSummaryURL(URL(string: "https://codexradar.com@evil.example.com/current.json")!),
@@ -398,6 +435,31 @@ runner.check(
     !CodexRadarClient.isAllowedPublicSummaryURL(URL(string: "http://codexradar.com/current.json")!),
     "Codex Radar client should require HTTPS"
 )
+runner.check(
+    !CodexRadarClient.isAllowedAuthorizedAPIURL(URL(string: "http://codexradar.com/api/v1/current")!),
+    "Codex Radar authorized API should require HTTPS"
+)
+runner.check(
+    !CodexRadarClient.isAllowedAuthorizedAPIURL(URL(string: "https://codexradar.com@evil.example.com/api/v1/current")!),
+    "Codex Radar authorized API should reject userinfo spoofing"
+)
+
+let radarTokenDirectory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("CodexRadarTokenProvider-\(UUID().uuidString)", isDirectory: true)
+let radarTokenFile = radarTokenDirectory.appendingPathComponent("token")
+let emptyRadarTokenProvider = CodexRadarTokenProvider(environment: [:], tokenFileURL: radarTokenFile)
+runner.check(emptyRadarTokenProvider.token() == nil, "Codex Radar token provider should return nil when no token is configured")
+try CodexRadarTokenProvider.saveToken("  local-token  ", to: radarTokenFile)
+let fileRadarTokenProvider = CodexRadarTokenProvider(environment: [:], tokenFileURL: radarTokenFile)
+runner.check(fileRadarTokenProvider.token() == "local-token", "Codex Radar token provider should read the local token file")
+let environmentRadarTokenProvider = CodexRadarTokenProvider(
+    environment: [CodexRadarTokenProvider.environmentKey: "  env-token  "],
+    tokenFileURL: radarTokenFile
+)
+runner.check(environmentRadarTokenProvider.token() == "env-token", "Codex Radar token provider should prefer the environment token")
+try CodexRadarTokenProvider.saveToken("", to: radarTokenFile)
+runner.check(!FileManager.default.fileExists(atPath: radarTokenFile.path), "Codex Radar empty token save should remove the local token file")
+try? FileManager.default.removeItem(at: radarTokenDirectory)
 
 let radarCalendar = CodexRadarRefreshPolicy.beijingCalendar
 let beforeMorningSlot = dateFromISO8601("2026-07-01T07:00:00+08:00", message: "before morning slot date should parse")
@@ -2236,6 +2298,7 @@ let rolloutPath = sessionDirectory
     .appendingPathComponent("rollout-2026-06-14T02-20-00-\(sessionID).jsonl")
 let now = Date()
 let timestamp = ISO8601DateFormatter().string(from: now)
+let subagentQuotaTimestamp = ISO8601DateFormatter().string(from: now.addingTimeInterval(30))
 let rolloutBody = """
 {"timestamp":"\(timestamp)","type":"turn_context","payload":{"model":"gpt-5.5","effort":"xhigh","collaboration_mode":{"settings":{"reasoning_effort":"xhigh"}}}}
 {"timestamp":"\(timestamp)","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"正在运行的 Codex 任务"}]}}
@@ -2251,10 +2314,11 @@ let subagentRolloutBody = """
 {"timestamp":"\(timestamp)","type":"session_meta","payload":{"id":"\(subagentSessionID)","parent_thread_id":"\(sessionID)","source":{"subagent":{"thread_spawn":{"parent_thread_id":"\(sessionID)","depth":1,"agent_nickname":"Test","agent_role":"explorer"}}},"thread_source":"subagent","agent_nickname":"Test","agent_role":"explorer"}}
 {"timestamp":"\(timestamp)","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"子代理任务不应该显示"}]}}
 {"timestamp":"\(timestamp)","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":10000}}}}
+{"timestamp":"\(subagentQuotaTimestamp)","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":0}},"rate_limits":{"limit_id":"codex","primary":{"used_percent":8,"resets_at":1783000600},"secondary":{"used_percent":2,"resets_at":1783400600}}}}
 {"timestamp":"\(timestamp)","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":23456}}}}
 """
 try subagentRolloutBody.write(to: subagentRolloutPath, atomically: true, encoding: .utf8)
-try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: subagentRolloutPath.path)
+try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(30)], ofItemAtPath: subagentRolloutPath.path)
 
 let historicalSubagentRolloutPath = sessionDirectory
     .appendingPathComponent("rollout-2026-06-14T02-20-04-\(historicalSubagentSessionID).jsonl")
@@ -2447,6 +2511,7 @@ try FileManager.default.createDirectory(at: deltaDirectory, withIntermediateDire
 let deltaDatabase = deltaDirectory.appendingPathComponent("usage-deltas.sqlite").path
 let observedNowMs = Int64((now.timeIntervalSince1970 * 1_000).rounded())
 let oneHourBaselineMs = observedNowMs - Int64(61 * 60 * 1_000)
+let twentyFourHourBaselineMs = observedNowMs - Int64(25 * 60 * 60 * 1_000)
 let staleCurrentMs = observedNowMs - Int64(2 * 60 * 60 * 1_000)
 let staleBaselineMs = observedNowMs - Int64(3 * 60 * 60 * 1_000)
 let staleDeltaSessionID = "019e073a-c032-74e2-966e-b85ede0c9cd8"
@@ -2478,8 +2543,17 @@ _ = try Shell.run("/usr/bin/sqlite3", [
     insert into token_snapshot_history(thread_id, tokens_used, updated_at_ms, observed_at_ms)
     values
       ('\(sessionID)', 180000, \(oneHourBaselineMs), \(oneHourBaselineMs)),
+      ('\(sessionID)', 150000, \(twentyFourHourBaselineMs), \(twentyFourHourBaselineMs)),
       ('\(parentOnlySessionID)', 80000, \(oneHourBaselineMs), \(oneHourBaselineMs)),
+      ('\(parentOnlySessionID)', 60000, \(twentyFourHourBaselineMs), \(twentyFourHourBaselineMs)),
       ('\(staleDeltaSessionID)', 1000, \(staleBaselineMs), \(staleBaselineMs));
+    """
+])
+_ = try Shell.run("/usr/bin/sqlite3", [
+    stateDatabase,
+    """
+    insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, updated_at, archived)
+    values('\(missingBaselineDeltaSessionID)', 'Today baseline missing', 500, 'gpt-5.5', 'high', '', \(Int(now.timeIntervalSince1970)), 0);
     """
 ])
 
@@ -2494,10 +2568,14 @@ let localSnapshot = localStore.loadSnapshot(
 runner.check(localSnapshot.isRunning, "recent session rollout should mark local Codex as running")
 runner.check(localSnapshot.usage1h == 6046, "aggregate 1 hour usage should sum all recent delta snapshots")
 runner.check(localSnapshot.tasks.first?.delta1hTokens != localSnapshot.usage1h, "aggregate 1 hour usage should not reuse the first visible task delta")
+runner.check(localSnapshot.tasks.first { $0.id == sessionID }?.todayTokens == 35801, "session Today usage should use the 24 hour delta baseline")
+runner.check(localSnapshot.tasks.first { $0.id == parentOnlySessionID }?.todayTokens == 20245, "parent-only session Today usage should use the 24 hour delta baseline")
+runner.check(localSnapshot.tasks.first { $0.id == missingBaselineDeltaSessionID }?.todayTokens == nil, "missing 24 hour baseline should hide session Today usage")
 runner.check(localSnapshot.primaryPercent == 67, "local JSONL Codex quota should expose main 5h quota")
 runner.check(localSnapshot.secondaryPercent == 45, "local JSONL Codex quota should expose main 7d quota")
 runner.check(localSnapshot.primaryResetsAt == 1783000000, "local JSONL Codex quota should expose primary reset time")
 runner.check(localSnapshot.secondaryResetsAt == 1783400000, "local JSONL Codex quota should expose secondary reset time")
+runner.check(localSnapshot.primaryPercent != 92, "subagent Codex quota should not override the main 5h quota")
 runner.check(localSnapshot.sparkQuotaWindows.map(\.remainingPercent) == [60, 90], "local JSONL Spark quota windows should decode")
 runner.check(localSnapshot.tasks.contains { $0.id == sessionID && $0.status == .running }, "recent session rollout should appear in running task list")
 runner.check(localSnapshot.tasks.first { $0.id == sessionID }?.title == "正在运行的 Codex 任务", "session rollout should use the user message as task title")
