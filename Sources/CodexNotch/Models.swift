@@ -43,6 +43,7 @@ struct UsageSnapshot: Equatable {
     var usage24h: Int
     var usage7d: Int
     var usage30d: Int
+    var sparkQuotaWindows: [SparkQuotaWindow]
     var tasks: [CodexTask]
     var isRunning: Bool
     var lastUpdated: Date
@@ -56,6 +57,7 @@ struct UsageSnapshot: Equatable {
         usage24h: 0,
         usage7d: 0,
         usage30d: 0,
+        sparkQuotaWindows: [],
         tasks: [],
         isRunning: false,
         lastUpdated: Date(),
@@ -559,6 +561,25 @@ struct RateLimitSnapshot: Equatable {
     let secondaryResetsAt: Int?
     let capturedAt: Date?
     let isPrimaryCodexLimit: Bool
+    let sparkQuotaWindows: [SparkQuotaWindow]
+
+    init(
+        primaryPercent: Int?,
+        secondaryPercent: Int?,
+        primaryResetsAt: Int?,
+        secondaryResetsAt: Int?,
+        capturedAt: Date?,
+        isPrimaryCodexLimit: Bool,
+        sparkQuotaWindows: [SparkQuotaWindow] = []
+    ) {
+        self.primaryPercent = primaryPercent
+        self.secondaryPercent = secondaryPercent
+        self.primaryResetsAt = primaryResetsAt
+        self.secondaryResetsAt = secondaryResetsAt
+        self.capturedAt = capturedAt
+        self.isPrimaryCodexLimit = isPrimaryCodexLimit
+        self.sparkQuotaWindows = sparkQuotaWindows.sortedForSparkQuotaDisplay
+    }
 
     func primaryDisplayPercent(now: Date = Date()) -> Int? {
         displayPercent(primaryPercent, resetsAt: primaryResetsAt, now: now)
@@ -576,5 +597,82 @@ struct RateLimitSnapshot: Equatable {
             return 100
         }
         return percent
+    }
+
+    func withSparkQuotaWindows(_ windows: [SparkQuotaWindow]) -> RateLimitSnapshot {
+        RateLimitSnapshot(
+            primaryPercent: primaryPercent,
+            secondaryPercent: secondaryPercent,
+            primaryResetsAt: primaryResetsAt,
+            secondaryResetsAt: secondaryResetsAt,
+            capturedAt: capturedAt,
+            isPrimaryCodexLimit: isPrimaryCodexLimit,
+            sparkQuotaWindows: windows
+        )
+    }
+
+}
+
+struct SparkQuotaWindow: Identifiable, Equatable {
+    let id: String
+    let label: String
+    let remainingPercent: Int?
+    let usedPercent: Double?
+    let resetAt: Int?
+    let resetText: String?
+
+    var remainingText: String {
+        guard let remainingPercent else {
+            return "--"
+        }
+        return "\(remainingPercent)%"
+    }
+
+    func displayRemainingPercent(now: Date = Date()) -> Int? {
+        if let resetAt, Int(now.timeIntervalSince1970) >= resetAt {
+            return 100
+        }
+        if let remainingPercent, remainingPercent >= 99 {
+            return 100
+        }
+        return remainingPercent
+    }
+}
+
+extension Array where Element == SparkQuotaWindow {
+    var sortedForSparkQuotaDisplay: [SparkQuotaWindow] {
+        sorted {
+            if $0.sortPriority == $1.sortPriority {
+                return $0.label < $1.label
+            }
+            return $0.sortPriority < $1.sortPriority
+        }
+    }
+
+    var deduplicatedSparkQuotaWindows: [SparkQuotaWindow] {
+        var seen: Set<String> = []
+        var windows: [SparkQuotaWindow] = []
+        for window in self {
+            let key = window.label.lowercased()
+            guard !seen.contains(key) else {
+                continue
+            }
+            seen.insert(key)
+            windows.append(window)
+        }
+        return windows.sortedForSparkQuotaDisplay
+    }
+}
+
+private extension SparkQuotaWindow {
+    var sortPriority: Int {
+        switch label.lowercased() {
+        case "5h":
+            return 0
+        case "7d":
+            return 1
+        default:
+            return 2
+        }
     }
 }

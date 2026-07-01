@@ -463,6 +463,9 @@ final class UsageViewModel: ObservableObject {
         }
 
         if snapshot.errorMessage != nil {
+            if snapshot.sparkQuotaWindows.isEmpty {
+                snapshot.sparkQuotaWindows = previous.sparkQuotaWindows
+            }
             if snapshot.tasks.isEmpty {
                 snapshot.tasks = previous.tasks.map { task in
                     CodexTask(

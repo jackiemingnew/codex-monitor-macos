@@ -396,7 +396,8 @@ struct DetailPanelView: View {
     private var detailHeight: CGFloat {
         let localHeight = IslandMetrics.detailHeight(
             taskRows: IslandMetrics.visibleTaskRows,
-            showsPeriodUsage: settings.showPeriodUsage
+            showsPeriodUsage: settings.showPeriodUsage,
+            showsSparkQuota: settings.showSparkQuota
         )
         guard settings.remoteMonitorEnabled else {
             let balanceRows = [
@@ -628,6 +629,9 @@ struct DetailPanelView: View {
     private var localContent: some View {
         VStack(spacing: 8) {
             localQuotaStrip
+            if settings.showSparkQuota {
+                sparkQuotaStrip
+            }
             localMetricStrip
             localTaskTable
                 .frame(maxHeight: .infinity, alignment: .top)
@@ -671,6 +675,34 @@ struct DetailPanelView: View {
         .background(MonitorTheme.sectionFill, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(MonitorTheme.hairline, lineWidth: 0.6)
+        )
+    }
+
+    private var sparkQuotaStrip: some View {
+        HStack(spacing: 8) {
+            Text("Spark")
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(MonitorTheme.textPrimary)
+                .lineLimit(1)
+
+            if snapshot.sparkQuotaWindows.isEmpty {
+                Text("--")
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .foregroundStyle(MonitorTheme.textTertiary)
+            } else {
+                ForEach(snapshot.sparkQuotaWindows) { window in
+                    SparkQuotaChip(window: window)
+                }
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .stroke(MonitorTheme.hairline, lineWidth: 0.6)
         )
     }
@@ -1318,6 +1350,42 @@ private struct QuotaBarCell: View {
             CapsuleQuotaBar(value: percent, color: color)
         }
         .frame(maxWidth: .infinity)
+    }
+}
+
+private struct SparkQuotaChip: View {
+    let window: SparkQuotaWindow
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text(window.label)
+                .font(.system(size: 9.2, weight: .medium))
+                .foregroundStyle(MonitorTheme.textTertiary)
+                .lineLimit(1)
+
+            Text(window.remainingText)
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(MonitorTheme.running)
+                .lineLimit(1)
+                .minimumScaleFactor(0.78)
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .background(MonitorTheme.controlFill, in: Capsule())
+        .overlay(
+            Capsule()
+                .stroke(MonitorTheme.hairline, lineWidth: 0.6)
+        )
+        .help(helpText)
+    }
+
+    private var helpText: String {
+        var parts = ["GPT-5.3-Codex-Spark \(window.label)"]
+        if let resetText = window.resetText {
+            parts.append(resetText)
+        }
+        return parts.joined(separator: " · ")
     }
 }
 

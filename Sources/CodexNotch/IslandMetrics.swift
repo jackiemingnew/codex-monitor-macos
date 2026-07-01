@@ -14,16 +14,17 @@ enum IslandMetrics {
     static let visibleTaskRows = 5
 
     static var detailHeight: CGFloat {
-        detailHeight(taskRows: 2, showsPeriodUsage: true)
+        detailHeight(taskRows: 2, showsPeriodUsage: true, showsSparkQuota: false)
     }
 
     static var width: CGFloat {
         shoulderWidth * 2 + notchWidth
     }
 
-    static func detailHeight(taskRows: Int, showsPeriodUsage: Bool) -> CGFloat {
+    static func detailHeight(taskRows: Int, showsPeriodUsage: Bool, showsSparkQuota: Bool = false) -> CGFloat {
         let rows = max(1, min(visibleTaskRows, taskRows))
-        let localTelemetryHeight: CGFloat = 48 + 52 + 26
+        let sparkHeight: CGFloat = showsSparkQuota ? 8 + 32 : 0
+        let localTelemetryHeight: CGFloat = 48 + sparkHeight + 52 + 26
         let taskStackHeight = CGFloat(rows) * 34
         let periodHeight: CGFloat = showsPeriodUsage ? 8 + 44 : 0
         let contentHeight = detailTopPadding

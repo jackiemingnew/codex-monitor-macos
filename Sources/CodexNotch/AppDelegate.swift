@@ -230,6 +230,7 @@ final class NotchOverlayController {
 
         settings.$taskHistoryRange
             .combineLatest(settings.$showPeriodUsage)
+            .combineLatest(settings.$showSparkQuota)
             .sink { [weak self] _, _ in
                 DispatchQueue.main.async {
                     self?.updateFrames()
@@ -448,7 +449,8 @@ final class NotchOverlayController {
     private var localDetailHeight: CGFloat {
         IslandMetrics.detailHeight(
             taskRows: IslandMetrics.visibleTaskRows,
-            showsPeriodUsage: settings.showPeriodUsage
+            showsPeriodUsage: settings.showPeriodUsage,
+            showsSparkQuota: settings.showSparkQuota
         )
     }
 }

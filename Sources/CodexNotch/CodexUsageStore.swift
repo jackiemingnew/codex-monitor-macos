@@ -194,6 +194,7 @@ final class CodexUsageStore: @unchecked Sendable {
                 usage24h: usage.day,
                 usage7d: usage.week,
                 usage30d: usage.month,
+                sparkQuotaWindows: displaySparkQuotaWindows(rateLimitResult.snapshot, now: now),
                 tasks: taskResult.tasks,
                 isRunning: taskResult.tasks.contains { $0.status == .running },
                 lastUpdated: now,
@@ -250,6 +251,7 @@ final class CodexUsageStore: @unchecked Sendable {
             usage24h: 0,
             usage7d: 0,
             usage30d: 0,
+            sparkQuotaWindows: [],
             tasks: [],
             isRunning: false,
             lastUpdated: now,
@@ -321,6 +323,7 @@ final class CodexUsageStore: @unchecked Sendable {
             usage24h: usage.day,
             usage7d: usage.week,
             usage30d: usage.month,
+            sparkQuotaWindows: displaySparkQuotaWindows(cache.rateLimits, now: now),
             tasks: taskResult.tasks,
             isRunning: taskResult.tasks.contains { $0.status == .running },
             lastUpdated: now,
@@ -2036,10 +2039,19 @@ final class CodexUsageStore: @unchecked Sendable {
         let local = loadLatestRateLimits(from: paths)
         switch source {
         case .appServerFirst:
+            let appServer = loadAppServerRateLimits(now: now, allowBlocking: false)
             if hasRateLimitData(local) {
+                if let appServer, !appServer.sparkQuotaWindows.isEmpty {
+                    return RateLimitLoadResult(
+                        snapshot: local.withSparkQuotaWindows(
+                            (appServer.sparkQuotaWindows + local.sparkQuotaWindows).deduplicatedSparkQuotaWindows
+                        ),
+                        source: local.sparkQuotaWindows.isEmpty ? "local-jsonl+app-server-cache" : "local-jsonl"
+                    )
+                }
                 return RateLimitLoadResult(snapshot: local, source: "local-jsonl")
             }
-            if let appServer = loadAppServerRateLimits(now: now, allowBlocking: false) {
+            if let appServer {
                 return RateLimitLoadResult(snapshot: appServer, source: "app-server-cache")
             }
             return RateLimitLoadResult(snapshot: local, source: "none")
@@ -2056,22 +2068,24 @@ final class CodexUsageStore: @unchecked Sendable {
             || snapshot.secondaryPercent != nil
             || snapshot.primaryResetsAt != nil
             || snapshot.secondaryResetsAt != nil
+            || !snapshot.sparkQuotaWindows.isEmpty
     }
 
     private func loadLatestRateLimits(from paths: [String]) -> RateLimitSnapshot {
         let snapshots = paths
             .filter { !$0.isEmpty && FileManager.default.fileExists(atPath: $0) }
             .compactMap { readRateLimitSnapshot(from: $0) }
+        let sparkQuotaWindows = mergedSparkQuotaWindows(from: snapshots)
 
         if let codexSnapshot = snapshots
             .filter(\.isPrimaryCodexLimit)
             .max(by: { ($0.capturedAt ?? .distantPast) < ($1.capturedAt ?? .distantPast) }) {
-            return codexSnapshot
+            return codexSnapshot.withSparkQuotaWindows(sparkQuotaWindows)
         }
 
         if let latestSnapshot = snapshots
             .max(by: { ($0.capturedAt ?? .distantPast) < ($1.capturedAt ?? .distantPast) }) {
-            return latestSnapshot
+            return latestSnapshot.withSparkQuotaWindows(sparkQuotaWindows)
         }
 
         return RateLimitSnapshot(
@@ -2080,8 +2094,31 @@ final class CodexUsageStore: @unchecked Sendable {
             primaryResetsAt: nil,
             secondaryResetsAt: nil,
             capturedAt: nil,
-            isPrimaryCodexLimit: false
+            isPrimaryCodexLimit: false,
+            sparkQuotaWindows: []
         )
+    }
+
+    private func mergedSparkQuotaWindows(from snapshots: [RateLimitSnapshot]) -> [SparkQuotaWindow] {
+        let sortedSnapshots = snapshots.sorted {
+            ($0.capturedAt ?? .distantPast) > ($1.capturedAt ?? .distantPast)
+        }
+        return sortedSnapshots
+            .flatMap(\.sparkQuotaWindows)
+            .deduplicatedSparkQuotaWindows
+    }
+
+    private func displaySparkQuotaWindows(_ snapshot: RateLimitSnapshot, now: Date) -> [SparkQuotaWindow] {
+        snapshot.sparkQuotaWindows.map { window in
+            SparkQuotaWindow(
+                id: window.id,
+                label: window.label,
+                remainingPercent: window.displayRemainingPercent(now: now),
+                usedPercent: window.usedPercent,
+                resetAt: window.resetAt,
+                resetText: window.resetText
+            )
+        }
     }
 
     private func loadAppServerRateLimits(now: Date, allowBlocking: Bool) -> RateLimitSnapshot? {
@@ -2139,11 +2176,14 @@ final class CodexUsageStore: @unchecked Sendable {
         """
     }
 
-    private func parseAppServerRateLimits(output: String, now: Date) -> RateLimitSnapshot? {
+    func parseAppServerRateLimits(output: String, now: Date) -> RateLimitSnapshot? {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+
         for line in output.split(separator: "\n", omittingEmptySubsequences: true).reversed() {
             guard line.contains(#""id":2"#),
                   let data = line.data(using: .utf8),
-                  let response = try? JSONDecoder().decode(AppServerRateLimitResponse.self, from: data),
+                  let response = try? decoder.decode(AppServerRateLimitResponse.self, from: data),
                   let result = response.result else {
                 continue
             }
@@ -2159,11 +2199,97 @@ final class CodexUsageStore: @unchecked Sendable {
                 primaryResetsAt: snapshot.primary?.resetsAt,
                 secondaryResetsAt: snapshot.secondary?.resetsAt,
                 capturedAt: now,
-                isPrimaryCodexLimit: true
+                isPrimaryCodexLimit: true,
+                sparkQuotaWindows: sparkQuotaWindows(from: result.rateLimitsByLimitId ?? [:])
             )
         }
 
         return nil
+    }
+
+    private func sparkQuotaWindows(from snapshotsByLimitID: [String: AppServerRateLimitSnapshot]) -> [SparkQuotaWindow] {
+        snapshotsByLimitID
+            .filter { key, snapshot in
+                isSparkRateLimit(key)
+                    || isSparkRateLimit(snapshot.limitId)
+                    || isSparkRateLimit(snapshot.limitName)
+            }
+            .sorted { lhs, rhs in lhs.key < rhs.key }
+            .flatMap { key, snapshot in
+                sparkQuotaWindows(
+                    limitID: snapshot.limitId ?? key,
+                    primary: snapshot.primary,
+                    secondary: snapshot.secondary
+                )
+            }
+            .deduplicatedSparkQuotaWindows
+    }
+
+    private func sparkQuotaWindows(
+        limitID: String,
+        primary: AppServerRateLimitWindow?,
+        secondary: AppServerRateLimitWindow?
+    ) -> [SparkQuotaWindow] {
+        [
+            sparkQuotaWindow(
+                id: "\(limitID)-5h",
+                label: "5h",
+                usedPercent: primary.map { Double($0.usedPercent) },
+                resetAt: primary?.resetsAt,
+                resetText: nil
+            ),
+            sparkQuotaWindow(
+                id: "\(limitID)-7d",
+                label: "7d",
+                usedPercent: secondary.map { Double($0.usedPercent) },
+                resetAt: secondary?.resetsAt,
+                resetText: nil
+            )
+        ].compactMap { $0 }
+    }
+
+    private func sparkQuotaWindows(
+        primary: [String: Any]?,
+        secondary: [String: Any]?
+    ) -> [SparkQuotaWindow] {
+        [
+            sparkQuotaWindow(
+                id: "spark-5h",
+                label: "5h",
+                usedPercent: doubleValue(primary?["used_percent"]),
+                resetAt: intValue(primary?["resets_at"]),
+                resetText: stringValue(primary?["reset_label"])
+            ),
+            sparkQuotaWindow(
+                id: "spark-7d",
+                label: "7d",
+                usedPercent: doubleValue(secondary?["used_percent"]),
+                resetAt: intValue(secondary?["resets_at"]),
+                resetText: stringValue(secondary?["reset_label"])
+            )
+        ].compactMap { $0 }
+    }
+
+    private func sparkQuotaWindow(
+        id: String,
+        label: String,
+        usedPercent: Double?,
+        resetAt: Int?,
+        resetText: String?
+    ) -> SparkQuotaWindow? {
+        guard usedPercent != nil || resetAt != nil || resetText != nil else {
+            return nil
+        }
+        let used = usedPercent.map { min(100, max(0, $0)) }
+        let remaining = used.map { Int((100 - $0).rounded()) }
+        return SparkQuotaWindow(
+            id: id,
+            label: label,
+            remainingPercent: remaining,
+            usedPercent: used,
+            resetAt: resetAt,
+            resetText: resetText
+        )
     }
 
     private func readRateLimitSnapshot(from rolloutPath: String) -> RateLimitSnapshot? {
@@ -2191,15 +2317,23 @@ final class CodexUsageStore: @unchecked Sendable {
             let secondaryPercent = remainingPercent(fromUsedPercent: secondary?["used_percent"])
             let primaryResetsAt = intValue(primary?["resets_at"])
             let secondaryResetsAt = intValue(secondary?["resets_at"])
+            let isSparkLimit = isSparkRateLimit(limitID)
+            let sparkWindows = isSparkLimit
+                ? sparkQuotaWindows(
+                    primary: primary,
+                    secondary: secondary
+                )
+                : []
 
-            if primaryPercent != nil || secondaryPercent != nil {
+            if primaryPercent != nil || secondaryPercent != nil || !sparkWindows.isEmpty {
                 return RateLimitSnapshot(
-                    primaryPercent: primaryPercent,
-                    secondaryPercent: secondaryPercent,
-                    primaryResetsAt: primaryResetsAt,
-                    secondaryResetsAt: secondaryResetsAt,
+                    primaryPercent: isSparkLimit ? nil : primaryPercent,
+                    secondaryPercent: isSparkLimit ? nil : secondaryPercent,
+                    primaryResetsAt: isSparkLimit ? nil : primaryResetsAt,
+                    secondaryResetsAt: isSparkLimit ? nil : secondaryResetsAt,
                     capturedAt: capturedAt,
-                    isPrimaryCodexLimit: limitID == "codex"
+                    isPrimaryCodexLimit: limitID == "codex",
+                    sparkQuotaWindows: sparkWindows
                 )
             }
         }
@@ -2440,11 +2574,39 @@ final class CodexUsageStore: @unchecked Sendable {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    private func doubleValue(_ value: Any?) -> Double? {
+        if let double = value as? Double {
+            return double
+        }
+        if let int = value as? Int {
+            return Double(int)
+        }
+        if let number = value as? NSNumber {
+            return number.doubleValue
+        }
+        if let string = value as? String {
+            return Double(string.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return nil
+    }
+
     private func remainingPercent(fromUsedPercent value: Any?) -> Int? {
         guard let usedPercent = intValue(value) else {
             return nil
         }
         return min(100, max(0, 100 - usedPercent))
+    }
+
+    private func isSparkRateLimit(_ value: String?) -> Bool {
+        guard let value else {
+            return false
+        }
+        let normalized = value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "_", with: "-")
+            .lowercased()
+        return normalized.contains("spark")
+            || normalized.contains("gpt-5.3-codex-spark")
     }
 
     private func elapsedMilliseconds(since start: Date) -> Int {
@@ -2572,6 +2734,7 @@ private struct AppServerRateLimitResult: Decodable {
 
 private struct AppServerRateLimitSnapshot: Decodable {
     let limitId: String?
+    let limitName: String?
     let primary: AppServerRateLimitWindow?
     let secondary: AppServerRateLimitWindow?
 }

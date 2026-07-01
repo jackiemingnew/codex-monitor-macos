@@ -48,6 +48,16 @@ let snapshotFormatterSnapshot = UsageSnapshot(
     usage24h: 111,
     usage7d: 222,
     usage30d: 333,
+    sparkQuotaWindows: [
+        SparkQuotaWindow(
+            id: "spark-5h",
+            label: "5h",
+            remainingPercent: 12,
+            usedPercent: 88,
+            resetAt: 1_783_000_000,
+            resetText: "2h"
+        )
+    ],
     tasks: [snapshotFormatterTask],
     isRunning: true,
     lastUpdated: Date(timeIntervalSince1970: 0),
@@ -68,6 +78,10 @@ runner.check(
     "human snapshot output should expose aggregate 1 hour usage"
 )
 runner.check(
+    humanSnapshotLines.contains("spark=5h=12%"),
+    "human snapshot output should expose Spark quota windows"
+)
+runner.check(
     humanSnapshotLines.contains("monitor snapshot_ms=42 usage_ms=84 delta_ms=5 rate=local-jsonl watched=7 context_scans=2 model_tokens=0"),
     "human snapshot output should expose monitor self cost"
 )
@@ -86,6 +100,15 @@ let jsonMonitor = jsonSnapshot?["monitor"] as? [String: Any]
 runner.check(
     jsonSnapshot?["usage_1h"] as? Int == 444,
     "JSON snapshot output should expose aggregate 1 hour usage"
+)
+let jsonSparkWindows = jsonSnapshot?["spark_quota_windows"] as? [[String: Any]]
+runner.check(
+    jsonSparkWindows?.first?["label"] as? String == "5h",
+    "JSON snapshot output should expose Spark quota labels"
+)
+runner.check(
+    jsonSparkWindows?.first?["remaining_percent"] as? Int == 12,
+    "JSON snapshot output should expose Spark quota remaining percent"
 )
 runner.check(
     jsonMonitor?["last_snapshot_duration_ms"] as? Int == 42,
@@ -156,6 +179,22 @@ runner.check(
     TaskBadgeFormatter.subagentBadgeText(for: 0) == nil,
     "task row subagent badge should stay hidden for zero active subagents"
 )
+
+let appServerRateLimitOutput = """
+{"jsonrpc":"2.0","id":2,"result":{"rate_limits":{"limit_id":"codex","primary":{"used_percent":20,"resets_at":1783000000},"secondary":{"used_percent":30,"resets_at":1783400000}},"rate_limits_by_limit_id":{"codex":{"limit_id":"codex","primary":{"used_percent":20,"resets_at":1783000000},"secondary":{"used_percent":30,"resets_at":1783400000}},"GPT-5.3-Codex-Spark":{"limit_id":"gpt-5.3-codex-spark","limit_name":"GPT-5.3-Codex-Spark","primary":{"used_percent":100,"resets_at":1783000000},"secondary":{"used_percent":25,"resets_at":1783400000}}}}}
+"""
+let appServerSnapshot = runner.require(
+    CodexUsageStore().parseAppServerRateLimits(
+        output: appServerRateLimitOutput,
+        now: Date(timeIntervalSince1970: 1_782_900_000)
+    ),
+    "app-server rate limit fixture should parse"
+)
+runner.check(appServerSnapshot.primaryPercent == 80, "app-server codex primary quota should remain the main 5h quota")
+runner.check(appServerSnapshot.secondaryPercent == 70, "app-server codex secondary quota should remain the main 7d quota")
+runner.check(appServerSnapshot.sparkQuotaWindows.map(\.label) == ["5h", "7d"], "app-server Spark quota windows should decode")
+runner.check(appServerSnapshot.sparkQuotaWindows.first?.remainingPercent == 0, "app-server Spark 5h remaining percent should decode")
+runner.check(appServerSnapshot.sparkQuotaWindows.last?.remainingPercent == 75, "app-server Spark 7d remaining percent should decode")
 
 @MainActor
 func dateFromISO8601(_ value: String, message: String) -> Date {
@@ -526,6 +565,7 @@ runner.check(settings.usageRefreshInterval == 300, "saving unchanged refresh int
 runner.check(settings.watcherRefreshInterval == 180, "saving unchanged refresh intervals should keep the folded low-power watcher default")
 runner.check(settings.fileChangeRefreshMinimumGap == 15, "saving unchanged refresh intervals should keep the folded low-power debounce default")
 runner.check(settings.codexRadarEnabled, "Codex Radar should default to enabled")
+runner.check(!settings.showSparkQuota, "Spark quota display should default to disabled")
 settings.activeRefreshInterval = 2
 settings.idleRefreshInterval = 4
 settings.usageRefreshInterval = 15
@@ -593,6 +633,7 @@ previousLowPowerDefaults.removePersistentDomain(forName: previousLowPowerSuiteNa
 runner.check(settings.remoteCodexDataSource == .cpaManagerPlus, "remote Codex monitor should default to CPA Manager Plus data")
 runner.check(settings.notchDisplaySource == .codex, "collapsed notch display should default to local Codex")
 settings.codexRadarEnabled = false
+settings.showSparkQuota = true
 settings.remoteCodexDataSource = .cliProxyAPI
 settings.notchDisplaySource = .remoteCodex
 settings.newAPIMonitorEnabled = true
@@ -614,6 +655,7 @@ let reloadedSettings = CodexNotchSettings(
 runner.check(reloadedSettings.remoteCodexDataSource == .cliProxyAPI, "remote Codex data source should persist")
 runner.check(reloadedSettings.notchDisplaySource == .remoteCodex, "collapsed notch display source should persist")
 runner.check(!reloadedSettings.codexRadarEnabled, "Codex Radar enablement should persist")
+runner.check(reloadedSettings.showSparkQuota, "Spark quota display preference should persist")
 runner.check(reloadedSettings.newAPIMonitorEnabled, "NewAPI monitor enablement should persist")
 runner.check(reloadedSettings.newAPIPanelURL == "https://newapi.example.com", "NewAPI panel URL should persist")
 runner.check(reloadedSettings.newAPIUsername == "owner", "NewAPI username should persist")
@@ -2085,6 +2127,7 @@ let completedFinalAnswerSessionID = "019e073a-c032-74e2-966e-b85ede0c9ccf"
 let dbBackedSessionID = "019e073a-c032-74e2-966e-b85ede0c9cce"
 let staleDBTokenSessionID = "019e073a-c032-74e2-966e-b85ede0c9cd2"
 let activeToolCallSessionID = "019e073a-c032-74e2-966e-b85ede0c9cd3"
+let sparkQuotaSessionID = "019e073a-c032-74e2-966e-b85ede0c9cda"
 let sessionDirectory = tempRoot
     .appendingPathComponent("sessions/2026/06/14", isDirectory: true)
 try FileManager.default.createDirectory(at: sessionDirectory, withIntermediateDirectories: true)
@@ -2266,6 +2309,22 @@ _ = try Shell.run("/usr/bin/sqlite3", [
     """
 ])
 
+let sparkQuotaPath = sessionDirectory
+    .appendingPathComponent("rollout-2026-06-14T02-20-17-\(sparkQuotaSessionID).jsonl")
+let sparkQuotaBody = """
+{"timestamp":"\(timestamp)","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Spark 额度测试"}]}}
+{"timestamp":"\(timestamp)","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":0}},"rate_limits":{"limit_id":"gpt-5.3-codex-spark","primary":{"used_percent":40,"resets_at":1783000000},"secondary":{"used_percent":"10","resets_at":1783400000}}}}
+"""
+try sparkQuotaBody.write(to: sparkQuotaPath, atomically: true, encoding: .utf8)
+try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: sparkQuotaPath.path)
+_ = try Shell.run("/usr/bin/sqlite3", [
+    stateDatabase,
+    """
+    insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, updated_at, archived)
+    values('\(sparkQuotaSessionID)', 'Spark 额度测试', 0, 'gpt-5.5', 'high', '\(sparkQuotaPath.path)', \(Int(now.timeIntervalSince1970)), 0);
+    """
+])
+
 let deltaDirectory = tempRoot.appendingPathComponent("context-guard", isDirectory: true)
 try FileManager.default.createDirectory(at: deltaDirectory, withIntermediateDirectories: true)
 let deltaDatabase = deltaDirectory.appendingPathComponent("usage-deltas.sqlite").path
@@ -2318,6 +2377,9 @@ let localSnapshot = localStore.loadSnapshot(
 runner.check(localSnapshot.isRunning, "recent session rollout should mark local Codex as running")
 runner.check(localSnapshot.usage1h == 6046, "aggregate 1 hour usage should sum all recent delta snapshots")
 runner.check(localSnapshot.tasks.first?.delta1hTokens != localSnapshot.usage1h, "aggregate 1 hour usage should not reuse the first visible task delta")
+runner.check(localSnapshot.primaryPercent == nil, "local Spark-only JSONL quota should not replace the main 5h quota")
+runner.check(localSnapshot.secondaryPercent == nil, "local Spark-only JSONL quota should not replace the main 7d quota")
+runner.check(localSnapshot.sparkQuotaWindows.map(\.remainingPercent) == [60, 90], "local JSONL Spark quota windows should decode")
 runner.check(localSnapshot.tasks.contains { $0.id == sessionID && $0.status == .running }, "recent session rollout should appear in running task list")
 runner.check(localSnapshot.tasks.first { $0.id == sessionID }?.title == "正在运行的 Codex 任务", "session rollout should use the user message as task title")
 runner.check(localSnapshot.tasks.first { $0.id == sessionID }?.detail.contains("gpt-5.5 · 超高推理") == true, "session rollout should use turn context model and effort")

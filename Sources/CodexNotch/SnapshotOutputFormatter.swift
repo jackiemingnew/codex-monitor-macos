@@ -11,6 +11,7 @@ enum SnapshotOutputFormatter {
         var lines = [
             "primary=\(Formatters.percent(snapshot.primaryPercent)) secondary=\(Formatters.percent(snapshot.secondaryPercent)) running=\(snapshot.isRunning)",
             "usage1h=\(optionalInt(snapshot.usage1h)) usage24h=\(snapshot.usage24h) usage7d=\(snapshot.usage7d) usage30d=\(snapshot.usage30d)",
+            "spark=\(snapshot.sparkQuotaWindows.map { "\($0.label)=\($0.remainingText)" }.joined(separator: ","))",
             "monitor snapshot_ms=\(optionalInt(snapshot.monitorStats.lastSnapshotDurationMs)) usage_ms=\(optionalInt(snapshot.monitorStats.lastUsageDurationMs)) delta_ms=\(optionalInt(snapshot.monitorStats.lastDeltaDurationMs)) rate=\(snapshot.monitorStats.lastRateLimitSource) watched=\(snapshot.monitorStats.watchedPathCount) context_scans=\(snapshot.monitorStats.jsonlContextScans) model_tokens=\(snapshot.monitorStats.monitorModelTokens)"
         ]
 
@@ -39,6 +40,7 @@ enum SnapshotOutputFormatter {
             usage24h: snapshot.usage24h,
             usage7d: snapshot.usage7d,
             usage30d: snapshot.usage30d,
+            sparkQuotaWindows: snapshot.sparkQuotaWindows.map(SnapshotSparkQuotaWindowJSON.init(window:)),
             lastUpdated: ISO8601DateFormatter().string(from: snapshot.lastUpdated),
             error: snapshot.errorMessage,
             monitor: SnapshotMonitorJSON(stats: snapshot.monitorStats),
@@ -63,6 +65,7 @@ private struct SnapshotJSON: Encodable {
     let usage24h: Int
     let usage7d: Int
     let usage30d: Int
+    let sparkQuotaWindows: [SnapshotSparkQuotaWindowJSON]
     let lastUpdated: String
     let error: String?
     let monitor: SnapshotMonitorJSON
@@ -76,6 +79,7 @@ private struct SnapshotJSON: Encodable {
         case usage24h = "usage_24h"
         case usage7d = "usage_7d"
         case usage30d = "usage_30d"
+        case sparkQuotaWindows = "spark_quota_windows"
         case lastUpdated = "last_updated"
         case error
         case monitor
@@ -110,6 +114,33 @@ private struct SnapshotMonitorJSON: Encodable {
         case watchedPathCount = "watched_path_count"
         case jsonlContextScans = "jsonl_context_scans"
         case monitorModelTokens = "monitor_model_tokens"
+    }
+}
+
+private struct SnapshotSparkQuotaWindowJSON: Encodable {
+    let id: String
+    let label: String
+    let remainingPercent: Int?
+    let usedPercent: Double?
+    let resetAt: Int?
+    let resetText: String?
+
+    init(window: SparkQuotaWindow) {
+        self.id = window.id
+        self.label = window.label
+        self.remainingPercent = window.remainingPercent
+        self.usedPercent = window.usedPercent
+        self.resetAt = window.resetAt
+        self.resetText = window.resetText
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case label
+        case remainingPercent = "remaining_percent"
+        case usedPercent = "used_percent"
+        case resetAt = "reset_at"
+        case resetText = "reset_text"
     }
 }
 
