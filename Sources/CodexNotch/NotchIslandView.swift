@@ -90,26 +90,8 @@ struct NotchIslandView: View {
         viewModel.snapshot
     }
 
-    private var collapsedPillWidth: CGFloat {
-        let statusWidth = Self.collapsedStatusWidth(collapsedStateLabel)
-        let metrics = collapsedMetrics
-        let metricWidths = metrics.map(Self.collapsedMetricWidth).reduce(0, +)
-        let metricGaps = CGFloat(max(0, metrics.count - 1)) * 5
-        let contentWidth = statusWidth
-            + 6
-            + metricWidths
-            + metricGaps
-            + IslandMetrics.collapsedPillHorizontalPadding * 2
-            + IslandMetrics.collapsedPillExtraPadding
-        return min(
-            IslandMetrics.collapsedPillMaxWidth,
-            max(IslandMetrics.collapsedPillMinWidth, ceil(contentWidth))
-        )
-    }
-
     var body: some View {
         ZStack(alignment: .top) {
-            islandBackground
             collapsedContent
         }
         .frame(
@@ -140,24 +122,6 @@ struct NotchIslandView: View {
         }
     }
 
-    private var islandBackground: some View {
-        ZStack {
-            HUDVisualEffectView(material: .hudWindow)
-            RoundedRectangle(cornerRadius: 15, style: .continuous)
-                .fill(MonitorTheme.pillTint)
-            RoundedRectangle(cornerRadius: 15, style: .continuous)
-                .stroke(MonitorTheme.panelStroke, lineWidth: 0.7)
-        }
-            .frame(
-                width: collapsedPillWidth,
-                height: IslandMetrics.collapsedHeight - 8,
-                alignment: .top
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
-            .shadow(color: .black.opacity(0.18), radius: 9, x: 0, y: 4)
-            .padding(.top, 4)
-    }
-
     private var collapsedContent: some View {
         HStack(spacing: 6) {
             statusBlock
@@ -166,12 +130,22 @@ struct NotchIslandView: View {
         }
         .padding(.horizontal, IslandMetrics.collapsedPillHorizontalPadding)
         .padding(.top, 4)
-        .frame(
-            width: collapsedPillWidth,
-            height: IslandMetrics.collapsedHeight - 8,
-            alignment: .center
-        )
+        .frame(height: IslandMetrics.collapsedHeight - 8, alignment: .center)
+        .fixedSize(horizontal: true, vertical: false)
+        .background(collapsedBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .shadow(color: .black.opacity(0.18), radius: 9, x: 0, y: 4)
         .frame(width: IslandMetrics.width, height: IslandMetrics.collapsedHeight, alignment: .top)
+    }
+
+    private var collapsedBackground: some View {
+        ZStack {
+            HUDVisualEffectView(material: .hudWindow)
+            RoundedRectangle(cornerRadius: 15, style: .continuous)
+                .fill(MonitorTheme.pillTint)
+            RoundedRectangle(cornerRadius: 15, style: .continuous)
+                .stroke(MonitorTheme.panelStroke, lineWidth: 0.7)
+        }
     }
 
     private var statusBlock: some View {
@@ -196,7 +170,6 @@ struct NotchIslandView: View {
                 CollapsedMetricRow(metric: metric)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
         .layoutPriority(2)
     }
 
@@ -334,27 +307,6 @@ struct NotchIslandView: View {
         ]
     }
 
-    private static func collapsedStatusWidth(_ text: String) -> CGFloat {
-        12 + 5 + textWidth(text, size: 10.6, weight: .semibold, monospacedDigit: false)
-    }
-
-    private static func collapsedMetricWidth(_ metric: CollapsedMetric) -> CGFloat {
-        textWidth(metric.label, size: 8.4, weight: .medium, monospacedDigit: false)
-            + 3
-            + textWidth(metric.value, size: 9.5, weight: .semibold, monospacedDigit: true)
-    }
-
-    private static func textWidth(
-        _ text: String,
-        size: CGFloat,
-        weight: NSFont.Weight,
-        monospacedDigit: Bool
-    ) -> CGFloat {
-        let font = monospacedDigit
-            ? NSFont.monospacedDigitSystemFont(ofSize: size, weight: weight)
-            : NSFont.systemFont(ofSize: size, weight: weight)
-        return ceil((text as NSString).size(withAttributes: [.font: font]).width)
-    }
 }
 
 private struct CollapsedMetricRow: View {
