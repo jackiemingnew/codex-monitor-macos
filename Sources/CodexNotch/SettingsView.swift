@@ -113,6 +113,7 @@ private struct SettingsDraft: Equatable {
     var rateLimitSource: RateLimitSourcePreference = .appServerFirst
     var showPeriodUsage = true
     var showSparkQuota = false
+    var showContextMetrics = false
     var codexRadarEnabled = true
     var codexRadarAPIToken = ""
     var taskHistoryRange: TaskHistoryRange = .threeDays
@@ -156,6 +157,7 @@ private struct SettingsDraft: Equatable {
         rateLimitSource = settings.rateLimitSource
         showPeriodUsage = settings.showPeriodUsage
         showSparkQuota = settings.showSparkQuota
+        showContextMetrics = settings.showContextMetrics
         codexRadarEnabled = settings.codexRadarEnabled
         codexRadarAPIToken = CodexRadarTokenProvider.loadSavedToken()
         taskHistoryRange = settings.taskHistoryRange
@@ -432,6 +434,9 @@ struct SettingsView: View {
             }
             Toggle(isOn: $draft.showSparkQuota) {
                 HelpLabel(title: "显示 GPT-5.3-Codex-Spark 额度", help: "开启后在 Codex 详情页显示 Spark 专属 5小时和7天额度。只复用已有额度数据，不增加刷新频率。")
+            }
+            Toggle(isOn: $draft.showContextMetrics) {
+                HelpLabel(title: "显示上下文用量", help: "开启后在详情页显示 Ctx，并读取会话尾部 token_count。默认关闭以减少刷新时的文件扫描。")
             }
             Picker(selection: $draft.taskHistoryRange) {
                 ForEach(TaskHistoryRange.allCases) { range in
@@ -1594,6 +1599,7 @@ struct SettingsView: View {
         settings.rateLimitSource = next.rateLimitSource
         settings.showPeriodUsage = next.showPeriodUsage
         settings.showSparkQuota = next.showSparkQuota
+        settings.showContextMetrics = next.showContextMetrics
         settings.codexRadarEnabled = next.codexRadarEnabled
         do {
             try CodexRadarTokenProvider.saveToken(next.codexRadarAPIToken)

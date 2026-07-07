@@ -81,15 +81,17 @@ final class UsageViewModel: ObservableObject {
         let fallbackUsage = currentUsage
         let rateLimitSource = settings.rateLimitSource
         let taskHistoryRange = settings.taskHistoryRange
+        let includeContextUsage = settings.showContextMetrics
         let contextTaskLimit = currentContextTaskLimit
 
-        Task.detached(priority: .utility) { [store, fallbackUsage, bypassFastCache, rateLimitSource, taskHistoryRange, contextTaskLimit] in
+        Task.detached(priority: .utility) { [store, fallbackUsage, bypassFastCache, rateLimitSource, taskHistoryRange, includeContextUsage, contextTaskLimit] in
             let nextSnapshot = store.loadSnapshot(
                 includePeriodUsage: false,
                 fallbackUsage: fallbackUsage,
                 bypassFastCache: bypassFastCache,
                 rateLimitSource: rateLimitSource,
                 taskHistoryRange: taskHistoryRange,
+                includeContextUsage: includeContextUsage,
                 contextTaskLimit: contextTaskLimit
             )
             await MainActor.run {
@@ -514,6 +516,7 @@ private struct LocalUsageSettingsSnapshot: Equatable {
     let watcherRefreshInterval: TimeInterval
     let fileChangeRefreshMinimumGap: TimeInterval
     let rateLimitSource: RateLimitSourcePreference
+    let showContextMetrics: Bool
     let taskHistoryRange: TaskHistoryRange
 
     @MainActor
@@ -524,6 +527,7 @@ private struct LocalUsageSettingsSnapshot: Equatable {
         watcherRefreshInterval = settings.watcherRefreshInterval
         fileChangeRefreshMinimumGap = settings.fileChangeRefreshMinimumGap
         rateLimitSource = settings.rateLimitSource
+        showContextMetrics = settings.showContextMetrics
         taskHistoryRange = settings.taskHistoryRange
     }
 }

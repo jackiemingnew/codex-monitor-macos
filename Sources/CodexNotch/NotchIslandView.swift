@@ -702,12 +702,14 @@ struct DetailPanelView: View {
                 detail: "\(displayedTasks.count) sessions"
             )
             .frame(width: 96)
-            CompactStatusCell(
-                label: "Ctx",
-                value: currentContextPercentText,
-                detail: currentContextTokenRatioText
-            )
-            .frame(width: 116)
+            if settings.showContextMetrics {
+                CompactStatusCell(
+                    label: "Ctx",
+                    value: currentContextPercentText,
+                    detail: currentContextTokenRatioText
+                )
+                .frame(width: 116)
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -751,7 +753,7 @@ struct DetailPanelView: View {
 
     private var localTaskTable: some View {
         VStack(spacing: 0) {
-            TaskTableHeader()
+            TaskTableHeader(showContextMetrics: settings.showContextMetrics)
             Rectangle()
                 .fill(MonitorTheme.separator)
                 .frame(height: 0.6)
@@ -763,7 +765,7 @@ struct DetailPanelView: View {
                 ScrollView(.vertical, showsIndicators: false) {
                     LazyVStack(spacing: 0) {
                         ForEach(Array(displayedTasks.enumerated()), id: \.element.id) { index, task in
-                            TaskTableRow(task: task, isSelected: index == 0)
+                            TaskTableRow(task: task, isSelected: index == 0, showContextMetrics: settings.showContextMetrics)
                         }
                     }
                 }
@@ -1516,6 +1518,8 @@ private struct CompactStatusCell: View {
 }
 
 private struct TaskTableHeader: View {
+    let showContextMetrics: Bool
+
     var body: some View {
         HStack(spacing: 0) {
             tableHeaderText("Session")
@@ -1524,8 +1528,10 @@ private struct TaskTableHeader: View {
                 .frame(width: 58, alignment: .leading)
             tableHeaderText("Today")
                 .frame(width: 78, alignment: .trailing)
-            tableHeaderText("Ctx")
-                .frame(width: 66, alignment: .trailing)
+            if showContextMetrics {
+                tableHeaderText("Ctx")
+                    .frame(width: 66, alignment: .trailing)
+            }
             tableHeaderText("Total")
                 .frame(width: 72, alignment: .trailing)
         }
@@ -1543,6 +1549,7 @@ private struct TaskTableHeader: View {
 private struct TaskTableRow: View {
     let task: CodexTask
     let isSelected: Bool
+    let showContextMetrics: Bool
 
     var body: some View {
         HStack(spacing: 0) {
@@ -1581,13 +1588,15 @@ private struct TaskTableRow: View {
                 .minimumScaleFactor(0.56)
                 .monospacedDigit()
 
-            Text(Formatters.percent(task.contextPercent))
-                .font(.system(size: 10.2, weight: .semibold))
-                .foregroundStyle(task.contextPercent == nil ? MonitorTheme.textTertiary : MonitorTheme.running)
-                .frame(width: 66, alignment: .trailing)
-                .lineLimit(1)
-                .minimumScaleFactor(0.62)
-                .monospacedDigit()
+            if showContextMetrics {
+                Text(Formatters.percent(task.contextPercent))
+                    .font(.system(size: 10.2, weight: .semibold))
+                    .foregroundStyle(task.contextPercent == nil ? MonitorTheme.textTertiary : MonitorTheme.running)
+                    .frame(width: 66, alignment: .trailing)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.62)
+                    .monospacedDigit()
+            }
 
             Text(Formatters.compactTokens(task.tokenCount))
                 .font(.system(size: 10.3, weight: .semibold))

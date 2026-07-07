@@ -22,6 +22,7 @@ adds, removes, renames, or changes the formula for a usage metric in
 | `delta.1h` | Primary visible per-task token increase since the latest baseline older than 1 hour | Swift delta cache | `current parent tokens_used - baseline parent tokens_used` | tracked parent task rows |
 | `delta.10m` | Legacy/internal token increase since the latest baseline older than 10 minutes | Swift delta cache | `current parent tokens_used - baseline parent tokens_used` | compatibility export fields only |
 | `delta.24h` | Per-task token increase since the latest baseline older than 24 hours | Swift delta cache | `current parent tokens_used - baseline parent tokens_used` | tracked parent task rows |
+| `context.usage_percent` | Optional context-window usage display | rollout JSONL `token_count` tail scan | `last_token_usage.input_tokens / model_context_window` | visible task rows when enabled |
 | `task.total_tokens` | Single task row token total | state DB + parent session JSONL enrichment | `CodexTask.tokenCount` for that parent row | visible parent task only |
 | `quota.5h` | Main Codex 5 hour remaining quota | app-server or local JSONL rate limits | main `limit_id = codex`, remaining percent | main Codex only |
 | `quota.7d` | Main Codex 7 day remaining quota | app-server or local JSONL rate limits | main `limit_id = codex`, remaining percent | main Codex only |
@@ -64,6 +65,12 @@ adds, removes, renames, or changes the formula for a usage metric in
 - `delta.1h` is the default user-visible task table movement metric.
   `delta.10m` remains available only for compatibility exports and internal
   calculations; it must not be used as the details table movement column.
+- `context.usage_percent` is disabled by default. When enabled, the app may read
+  the tail of visible session JSONL files to find `token_count`; when disabled,
+  details-page Ctx UI stays hidden and task context fields remain unavailable.
+- Context-window usage is not a compaction count. If compaction becomes a
+  first-class metric, prefer strong-evidence log events such as `run_auto_compact` and
+  report confirmed counts separately from token-sequence estimates.
 - `quota.5h` and `quota.7d` describe rate-limit windows, not token usage.
 - Spark or subagent quota windows must stay separate from `quota.5h` and
   `quota.7d`.

@@ -38,6 +38,7 @@ final class CodexNotchSettings: ObservableObject {
         static let rateLimitSource = "rateLimitSource"
         static let showPeriodUsage = "showPeriodUsage"
         static let showSparkQuota = "showSparkQuota"
+        static let showContextMetrics = "showContextMetrics"
         static let codexRadarEnabled = "codexRadarEnabled"
         static let enablePulse = "enablePulse"
         static let taskHistoryRange = "taskHistoryRange"
@@ -126,6 +127,12 @@ final class CodexNotchSettings: ObservableObject {
     @Published var showSparkQuota: Bool {
         didSet {
             defaults.set(showSparkQuota, forKey: Keys.showSparkQuota)
+        }
+    }
+
+    @Published var showContextMetrics: Bool {
+        didSet {
+            defaults.set(showContextMetrics, forKey: Keys.showContextMetrics)
         }
     }
 
@@ -400,6 +407,7 @@ final class CodexNotchSettings: ObservableObject {
         self.rateLimitSource = RateLimitSourcePreference(rawValue: defaults.string(forKey: Keys.rateLimitSource) ?? "") ?? .appServerFirst
         self.showPeriodUsage = defaults.object(forKey: Keys.showPeriodUsage) as? Bool ?? true
         self.showSparkQuota = defaults.object(forKey: Keys.showSparkQuota) as? Bool ?? false
+        self.showContextMetrics = defaults.object(forKey: Keys.showContextMetrics) as? Bool ?? false
         self.codexRadarEnabled = defaults.object(forKey: Keys.codexRadarEnabled) as? Bool ?? true
         self.enablePulse = defaults.object(forKey: Keys.enablePulse) as? Bool ?? true
         self.taskHistoryRange = TaskHistoryRange(rawValue: defaults.string(forKey: Keys.taskHistoryRange) ?? "") ?? .threeDays

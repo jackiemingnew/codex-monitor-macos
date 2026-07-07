@@ -818,6 +818,7 @@ runner.check(settings.watcherRefreshInterval == 180, "saving unchanged refresh i
 runner.check(settings.fileChangeRefreshMinimumGap == 15, "saving unchanged refresh intervals should keep the folded low-power debounce default")
 runner.check(settings.codexRadarEnabled, "Codex Radar should default to enabled")
 runner.check(!settings.showSparkQuota, "Spark quota display should default to disabled")
+runner.check(!settings.showContextMetrics, "context metrics display should default to disabled")
 settings.activeRefreshInterval = 2
 settings.idleRefreshInterval = 4
 settings.usageRefreshInterval = 15
@@ -886,6 +887,7 @@ runner.check(settings.remoteCodexDataSource == .cpaManagerPlus, "remote Codex mo
 runner.check(settings.notchDisplaySource == .codex, "collapsed notch display should default to local Codex")
 settings.codexRadarEnabled = false
 settings.showSparkQuota = true
+settings.showContextMetrics = true
 settings.remoteCodexDataSource = .cliProxyAPI
 settings.notchDisplaySource = .remoteCodex
 settings.newAPIMonitorEnabled = true
@@ -908,6 +910,7 @@ runner.check(reloadedSettings.remoteCodexDataSource == .cliProxyAPI, "remote Cod
 runner.check(reloadedSettings.notchDisplaySource == .remoteCodex, "collapsed notch display source should persist")
 runner.check(!reloadedSettings.codexRadarEnabled, "Codex Radar enablement should persist")
 runner.check(reloadedSettings.showSparkQuota, "Spark quota display preference should persist")
+runner.check(reloadedSettings.showContextMetrics, "context metrics display preference should persist")
 runner.check(reloadedSettings.newAPIMonitorEnabled, "NewAPI monitor enablement should persist")
 runner.check(reloadedSettings.newAPIPanelURL == "https://newapi.example.com", "NewAPI panel URL should persist")
 runner.check(reloadedSettings.newAPIUsername == "owner", "NewAPI username should persist")
@@ -2403,7 +2406,7 @@ let rolloutBody = """
 {"timestamp":"\(timestamp)","type":"turn_context","payload":{"model":"gpt-5.5","effort":"xhigh","collaboration_mode":{"settings":{"reasoning_effort":"xhigh"}}}}
 {"timestamp":"\(timestamp)","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"正在运行的 Codex 任务"}]}}
 {"timestamp":"\(timestamp)","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":90000}}}}
-{"timestamp":"\(timestamp)","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":12345}}}}
+{"timestamp":"\(timestamp)","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":60000,"total_tokens":12345},"model_context_window":240000}}}
 """
 try rolloutBody.write(to: rolloutPath, atomically: true, encoding: .utf8)
 try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: rolloutPath.path)
@@ -2726,6 +2729,11 @@ let localSnapshot = localStore.loadSnapshot(
     now: now
 )
 runner.check(localSnapshot.isRunning, "recent session rollout should mark local Codex as running")
+runner.check(localSnapshot.monitorStats.jsonlContextScans == 0, "context metrics disabled should skip rollout context scans")
+runner.check(
+    localSnapshot.tasks.allSatisfy { $0.contextPercent == nil && $0.contextInputTokens == nil && $0.contextWindowTokens == nil },
+    "context metrics disabled should leave task context fields empty"
+)
 runner.check(localSnapshot.usage1h == 2912, "aggregate 1 hour usage should sum parent-only recent delta snapshots")
 runner.check(localSnapshot.tasks.first?.delta1hTokens != localSnapshot.usage1h, "aggregate 1 hour usage should not reuse the first visible task delta")
 runner.check(localSnapshot.tasks.first { $0.id == sessionID }?.todayTokens == 12345, "session Today usage should use the parent-only 24 hour delta baseline")
@@ -2746,6 +2754,22 @@ runner.check(localSnapshot.primaryResetsAt == codexPrimaryReset, "local JSONL Co
 runner.check(localSnapshot.secondaryResetsAt == codexSecondaryReset, "local JSONL Codex quota should expose secondary reset time")
 runner.check(localSnapshot.primaryPercent != 92, "subagent Codex quota should not override the main 5h quota")
 runner.check(localSnapshot.sparkQuotaWindows.map(\.remainingPercent) == [60, 90], "local JSONL Spark quota windows should decode")
+let localContextSnapshot = localStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    includeContextUsage: true,
+    now: now
+)
+runner.check(localContextSnapshot.monitorStats.jsonlContextScans > 0, "context metrics enabled should scan visible rollout context")
+let contextEnabledTask = runner.require(
+    localContextSnapshot.tasks.first { $0.id == sessionID },
+    "context-enabled session task should be visible"
+)
+runner.check(contextEnabledTask.contextInputTokens == 60000, "context metrics enabled should load input token context")
+runner.check(contextEnabledTask.contextWindowTokens == 240000, "context metrics enabled should load context window")
+runner.check(contextEnabledTask.contextPercent == 25, "context metrics enabled should compute context percent")
 let localSnapshotJSON = try JSONSerialization.jsonObject(
     with: SnapshotOutputFormatter.jsonData(for: localSnapshot)
 ) as? [String: Any]

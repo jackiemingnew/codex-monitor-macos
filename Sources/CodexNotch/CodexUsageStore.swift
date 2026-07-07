@@ -164,6 +164,7 @@ final class CodexUsageStore: @unchecked Sendable {
         bypassFastCache: Bool = false,
         rateLimitSource: RateLimitSourcePreference = .appServerFirst,
         taskHistoryRange: TaskHistoryRange = .threeDays,
+        includeContextUsage: Bool = false,
         contextTaskLimit: Int = UsageScanPolicy.contextVisibleTaskLimit,
         now: Date = Date()
     ) -> UsageSnapshot {
@@ -175,6 +176,7 @@ final class CodexUsageStore: @unchecked Sendable {
                 fallbackUsage: fallbackUsage,
                 rateLimitSource: rateLimitSource,
                 taskHistoryRange: taskHistoryRange,
+                includeContextUsage: includeContextUsage,
                 contextTaskLimit: contextTaskLimit
            ) {
             return cachedSnapshot
@@ -223,6 +225,7 @@ final class CodexUsageStore: @unchecked Sendable {
                 deltas: deltas,
                 todayTotalTokens: dailyUsage.usageTodayTokens,
                 now: now,
+                includeContextUsage: includeContextUsage,
                 contextTaskLimit: contextTaskLimit
             )
             cacheFastSnapshot(
@@ -357,6 +360,7 @@ final class CodexUsageStore: @unchecked Sendable {
         fallbackUsage: PeriodUsage?,
         rateLimitSource: RateLimitSourcePreference,
         taskHistoryRange: TaskHistoryRange,
+        includeContextUsage: Bool,
         contextTaskLimit: Int
     ) -> UsageSnapshot? {
         cacheLock.lock()
@@ -386,6 +390,7 @@ final class CodexUsageStore: @unchecked Sendable {
             deltas: deltas,
             todayTotalTokens: dailyUsage.usageTodayTokens,
             now: now,
+            includeContextUsage: includeContextUsage,
             contextTaskLimit: contextTaskLimit
         )
         let snapshotDurationMs = elapsedMilliseconds(since: snapshotStartedAt)
@@ -1912,6 +1917,7 @@ final class CodexUsageStore: @unchecked Sendable {
         deltas: [String: TokenDeltaWindow],
         todayTotalTokens: Int,
         now: Date,
+        includeContextUsage: Bool = false,
         contextTaskLimit: Int = UsageScanPolicy.contextVisibleTaskLimit
     ) -> BuildTasksResult {
         var contextScanCount = 0
@@ -1922,7 +1928,7 @@ final class CodexUsageStore: @unchecked Sendable {
             let effort = localizedEffort(thread.reasoningEffort)
             let detail = "\(model) · \(effort) · \(Formatters.relativeAge(updatedAt, now: now))前"
             let delta = deltas[thread.id.lowercased()]
-            let shouldLoadContext = status == .running || index < contextTaskLimit
+            let shouldLoadContext = includeContextUsage && (status == .running || index < contextTaskLimit)
             let contextResult = shouldLoadContext
                 ? contextUsage(for: thread.rolloutPath)
                 : (usage: nil, didScan: false)
