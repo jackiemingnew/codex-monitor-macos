@@ -1522,8 +1522,6 @@ private struct TaskTableHeader: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             tableHeaderText("Status")
                 .frame(width: 58, alignment: .leading)
-            tableHeaderText("+1h")
-                .frame(width: 56, alignment: .trailing)
             tableHeaderText("Today")
                 .frame(width: 78, alignment: .trailing)
             tableHeaderText("Ctx")
@@ -1575,14 +1573,6 @@ private struct TaskTableRow: View {
             StatusPill(status: task.status)
                 .frame(width: 58, alignment: .leading)
 
-            Text(Formatters.signedCompactTokens(task.delta1hTokens))
-                .font(.system(size: 10.2, weight: .semibold))
-                .foregroundStyle(deltaColor(task.delta1hTokens))
-                .frame(width: 56, alignment: .trailing)
-                .lineLimit(1)
-                .minimumScaleFactor(0.62)
-                .monospacedDigit()
-
             Text(Formatters.compactTokensWithShare(tokens: task.todayTokens, sharePercent: task.todaySharePercent))
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(todayColor)
@@ -1631,13 +1621,6 @@ private struct TaskTableRow: View {
             return MonitorTheme.textTertiary
         }
         return tokens > 0 ? MonitorTheme.running : MonitorTheme.textSecondary
-    }
-
-    private func deltaColor(_ value: Int?) -> Color {
-        guard let value else {
-            return MonitorTheme.textTertiary
-        }
-        return value > 0 ? MonitorTheme.running : MonitorTheme.textSecondary
     }
 }
 
