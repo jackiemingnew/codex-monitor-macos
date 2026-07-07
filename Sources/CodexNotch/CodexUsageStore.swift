@@ -168,13 +168,13 @@ final class CodexUsageStore: @unchecked Sendable {
             let rateLimitResult = loadRateLimits(from: rateLimitPaths, source: rateLimitSource, now: now)
             let deltaStartedAt = Date()
             let deltas = loadTokenDeltas(for: threads, now: now)
-            let aggregateDeltas = loadAggregateTokenDeltas(now: now)
+            let aggregateDeltas = aggregateTokenDeltas(from: deltas)
             let deltaDurationMs = elapsedMilliseconds(since: deltaStartedAt)
             let taskResult = buildTasks(
                 from: threads,
                 activeThreadIDs: activeThreadIDs,
                 deltas: deltas,
-                todayTotalTokens: usage.day,
+                todayTotalTokens: aggregateDeltas.deltaTodayTokens ?? 0,
                 now: now,
                 contextTaskLimit: contextTaskLimit
             )
@@ -195,6 +195,7 @@ final class CodexUsageStore: @unchecked Sendable {
                 primaryResetsAt: rateLimitResult.snapshot.primaryResetsAt,
                 secondaryResetsAt: rateLimitResult.snapshot.secondaryResetsAt,
                 usage1h: aggregateDeltas.delta1hTokens,
+                usageToday: aggregateDeltas.deltaTodayTokens,
                 usage24h: usage.day,
                 usage7d: usage.week,
                 usage30d: usage.month,
@@ -256,6 +257,7 @@ final class CodexUsageStore: @unchecked Sendable {
             primaryResetsAt: nil,
             secondaryResetsAt: nil,
             usage1h: nil,
+            usageToday: nil,
             usage24h: 0,
             usage7d: 0,
             usage30d: 0,
@@ -319,13 +321,13 @@ final class CodexUsageStore: @unchecked Sendable {
         let snapshotStartedAt = Date()
         let deltaStartedAt = Date()
         let deltas = loadTokenDeltas(for: cache.threads, now: now)
-        let aggregateDeltas = loadAggregateTokenDeltas(now: now)
+        let aggregateDeltas = aggregateTokenDeltas(from: deltas)
         let deltaDurationMs = elapsedMilliseconds(since: deltaStartedAt)
         let taskResult = buildTasks(
             from: cache.threads,
             activeThreadIDs: cache.activeThreadIDs,
             deltas: deltas,
-            todayTotalTokens: usage.day,
+            todayTotalTokens: aggregateDeltas.deltaTodayTokens ?? 0,
             now: now,
             contextTaskLimit: contextTaskLimit
         )
@@ -336,6 +338,7 @@ final class CodexUsageStore: @unchecked Sendable {
             primaryResetsAt: cache.rateLimits.primaryResetsAt,
             secondaryResetsAt: cache.rateLimits.secondaryResetsAt,
             usage1h: aggregateDeltas.delta1hTokens,
+            usageToday: aggregateDeltas.deltaTodayTokens,
             usage24h: usage.day,
             usage7d: usage.week,
             usage30d: usage.month,
@@ -387,6 +390,7 @@ final class CodexUsageStore: @unchecked Sendable {
 
     private func loadRecentThreads(range: TaskHistoryRange = .threeDays, now: Date = Date()) throws -> [ThreadRecord] {
         let since = Int(now.timeIntervalSince1970) - range.seconds
+        let createdAtExpression = threadTableHasColumn("created_at") ? "coalesce(created_at, 0)" : "0"
         let query = """
         select
           id,
@@ -395,7 +399,8 @@ final class CodexUsageStore: @unchecked Sendable {
           model,
           reasoning_effort,
           coalesce(rollout_path, '') as rollout_path,
-          coalesce(updated_at, 0) as updated_at
+          coalesce(updated_at, 0) as updated_at,
+          \(createdAtExpression) as created_at
         from threads
         where archived = 0
           and updated_at >= \(since)
@@ -406,6 +411,18 @@ final class CodexUsageStore: @unchecked Sendable {
             try Shell.sqliteJSON(database: stateDatabase, query: query, as: [ThreadRecord].self)
         )
         .filter { !isSubagentThread($0) }
+    }
+
+    private func threadTableHasColumn(_ name: String) -> Bool {
+        guard let columns = try? Shell.sqliteJSON(
+            database: stateDatabase,
+            query: "pragma table_info(threads);",
+            as: [SQLiteTableColumn].self,
+            readOnly: true
+        ) else {
+            return false
+        }
+        return columns.contains { $0.name.caseInsensitiveCompare(name) == .orderedSame }
     }
 
     private func loadRecentSessionThreads(
@@ -438,7 +455,8 @@ final class CodexUsageStore: @unchecked Sendable {
                 model: runtime?.model,
                 reasoningEffort: runtime?.reasoningEffort,
                 rolloutPath: candidate.path,
-                updatedAt: candidate.updatedAt
+                updatedAt: candidate.updatedAt,
+                createdAt: candidate.createdAt
             )
         }
     }
@@ -474,7 +492,8 @@ final class CodexUsageStore: @unchecked Sendable {
                 model: nil,
                 reasoningEffort: nil,
                 rolloutPath: candidate.path,
-                updatedAt: candidate.updatedAt
+                updatedAt: candidate.updatedAt,
+                createdAt: candidate.createdAt
             )
         }
     }
@@ -504,12 +523,12 @@ final class CodexUsageStore: @unchecked Sendable {
             guard updatedAt >= since else {
                 return nil
             }
-
             return RecentSessionCandidate(
                 path: path,
                 sessionID: sessionID,
                 modifiedAt: modifiedAt,
                 updatedAt: updatedAt,
+                createdAt: 0,
                 databaseTokens: resolvedKnownTokens[sessionID.lowercased()] ?? 0
             )
         }
@@ -563,7 +582,8 @@ final class CodexUsageStore: @unchecked Sendable {
                 model: runtime?.model,
                 reasoningEffort: runtime?.reasoningEffort,
                 rolloutPath: parentPath ?? "",
-                updatedAt: updatedAt
+                updatedAt: updatedAt,
+                createdAt: 0
             )
         }
 
@@ -627,27 +647,19 @@ final class CodexUsageStore: @unchecked Sendable {
                 return thread
             }
             let count = summary.count
-            let parentTokens = parentTokenCount(for: thread)
-            let tokensUsed = max(thread.tokensUsed, parentTokens + summary.tokens)
 
             return ThreadRecord(
                 id: thread.id,
                 title: thread.title,
-                tokensUsed: tokensUsed,
+                tokensUsed: thread.tokensUsed,
                 model: thread.model,
                 reasoningEffort: thread.reasoningEffort,
                 rolloutPath: thread.rolloutPath,
                 updatedAt: thread.updatedAt,
+                createdAt: thread.createdAt,
                 activeSubagentCount: count
             )
         }
-    }
-
-    private func parentTokenCount(for thread: ThreadRecord) -> Int {
-        guard !thread.rolloutPath.isEmpty else {
-            return thread.tokensUsed
-        }
-        return tokenTotalForFastSnapshot(path: thread.rolloutPath, databaseTokens: thread.tokensUsed)
     }
 
     private func tokenTotalForFastSnapshot(
@@ -767,6 +779,15 @@ final class CodexUsageStore: @unchecked Sendable {
 
     private func mergeThreadRecord(_ existing: ThreadRecord, with candidate: ThreadRecord) -> ThreadRecord {
         let updatedAt = max(existing.updatedAt, candidate.updatedAt)
+        let createdAt: Int
+        switch (existing.createdAt, candidate.createdAt) {
+        case (let first, let second) where first > 0 && second > 0:
+            createdAt = min(first, second)
+        case (let first, _) where first > 0:
+            createdAt = first
+        case (_, let second):
+            createdAt = second
+        }
         let title = bestTitle(existing.title, candidate.title)
         let tokensUsed = max(existing.tokensUsed, candidate.tokensUsed)
         let rolloutPath = candidate.rolloutPath.isEmpty ? existing.rolloutPath : candidate.rolloutPath
@@ -779,6 +800,7 @@ final class CodexUsageStore: @unchecked Sendable {
             reasoningEffort: existing.reasoningEffort ?? candidate.reasoningEffort,
             rolloutPath: rolloutPath,
             updatedAt: updatedAt,
+            createdAt: createdAt,
             activeSubagentCount: max(existing.activeSubagentCount, candidate.activeSubagentCount)
         )
     }
@@ -851,6 +873,7 @@ final class CodexUsageStore: @unchecked Sendable {
                 reasoningEffort: thread.reasoningEffort,
                 rolloutPath: thread.rolloutPath,
                 updatedAt: thread.updatedAt,
+                createdAt: thread.createdAt,
                 activeSubagentCount: thread.activeSubagentCount
             )
         }
@@ -1240,7 +1263,7 @@ final class CodexUsageStore: @unchecked Sendable {
         let currentRows = threads
             .filter { !$0.id.isEmpty && $0.tokensUsed >= 0 }
             .map { thread in
-                "(\(sqliteLiteral(thread.id.lowercased())), \(max(0, thread.tokensUsed)))"
+                "(\(sqliteLiteral(thread.id.lowercased())), \(max(0, thread.tokensUsed)), \(max(0, thread.createdAt)))"
             }
 
         guard !currentRows.isEmpty,
@@ -1252,14 +1275,18 @@ final class CodexUsageStore: @unchecked Sendable {
         let tenMinutesAgo = nowMs - Int64(10 * 60 * 1_000)
         let oneHourAgo = nowMs - Int64(60 * 60 * 1_000)
         let twentyFourHoursAgo = nowMs - Int64(24 * 60 * 60 * 1_000)
+        let todayStart = Calendar.current.startOfDay(for: now)
+        let todayStartMs = Int64((todayStart.timeIntervalSince1970 * 1_000).rounded())
+        let todayStartEpoch = Int(todayStart.timeIntervalSince1970)
         let query = """
-        WITH current_rows(thread_id, tokens_used) AS (
+        WITH current_rows(thread_id, tokens_used, created_at) AS (
           VALUES \(currentRows.joined(separator: ",\n                 "))
         ),
         rows_with_baselines AS (
           SELECT
             current_rows.thread_id,
             current_rows.tokens_used,
+            current_rows.created_at,
             (
               SELECT baseline.tokens_used
               FROM (
@@ -1308,6 +1335,23 @@ final class CodexUsageStore: @unchecked Sendable {
               ORDER BY baseline.observed_at_ms DESC
               LIMIT 1
             ) AS baseline_24h
+            ,
+            (
+              SELECT baseline.tokens_used
+              FROM (
+                SELECT h.tokens_used, h.observed_at_ms
+                FROM token_snapshot_history AS h
+                WHERE h.thread_id = current_rows.thread_id
+                  AND h.observed_at_ms <= \(todayStartMs)
+                UNION ALL
+                SELECT s.tokens_used, s.observed_at_ms
+                FROM token_snapshots AS s
+                WHERE s.thread_id = current_rows.thread_id
+                  AND s.observed_at_ms <= \(todayStartMs)
+              ) AS baseline
+              ORDER BY baseline.observed_at_ms DESC
+              LIMIT 1
+            ) AS baseline_today
           FROM current_rows
         )
         SELECT
@@ -1326,7 +1370,13 @@ final class CodexUsageStore: @unchecked Sendable {
             WHEN baseline_24h IS NULL THEN NULL
             WHEN tokens_used >= baseline_24h THEN tokens_used - baseline_24h
             ELSE 0
-          END AS delta_24h_tokens
+          END AS delta_24h_tokens,
+          CASE
+            WHEN baseline_today IS NOT NULL AND tokens_used >= baseline_today THEN tokens_used - baseline_today
+            WHEN baseline_today IS NOT NULL THEN 0
+            WHEN created_at >= \(todayStartEpoch) THEN tokens_used
+            ELSE NULL
+          END AS delta_today_tokens
         FROM rows_with_baselines;
         """
 
@@ -1346,7 +1396,8 @@ final class CodexUsageStore: @unchecked Sendable {
                     TokenDeltaWindow(
                         delta10mTokens: $0.delta10mTokens,
                         delta1hTokens: $0.delta1hTokens,
-                        delta24hTokens: $0.delta24hTokens
+                        delta24hTokens: $0.delta24hTokens,
+                        deltaTodayTokens: $0.deltaTodayTokens
                     )
                 )
             },
@@ -1354,92 +1405,21 @@ final class CodexUsageStore: @unchecked Sendable {
         )
     }
 
-    private func loadAggregateTokenDeltas(now: Date) -> TokenDeltaWindow {
-        guard FileManager.default.fileExists(atPath: deltaDatabase) else {
-            return TokenDeltaWindow(delta10mTokens: nil, delta1hTokens: nil)
+    private func aggregateTokenDeltas(from deltas: [String: TokenDeltaWindow]) -> TokenDeltaWindow {
+        func sum(_ values: [Int?]) -> Int? {
+            let present = values.compactMap { $0 }
+            guard !present.isEmpty else {
+                return nil
+            }
+            return present.reduce(0, +)
         }
 
-        let nowMs = Int64((now.timeIntervalSince1970 * 1_000).rounded())
-        let tenMinutesAgo = nowMs - Int64(10 * 60 * 1_000)
-        let oneHourAgo = nowMs - Int64(60 * 60 * 1_000)
-        let query = """
-        WITH current_rows AS (
-          SELECT
-            lower(thread_id) AS thread_id,
-            CASE WHEN tokens_used > 0 THEN tokens_used ELSE 0 END AS tokens_used,
-            observed_at_ms
-          FROM token_snapshots
-          WHERE observed_at_ms > \(oneHourAgo)
-        ),
-        rows_with_baselines AS (
-          SELECT
-            current_rows.thread_id,
-            current_rows.tokens_used,
-            current_rows.observed_at_ms,
-            (
-              SELECT baseline.tokens_used
-              FROM (
-                SELECT h.tokens_used, h.observed_at_ms
-                FROM token_snapshot_history AS h
-                WHERE h.thread_id = current_rows.thread_id
-                  AND h.observed_at_ms <= \(tenMinutesAgo)
-                UNION ALL
-                SELECT s.tokens_used, s.observed_at_ms
-                FROM token_snapshots AS s
-                WHERE s.thread_id = current_rows.thread_id
-                  AND s.observed_at_ms <= \(tenMinutesAgo)
-              ) AS baseline
-              ORDER BY baseline.observed_at_ms DESC
-              LIMIT 1
-            ) AS baseline_10m,
-            (
-              SELECT baseline.tokens_used
-              FROM (
-                SELECT h.tokens_used, h.observed_at_ms
-                FROM token_snapshot_history AS h
-                WHERE h.thread_id = current_rows.thread_id
-                  AND h.observed_at_ms <= \(oneHourAgo)
-                UNION ALL
-                SELECT s.tokens_used, s.observed_at_ms
-                FROM token_snapshots AS s
-                WHERE s.thread_id = current_rows.thread_id
-                  AND s.observed_at_ms <= \(oneHourAgo)
-              ) AS baseline
-              ORDER BY baseline.observed_at_ms DESC
-              LIMIT 1
-            ) AS baseline_1h
-          FROM current_rows
-        )
-        SELECT
-          COALESCE(SUM(
-            CASE
-              WHEN observed_at_ms <= \(tenMinutesAgo) OR baseline_10m IS NULL THEN 0
-              WHEN tokens_used >= baseline_10m THEN tokens_used - baseline_10m
-              ELSE 0
-            END
-          ), 0) AS delta_10m_tokens,
-          COALESCE(SUM(
-            CASE
-              WHEN baseline_1h IS NULL THEN 0
-              WHEN tokens_used >= baseline_1h THEN tokens_used - baseline_1h
-              ELSE 0
-            END
-          ), 0) AS delta_1h_tokens
-        FROM rows_with_baselines;
-        """
-
-        guard let record = try? Shell.sqliteJSON(
-            database: deltaDatabase,
-            query: query,
-            as: [TokenDeltaAggregateRecord].self,
-            readOnly: true
-        ).first else {
-            return TokenDeltaWindow(delta10mTokens: nil, delta1hTokens: nil)
-        }
-
+        let windows = Array(deltas.values)
         return TokenDeltaWindow(
-            delta10mTokens: record.delta10mTokens,
-            delta1hTokens: record.delta1hTokens
+            delta10mTokens: sum(windows.map(\.delta10mTokens)),
+            delta1hTokens: sum(windows.map(\.delta1hTokens)),
+            delta24hTokens: sum(windows.map(\.delta24hTokens)),
+            deltaTodayTokens: sum(windows.map(\.deltaTodayTokens))
         )
     }
 
@@ -1477,9 +1457,9 @@ final class CodexUsageStore: @unchecked Sendable {
                 activeSubagentCount: thread.activeSubagentCount,
                 delta10mTokens: delta?.delta10mTokens,
                 delta1hTokens: delta?.delta1hTokens,
-                todayTokens: delta?.delta24hTokens,
+                todayTokens: delta?.deltaTodayTokens,
                 todaySharePercent: CodexTask.sharePercent(
-                    tokens: delta?.delta24hTokens,
+                    tokens: delta?.deltaTodayTokens,
                     totalTokens: todayTotalTokens
                 ),
                 contextInputTokens: contextResult.usage?.inputTokens,
@@ -1968,7 +1948,7 @@ final class CodexUsageStore: @unchecked Sendable {
         return nil
     }
 
-    private func candidateRateLimitPaths(from threads: [ThreadRecord], recentLimit: Int = 4) -> [String] {
+    private func candidateRateLimitPaths(from threads: [ThreadRecord], recentLimit: Int = 12) -> [String] {
         var seen = Set<String>()
         var paths: [String] = []
 
@@ -2712,6 +2692,10 @@ private struct BuildTasksResult {
     let contextScans: Int
 }
 
+private struct SQLiteTableColumn: Decodable {
+    let name: String
+}
+
 private struct RecentPathsCache {
     let createdAt: Date
     let paths: [String]
@@ -2734,11 +2718,13 @@ private struct TokenDeltaWindow {
     let delta10mTokens: Int?
     let delta1hTokens: Int?
     let delta24hTokens: Int?
+    let deltaTodayTokens: Int?
 
-    init(delta10mTokens: Int?, delta1hTokens: Int?, delta24hTokens: Int? = nil) {
+    init(delta10mTokens: Int?, delta1hTokens: Int?, delta24hTokens: Int? = nil, deltaTodayTokens: Int? = nil) {
         self.delta10mTokens = delta10mTokens
         self.delta1hTokens = delta1hTokens
         self.delta24hTokens = delta24hTokens
+        self.deltaTodayTokens = deltaTodayTokens
     }
 }
 
@@ -2747,22 +2733,14 @@ private struct TokenDeltaRecord: Decodable {
     let delta10mTokens: Int?
     let delta1hTokens: Int?
     let delta24hTokens: Int?
+    let deltaTodayTokens: Int?
 
     enum CodingKeys: String, CodingKey {
         case threadId = "thread_id"
         case delta10mTokens = "delta_10m_tokens"
         case delta1hTokens = "delta_1h_tokens"
         case delta24hTokens = "delta_24h_tokens"
-    }
-}
-
-private struct TokenDeltaAggregateRecord: Decodable {
-    let delta10mTokens: Int?
-    let delta1hTokens: Int?
-
-    enum CodingKeys: String, CodingKey {
-        case delta10mTokens = "delta_10m_tokens"
-        case delta1hTokens = "delta_1h_tokens"
+        case deltaTodayTokens = "delta_today_tokens"
     }
 }
 
@@ -2778,6 +2756,7 @@ private struct RecentSessionCandidate {
     let sessionID: String
     let modifiedAt: Date
     let updatedAt: Int
+    let createdAt: Int
     let databaseTokens: Int
 }
 

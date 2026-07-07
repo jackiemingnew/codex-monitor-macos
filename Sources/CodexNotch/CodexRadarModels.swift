@@ -51,6 +51,7 @@ struct CodexRadarSnapshot: Equatable, Sendable {
     var quotaRows: [CodexRadarQuotaRow]
     var monitoredAt: Date?
     var quotaUpdatedAt: Date?
+    var modelIQDate: String?
     var lastFetchAt: Date?
     var status: String?
     var recommendedAction: String?
@@ -69,6 +70,7 @@ struct CodexRadarSnapshot: Equatable, Sendable {
         quotaRows: [],
         monitoredAt: nil,
         quotaUpdatedAt: nil,
+        modelIQDate: nil,
         lastFetchAt: nil,
         status: nil,
         recommendedAction: nil,
@@ -88,6 +90,7 @@ struct CodexRadarSnapshot: Equatable, Sendable {
         quotaRows: [],
         monitoredAt: nil,
         quotaUpdatedAt: nil,
+        modelIQDate: nil,
         lastFetchAt: nil,
         status: nil,
         recommendedAction: nil,
@@ -146,6 +149,7 @@ struct CodexRadarSnapshot: Equatable, Sendable {
             quotaRows: quotaRows,
             monitoredAt: summary.monitoredAt.flatMap(CodexRadarDateParser.parse),
             quotaUpdatedAt: modelIQ?.quotaRadar?.updatedAt.flatMap(CodexRadarDateParser.parse),
+            modelIQDate: modelIQ?.latest?.date?.nilIfBlank,
             lastFetchAt: fetchedAt,
             status: summary.status?.nilIfBlank,
             recommendedAction: summary.recommendedAction?.nilIfBlank,
@@ -314,6 +318,7 @@ private struct CodexRadarComparison: Decodable {
 }
 
 private struct CodexRadarModelResult: Decodable {
+    let date: String?
     let score: Double?
     let status: String?
     let passed: Int?
@@ -324,6 +329,7 @@ private struct CodexRadarModelResult: Decodable {
     let wallTimeHuman: String?
 
     enum CodingKeys: String, CodingKey {
+        case date
         case score
         case status
         case passed
@@ -336,6 +342,7 @@ private struct CodexRadarModelResult: Decodable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        date = try container.decodeIfPresent(String.self, forKey: .date)
         score = container.decodeFlexibleDoubleIfPresent(forKey: .score)
         status = try container.decodeIfPresent(String.self, forKey: .status)
         passed = container.decodeFlexibleIntIfPresent(forKey: .passed)

@@ -42,6 +42,7 @@ struct UsageSnapshot: Equatable {
     var primaryResetsAt: Int?
     var secondaryResetsAt: Int?
     var usage1h: Int?
+    var usageToday: Int?
     var usage24h: Int
     var usage7d: Int
     var usage30d: Int
@@ -58,6 +59,7 @@ struct UsageSnapshot: Equatable {
         primaryResetsAt: nil,
         secondaryResetsAt: nil,
         usage1h: nil,
+        usageToday: nil,
         usage24h: 0,
         usage7d: 0,
         usage30d: 0,
@@ -514,6 +516,7 @@ struct ThreadRecord: Decodable {
     let reasoningEffort: String?
     let rolloutPath: String
     let updatedAt: Int
+    let createdAt: Int
     let activeSubagentCount: Int
 
     init(
@@ -524,6 +527,7 @@ struct ThreadRecord: Decodable {
         reasoningEffort: String?,
         rolloutPath: String,
         updatedAt: Int,
+        createdAt: Int = 0,
         activeSubagentCount: Int = 0
     ) {
         self.id = id
@@ -533,6 +537,7 @@ struct ThreadRecord: Decodable {
         self.reasoningEffort = reasoningEffort
         self.rolloutPath = rolloutPath
         self.updatedAt = updatedAt
+        self.createdAt = createdAt
         self.activeSubagentCount = activeSubagentCount
     }
 
@@ -544,6 +549,7 @@ struct ThreadRecord: Decodable {
         case reasoningEffort = "reasoning_effort"
         case rolloutPath = "rollout_path"
         case updatedAt = "updated_at"
+        case createdAt = "created_at"
         case activeSubagentCount = "subagent_count"
     }
 
@@ -557,6 +563,7 @@ struct ThreadRecord: Decodable {
             reasoningEffort: try container.decodeIfPresent(String.self, forKey: .reasoningEffort),
             rolloutPath: try container.decode(String.self, forKey: .rolloutPath),
             updatedAt: try container.decode(Int.self, forKey: .updatedAt),
+            createdAt: try container.decodeIfPresent(Int.self, forKey: .createdAt) ?? 0,
             activeSubagentCount: try container.decodeIfPresent(Int.self, forKey: .activeSubagentCount) ?? 0
         )
     }

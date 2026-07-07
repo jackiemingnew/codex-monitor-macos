@@ -10,7 +10,7 @@ enum SnapshotOutputFormatter {
     static func humanLines(for snapshot: UsageSnapshot, taskLimit: Int = 4) -> [String] {
         var lines = [
             "primary=\(Formatters.percent(snapshot.primaryPercent)) secondary=\(Formatters.percent(snapshot.secondaryPercent)) running=\(snapshot.isRunning)",
-            "usage1h=\(optionalInt(snapshot.usage1h)) usage24h=\(snapshot.usage24h) usage7d=\(snapshot.usage7d) usage30d=\(snapshot.usage30d)",
+            "usage1h=\(optionalInt(snapshot.usage1h)) usageToday=\(optionalInt(snapshot.usageToday)) usage24h=\(snapshot.usage24h) usage7d=\(snapshot.usage7d) usage30d=\(snapshot.usage30d)",
             "spark=\(snapshot.sparkQuotaWindows.map { "\($0.label)=\($0.remainingText)" }.joined(separator: ","))",
             "monitor snapshot_ms=\(optionalInt(snapshot.monitorStats.lastSnapshotDurationMs)) usage_ms=\(optionalInt(snapshot.monitorStats.lastUsageDurationMs)) delta_ms=\(optionalInt(snapshot.monitorStats.lastDeltaDurationMs)) rate=\(snapshot.monitorStats.lastRateLimitSource) watched=\(snapshot.monitorStats.watchedPathCount) context_scans=\(snapshot.monitorStats.jsonlContextScans) model_tokens=\(snapshot.monitorStats.monitorModelTokens)"
         ]
@@ -18,7 +18,7 @@ enum SnapshotOutputFormatter {
         for task in snapshot.tasks.prefix(taskLimit) {
             lines.append(
                 "task=\(task.status.label) \(task.title) \(task.tokenCount) "
-                    + "delta10m=\(Formatters.signedCompactTokens(task.delta10mTokens)) "
+                    + "delta1h=\(Formatters.signedCompactTokens(task.delta1hTokens)) "
                     + "today=\(Formatters.compactTokensWithShare(tokens: task.todayTokens, sharePercent: task.todaySharePercent)) "
                     + "ctx=\(Formatters.compactTokenRatio(task.contextInputTokens, task.contextWindowTokens))"
             )
@@ -39,6 +39,7 @@ enum SnapshotOutputFormatter {
             secondaryResetsAt: snapshot.secondaryResetsAt,
             running: snapshot.isRunning,
             usage1h: snapshot.usage1h,
+            usageToday: snapshot.usageToday,
             usage24h: snapshot.usage24h,
             usage7d: snapshot.usage7d,
             usage30d: snapshot.usage30d,
@@ -66,6 +67,7 @@ private struct SnapshotJSON: Encodable {
     let secondaryResetsAt: Int?
     let running: Bool
     let usage1h: Int?
+    let usageToday: Int?
     let usage24h: Int
     let usage7d: Int
     let usage30d: Int
@@ -82,6 +84,7 @@ private struct SnapshotJSON: Encodable {
         case secondaryResetsAt = "secondary_reset_at"
         case running
         case usage1h = "usage_1h"
+        case usageToday = "usage_today"
         case usage24h = "usage_24h"
         case usage7d = "usage_7d"
         case usage30d = "usage_30d"

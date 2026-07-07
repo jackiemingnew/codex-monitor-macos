@@ -255,7 +255,7 @@ struct NotchIslandView: View {
     private var collapsedMetrics: [CollapsedMetric] {
         switch effectiveDisplaySource {
         case .automatic, .codex:
-            let todayTokens = snapshot.usage24h
+            let todayTokens = snapshot.usageToday
             var metrics = [
                 CollapsedMetric(
                     id: "5h",
@@ -272,7 +272,7 @@ struct NotchIslandView: View {
                 CollapsedMetric(
                     id: "tok",
                     label: "Today",
-                    value: todayTokens > 0 ? Formatters.compactTokensEnglish(todayTokens) : "--",
+                    value: (todayTokens ?? 0) > 0 ? Formatters.compactTokensEnglish(todayTokens ?? 0) : "--",
                     color: MonitorTheme.textPrimary
                 )
             ]
@@ -632,7 +632,6 @@ struct DetailPanelView: View {
             if settings.showSparkQuota {
                 sparkQuotaStrip
             }
-            localMetricStrip
             localTaskTable
                 .frame(maxHeight: .infinity, alignment: .top)
 
@@ -707,31 +706,15 @@ struct DetailPanelView: View {
             }
 
             Spacer(minLength: 0)
+
+            SparkMetricChip(label: "Sessions", value: "\(displayedTasks.count)")
+            SparkMetricChip(label: "Subagents", value: "\(activeSubagentTotal)")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
         .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .stroke(MonitorTheme.hairline, lineWidth: 0.6)
-        )
-    }
-
-    private var localMetricStrip: some View {
-        HStack(spacing: 0) {
-            MetricReadout(label: "Active Sessions", value: "\(displayedTasks.count)")
-            verticalSeparator
-            MetricReadout(label: "Subagents", value: "\(activeSubagentTotal)")
-            verticalSeparator
-            MetricReadout(label: "Usage 24h", value: Formatters.compactTokens(snapshot.usage24h))
-            verticalSeparator
-            MetricReadout(label: "Current", value: Formatters.compactTokens(currentTaskTokens))
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .stroke(MonitorTheme.hairline, lineWidth: 0.6)
         )
     }
@@ -771,10 +754,6 @@ struct DetailPanelView: View {
         displayedTasks.reduce(0) { $0 + $1.activeSubagentCount }
     }
 
-    private var currentTaskTokens: Int {
-        displayedTasks.first?.tokenCount ?? 0
-    }
-
     private var currentContextTask: CodexTask? {
         displayedTasks.first { $0.contextInputTokens != nil && $0.contextWindowTokens != nil }
     }
@@ -788,12 +767,6 @@ struct DetailPanelView: View {
             currentContextTask?.contextInputTokens,
             currentContextTask?.contextWindowTokens
         )
-    }
-
-    private var verticalSeparator: some View {
-        Rectangle()
-            .fill(MonitorTheme.separator)
-            .frame(width: 0.6, height: 32)
     }
 
     private func quotaColor(for percent: Int?) -> Color {
@@ -983,6 +956,11 @@ struct DetailPanelView: View {
     }
 
     private func radarUpdatedText(_ radar: CodexRadarSnapshot) -> String {
+        if radar.dataSource == .authorizedAPI,
+           let modelIQDate = radar.modelIQDate?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !modelIQDate.isEmpty {
+            return modelIQDate
+        }
         let date = radar.displayUpdatedAt
         guard let date else {
             return "--"
@@ -1420,6 +1398,34 @@ private struct SparkQuotaChip: View {
     }
 }
 
+private struct SparkMetricChip: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text(label)
+                .font(.system(size: 9.2, weight: .medium))
+                .foregroundStyle(MonitorTheme.textTertiary)
+                .lineLimit(1)
+
+            Text(value)
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(MonitorTheme.textPrimary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.78)
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .background(MonitorTheme.controlFill, in: Capsule())
+        .overlay(
+            Capsule()
+                .stroke(MonitorTheme.hairline, lineWidth: 0.6)
+        )
+    }
+}
+
 private struct CapsuleQuotaBar: View {
     let value: Int?
     let color: Color
@@ -1468,29 +1474,6 @@ private struct CompactStatusCell: View {
     }
 }
 
-private struct MetricReadout: View {
-    let label: String
-    let value: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(label)
-                .font(.system(size: 9.7, weight: .medium))
-                .foregroundStyle(MonitorTheme.textSecondary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
-            Text(value)
-                .font(.system(size: 15.6, weight: .semibold, design: .rounded))
-                .foregroundStyle(MonitorTheme.textPrimary)
-                .monospacedDigit()
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 10)
-    }
-}
-
 private struct TaskTableHeader: View {
     var body: some View {
         HStack(spacing: 0) {
@@ -1498,7 +1481,7 @@ private struct TaskTableHeader: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             tableHeaderText("Status")
                 .frame(width: 58, alignment: .leading)
-            tableHeaderText("+10m")
+            tableHeaderText("+1h")
                 .frame(width: 56, alignment: .trailing)
             tableHeaderText("Today")
                 .frame(width: 78, alignment: .trailing)
@@ -1551,9 +1534,9 @@ private struct TaskTableRow: View {
             StatusPill(status: task.status)
                 .frame(width: 58, alignment: .leading)
 
-            Text(Formatters.signedCompactTokens(task.delta10mTokens))
+            Text(Formatters.signedCompactTokens(task.delta1hTokens))
                 .font(.system(size: 10.2, weight: .semibold))
-                .foregroundStyle(deltaColor(task.delta10mTokens))
+                .foregroundStyle(deltaColor(task.delta1hTokens))
                 .frame(width: 56, alignment: .trailing)
                 .lineLimit(1)
                 .minimumScaleFactor(0.62)

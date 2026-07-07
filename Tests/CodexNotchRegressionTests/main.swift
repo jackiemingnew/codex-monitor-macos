@@ -52,6 +52,7 @@ let snapshotFormatterSnapshot = UsageSnapshot(
     primaryResetsAt: 1_783_000_000,
     secondaryResetsAt: 1_783_400_000,
     usage1h: 444,
+    usageToday: 555,
     usage24h: 111,
     usage7d: 222,
     usage30d: 333,
@@ -81,8 +82,8 @@ let snapshotFormatterSnapshot = UsageSnapshot(
 )
 let humanSnapshotLines = SnapshotOutputFormatter.humanLines(for: snapshotFormatterSnapshot)
 runner.check(
-    humanSnapshotLines.contains("usage1h=444 usage24h=111 usage7d=222 usage30d=333"),
-    "human snapshot output should expose aggregate 1 hour usage"
+    humanSnapshotLines.contains("usage1h=444 usageToday=555 usage24h=111 usage7d=222 usage30d=333"),
+    "human snapshot output should expose aggregate 1 hour and Today usage"
 )
 runner.check(
     humanSnapshotLines.contains("spark=5h=12%"),
@@ -93,8 +94,8 @@ runner.check(
     "human snapshot output should expose monitor self cost"
 )
 runner.check(
-    humanSnapshotLines.contains("task=运行中 父任务 12345 delta10m=+1.2千 today=12 11% ctx=6万/26万"),
-    "human snapshot task line should expose short delta, Today usage share, and context ratio"
+    humanSnapshotLines.contains("task=运行中 父任务 12345 delta1h=+3.5千 today=12 11% ctx=6万/26万"),
+    "human snapshot task line should expose one hour delta, Today usage share, and context ratio"
 )
 runner.check(
     !humanSnapshotLines.contains { $0.contains("subagents=") },
@@ -107,6 +108,10 @@ let jsonMonitor = jsonSnapshot?["monitor"] as? [String: Any]
 runner.check(
     jsonSnapshot?["usage_1h"] as? Int == 444,
     "JSON snapshot output should expose aggregate 1 hour usage"
+)
+runner.check(
+    jsonSnapshot?["usage_today"] as? Int == 555,
+    "JSON snapshot output should expose aggregate Today usage"
 )
 runner.check(
     jsonSnapshot?["primary_reset_at"] as? Int == 1_783_000_000,
@@ -280,6 +285,7 @@ let codexRadarFixture = """
   },
   "model_iq": {
     "latest": {
+      "date": "2026-07-07-pm",
       "score": 62.5,
       "status": "red",
       "passed": 5,
@@ -370,6 +376,7 @@ runner.check(radarSnapshot.quotaRows.first?.fiveH == 276.44, "Codex Radar quota 
 runner.check(radarSnapshot.quotaRows.first?.sevenD == 1658.63, "Codex Radar quota row should decode 7d estimate")
 runner.check(radarSnapshot.costUSD == 132.690071, "Codex Radar cost should prefer quota_radar cost")
 runner.check(radarSnapshot.dataSource == .authorizedAPI, "Codex Radar snapshot should preserve the authorized API source")
+runner.check(radarSnapshot.modelIQDate == "2026-07-07-pm", "Codex Radar authorized API snapshot should expose model_iq latest date")
 runner.check(
     radarSnapshot.displayUpdatedAt == dateFromISO8601("2026-06-30T22:27:57Z", message: "Codex Radar display timestamp should parse"),
     "Codex Radar display timestamp should prefer the freshest source data timestamp"
@@ -414,6 +421,7 @@ let radarMissingComparisons = """
 let missingComparisonsSnapshot = try CodexRadarSnapshot.decodePublicSummary(from: radarMissingComparisons, fetchedAt: radarFetchedAt)
 runner.check(missingComparisonsSnapshot.models.count == 1, "Codex Radar should still show latest model when comparisons are missing")
 runner.check(missingComparisonsSnapshot.quotaRows.isEmpty, "Codex Radar should allow an empty quota radar row list")
+runner.check(missingComparisonsSnapshot.modelIQDate == nil, "Codex Radar should allow model_iq latest date to be absent")
 
 runner.check(
     CodexRadarClient.isAllowedPublicSummaryURL(URL(string: "https://codexradar.com/current.json")!),
@@ -2259,6 +2267,7 @@ _ = try Shell.run("/usr/bin/sqlite3", [
       reasoning_effort text,
       rollout_path text,
       updated_at integer,
+      created_at integer default 0,
       archived integer default 0
     );
     """
@@ -2292,6 +2301,7 @@ let activeToolCallSessionID = "019e073a-c032-74e2-966e-b85ede0c9cd3"
 let codexQuotaSessionID = "019e073a-c032-74e2-966e-b85ede0c9cdb"
 let sparkQuotaSessionID = "019e073a-c032-74e2-966e-b85ede0c9cda"
 let archivedUsageSessionID = "019e073a-c032-74e2-966e-b85ede0c9cdc"
+let todayNewSessionID = "019e073a-c032-74e2-966e-b85ede0c9cdd"
 let sessionDirectory = tempRoot
     .appendingPathComponent("sessions/2026/06/14", isDirectory: true)
 try FileManager.default.createDirectory(at: sessionDirectory, withIntermediateDirectories: true)
@@ -2299,6 +2309,8 @@ let rolloutPath = sessionDirectory
     .appendingPathComponent("rollout-2026-06-14T02-20-00-\(sessionID).jsonl")
 let now = Date()
 let timestamp = ISO8601DateFormatter().string(from: now)
+let localQuotaPrimaryResetAt = Int(now.timeIntervalSince1970) + 3_600
+let localQuotaSecondaryResetAt = Int(now.timeIntervalSince1970) + 7 * 24 * 60 * 60
 let subagentQuotaTimestamp = ISO8601DateFormatter().string(from: now.addingTimeInterval(30))
 let rolloutBody = """
 {"timestamp":"\(timestamp)","type":"turn_context","payload":{"model":"gpt-5.5","effort":"xhigh","collaboration_mode":{"settings":{"reasoning_effort":"xhigh"}}}}
@@ -2308,6 +2320,13 @@ let rolloutBody = """
 """
 try rolloutBody.write(to: rolloutPath, atomically: true, encoding: .utf8)
 try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: rolloutPath.path)
+_ = try Shell.run("/usr/bin/sqlite3", [
+    stateDatabase,
+    """
+    insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, updated_at, created_at, archived)
+    values('\(sessionID)', '正在运行的 Codex 任务', 185801, 'gpt-5.5', 'xhigh', '\(rolloutPath.path)', \(Int(now.timeIntervalSince1970)), \(Int(now.timeIntervalSince1970) - 2 * 24 * 60 * 60), 0);
+    """
+])
 
 let subagentRolloutPath = sessionDirectory
     .appendingPathComponent("rollout-2026-06-14T02-20-01-\(subagentSessionID).jsonl")
@@ -2340,6 +2359,13 @@ let parentOnlyBody = """
 """
 try parentOnlyBody.write(to: parentOnlyRolloutPath, atomically: true, encoding: .utf8)
 try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-600)], ofItemAtPath: parentOnlyRolloutPath.path)
+_ = try Shell.run("/usr/bin/sqlite3", [
+    stateDatabase,
+    """
+    insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, updated_at, created_at, archived)
+    values('\(parentOnlySessionID)', '只有子代理活跃的父任务', 80245, 'gpt-5.5', 'high', '\(parentOnlyRolloutPath.path)', \(Int(now.timeIntervalSince1970) - 600), \(Int(now.timeIntervalSince1970) - 2 * 24 * 60 * 60), 0);
+    """
+])
 
 let parentOnlySubagentPath = sessionDirectory
     .appendingPathComponent("rollout-2026-06-14T02-20-03-\(parentOnlySubagentID).jsonl")
@@ -2479,7 +2505,7 @@ let codexQuotaPath = sessionDirectory
     .appendingPathComponent("rollout-2026-06-14T02-20-18-\(codexQuotaSessionID).jsonl")
 let codexQuotaBody = """
 {"timestamp":"\(timestamp)","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Codex 额度恢复时间测试"}]}}
-{"timestamp":"\(timestamp)","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":0}},"rate_limits":{"limit_id":"codex","primary":{"used_percent":33,"resets_at":1783000000},"secondary":{"used_percent":55,"resets_at":1783400000}}}}
+{"timestamp":"\(timestamp)","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":0}},"rate_limits":{"limit_id":"codex","primary":{"used_percent":33,"resets_at":\(localQuotaPrimaryResetAt)},"secondary":{"used_percent":55,"resets_at":\(localQuotaSecondaryResetAt)}}}}
 """
 try codexQuotaBody.write(to: codexQuotaPath, atomically: true, encoding: .utf8)
 try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: codexQuotaPath.path)
@@ -2495,7 +2521,7 @@ let sparkQuotaPath = sessionDirectory
     .appendingPathComponent("rollout-2026-06-14T02-20-17-\(sparkQuotaSessionID).jsonl")
 let sparkQuotaBody = """
 {"timestamp":"\(timestamp)","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Spark 额度测试"}]}}
-{"timestamp":"\(timestamp)","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":0}},"rate_limits":{"limit_id":"gpt-5.3-codex-spark","primary":{"used_percent":40,"resets_at":1783000000},"secondary":{"used_percent":"10","resets_at":1783400000}}}}
+{"timestamp":"\(timestamp)","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":0}},"rate_limits":{"limit_id":"gpt-5.3-codex-spark","primary":{"used_percent":40,"resets_at":\(localQuotaPrimaryResetAt)},"secondary":{"used_percent":"10","resets_at":\(localQuotaSecondaryResetAt)}}}}
 """
 try sparkQuotaBody.write(to: sparkQuotaPath, atomically: true, encoding: .utf8)
 try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: sparkQuotaPath.path)
@@ -2532,6 +2558,8 @@ let staleCurrentMs = observedNowMs - Int64(2 * 60 * 60 * 1_000)
 let staleBaselineMs = observedNowMs - Int64(3 * 60 * 60 * 1_000)
 let staleDeltaSessionID = "019e073a-c032-74e2-966e-b85ede0c9cd8"
 let missingBaselineDeltaSessionID = "019e073a-c032-74e2-966e-b85ede0c9cd9"
+let todayStartMs = Int64((Calendar.current.startOfDay(for: now).timeIntervalSince1970 * 1_000).rounded())
+let todayBaselineMs = todayStartMs - 60_000
 _ = try Shell.run("/usr/bin/sqlite3", [
     deltaDatabase,
     """
@@ -2560,8 +2588,10 @@ _ = try Shell.run("/usr/bin/sqlite3", [
     values
       ('\(sessionID)', 180000, \(oneHourBaselineMs), \(oneHourBaselineMs)),
       ('\(sessionID)', 150000, \(twentyFourHourBaselineMs), \(twentyFourHourBaselineMs)),
+      ('\(sessionID)', 150000, \(todayBaselineMs), \(todayBaselineMs)),
       ('\(parentOnlySessionID)', 80000, \(oneHourBaselineMs), \(oneHourBaselineMs)),
       ('\(parentOnlySessionID)', 60000, \(twentyFourHourBaselineMs), \(twentyFourHourBaselineMs)),
+      ('\(parentOnlySessionID)', 60000, \(todayBaselineMs), \(todayBaselineMs)),
       ('\(staleDeltaSessionID)', 1000, \(staleBaselineMs), \(staleBaselineMs));
     """
 ])
@@ -2570,6 +2600,13 @@ _ = try Shell.run("/usr/bin/sqlite3", [
     """
     insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, updated_at, archived)
     values('\(missingBaselineDeltaSessionID)', 'Today baseline missing', 500, 'gpt-5.5', 'high', '', \(Int(now.timeIntervalSince1970)), 0);
+    """
+])
+_ = try Shell.run("/usr/bin/sqlite3", [
+    stateDatabase,
+    """
+    insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, updated_at, created_at, archived)
+    values('\(todayNewSessionID)', 'Today new thread without baseline', 700, 'gpt-5.5', 'high', '', \(Int(now.timeIntervalSince1970)), \(Int(now.timeIntervalSince1970)), 0);
     """
 ])
 
@@ -2582,15 +2619,17 @@ let localSnapshot = localStore.loadSnapshot(
     now: now
 )
 runner.check(localSnapshot.isRunning, "recent session rollout should mark local Codex as running")
-runner.check(localSnapshot.usage1h == 6046, "aggregate 1 hour usage should sum all recent delta snapshots")
+runner.check(localSnapshot.usage1h == 6046, "aggregate 1 hour usage should sum current parent thread deltas")
+runner.check(localSnapshot.usageToday == 56746, "aggregate Today usage should sum current parent natural-day deltas")
 runner.check(localSnapshot.tasks.first?.delta1hTokens != localSnapshot.usage1h, "aggregate 1 hour usage should not reuse the first visible task delta")
-runner.check(localSnapshot.tasks.first { $0.id == sessionID }?.todayTokens == 35801, "session Today usage should use the 24 hour delta baseline")
-runner.check(localSnapshot.tasks.first { $0.id == parentOnlySessionID }?.todayTokens == 20245, "parent-only session Today usage should use the 24 hour delta baseline")
-runner.check(localSnapshot.tasks.first { $0.id == missingBaselineDeltaSessionID }?.todayTokens == nil, "missing 24 hour baseline should hide session Today usage")
+runner.check(localSnapshot.tasks.first { $0.id == sessionID }?.todayTokens == 35801, "session Today usage should use the natural-day baseline")
+runner.check(localSnapshot.tasks.first { $0.id == parentOnlySessionID }?.todayTokens == 20245, "parent-only session Today usage should use the natural-day baseline")
+runner.check(localSnapshot.tasks.first { $0.id == todayNewSessionID }?.todayTokens == 700, "today-created sessions without a baseline should count from zero")
+runner.check(localSnapshot.tasks.first { $0.id == missingBaselineDeltaSessionID }?.todayTokens == nil, "missing natural-day baseline should hide old session Today usage")
 runner.check(localSnapshot.primaryPercent == 67, "local JSONL Codex quota should expose main 5h quota")
 runner.check(localSnapshot.secondaryPercent == 45, "local JSONL Codex quota should expose main 7d quota")
-runner.check(localSnapshot.primaryResetsAt == 1783000000, "local JSONL Codex quota should expose primary reset time")
-runner.check(localSnapshot.secondaryResetsAt == 1783400000, "local JSONL Codex quota should expose secondary reset time")
+runner.check(localSnapshot.primaryResetsAt == localQuotaPrimaryResetAt, "local JSONL Codex quota should expose primary reset time")
+runner.check(localSnapshot.secondaryResetsAt == localQuotaSecondaryResetAt, "local JSONL Codex quota should expose secondary reset time")
 runner.check(localSnapshot.primaryPercent != 92, "subagent Codex quota should not override the main 5h quota")
 runner.check(localSnapshot.sparkQuotaWindows.map(\.remainingPercent) == [60, 90], "local JSONL Spark quota windows should decode")
 runner.check(localSnapshot.tasks.contains { $0.id == sessionID && $0.status == .running }, "recent session rollout should appear in running task list")
@@ -2608,7 +2647,7 @@ runner.check(localSnapshot.tasks.first { $0.id == longMetaParentSessionID }?.act
 runner.check(localSnapshot.tasks.contains { $0.id == staleParentSessionID && $0.status == .running }, "active subagent should synthesize a running parent task even when the parent is outside the task range")
 runner.check(localSnapshot.tasks.first { $0.id == sessionID }?.tokenCount == 185801, "parent task token count should include parent and all subagent session totals")
 runner.check(localSnapshot.tasks.first { $0.id == parentOnlySessionID }?.tokenCount == 80245, "parent running through subagent activity should include subagent token usage")
-runner.check(localSnapshot.tasks.first { $0.id == longMetaParentSessionID }?.tokenCount == 33333, "parent running through long metadata subagent activity should include subagent token usage")
+runner.check(localSnapshot.tasks.first { $0.id == longMetaParentSessionID }?.tokenCount == 22222, "parent running through long metadata subagent activity should keep parent-only token usage")
 runner.check(localSnapshot.tasks.first { $0.id == staleDBTokenSessionID }?.tokenCount == 120000000, "recent task token count should prefer fresher rollout totals over stale database tokens")
 runner.check(localSnapshot.tasks.contains { $0.id == activeToolCallSessionID && $0.status == .running }, "quiet tool calls should keep the running indicator on until a task-level completion event arrives")
 runner.check(localSnapshot.tasks.first { $0.id == completedSessionID }?.status == .recent, "fresh completed session rollout should not be treated as running")
