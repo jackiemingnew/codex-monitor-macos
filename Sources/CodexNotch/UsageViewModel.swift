@@ -98,14 +98,13 @@ final class UsageViewModel: ObservableObject {
                 if mergedSnapshot.usage1h == nil {
                     mergedSnapshot.usage1h = self.snapshot.usage1h
                 }
-                if mergedSnapshot.usageToday == nil {
-                    mergedSnapshot.usageToday = self.snapshot.usageToday
-                }
                 mergedSnapshot.usage24h = self.snapshot.usage24h
                 mergedSnapshot.usage7d = self.snapshot.usage7d
                 mergedSnapshot.usage30d = self.snapshot.usage30d
+                mergedSnapshot.periodUsageQuality = self.snapshot.periodUsageQuality
+                mergedSnapshot.dailyUsage = self.snapshot.dailyUsage
                 mergedSnapshot.tasks = mergedSnapshot.tasks.map {
-                    $0.withTodaySharePercent(totalTokens: mergedSnapshot.usageToday ?? 0)
+                    $0.withTodaySharePercent(totalTokens: mergedSnapshot.dailyUsage.usageTodayTokens)
                 }
                 mergedSnapshot.monitorStats.lastUsageDurationMs = self.snapshot.monitorStats.lastUsageDurationMs
                 mergedSnapshot.monitorStats.watchedPathCount = self.snapshot.monitorStats.watchedPathCount
@@ -149,14 +148,16 @@ final class UsageViewModel: ObservableObject {
         Task.detached(priority: .utility) { [store] in
             let startedAt = Date()
             let usage = store.loadUsageTotals()
+            let dailyUsage = store.loadDailyUsage()
             let durationMs = max(0, Int((Date().timeIntervalSince(startedAt) * 1_000).rounded()))
             await MainActor.run {
                 if let usage {
                     self.snapshot.usage24h = usage.day
                     self.snapshot.usage7d = usage.week
                     self.snapshot.usage30d = usage.month
+                    self.snapshot.dailyUsage = dailyUsage
                     self.snapshot.tasks = self.snapshot.tasks.map {
-                        $0.withTodaySharePercent(totalTokens: self.snapshot.usageToday ?? 0)
+                        $0.withTodaySharePercent(totalTokens: dailyUsage.usageTodayTokens)
                     }
                 }
                 self.snapshot.monitorStats.lastUsageDurationMs = durationMs
@@ -463,13 +464,11 @@ final class UsageViewModel: ObservableObject {
 
         if snapshot.errorMessage != nil,
            snapshot.usage1h == nil,
-           snapshot.usageToday == nil,
            snapshot.usage24h == 0,
            snapshot.usage7d == 0,
            snapshot.usage30d == 0,
            previous.usage30d > 0 {
             snapshot.usage1h = previous.usage1h
-            snapshot.usageToday = previous.usageToday
             snapshot.usage24h = previous.usage24h
             snapshot.usage7d = previous.usage7d
             snapshot.usage30d = previous.usage30d

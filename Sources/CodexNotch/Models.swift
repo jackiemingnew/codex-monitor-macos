@@ -41,11 +41,14 @@ struct UsageSnapshot: Equatable {
     var secondaryPercent: Int?
     var primaryResetsAt: Int?
     var secondaryResetsAt: Int?
+    var cumulativeUsage: CumulativeUsage
+    var recentUsage: RecentUsage
+    var dailyUsage: DailyUsage
     var usage1h: Int?
-    var usageToday: Int?
     var usage24h: Int
     var usage7d: Int
     var usage30d: Int
+    var periodUsageQuality: PeriodUsageQuality
     var sparkQuotaWindows: [SparkQuotaWindow]
     var tasks: [CodexTask]
     var isRunning: Bool
@@ -58,16 +61,93 @@ struct UsageSnapshot: Equatable {
         secondaryPercent: nil,
         primaryResetsAt: nil,
         secondaryResetsAt: nil,
+        cumulativeUsage: .empty,
+        recentUsage: .empty,
+        dailyUsage: .empty,
         usage1h: nil,
-        usageToday: nil,
         usage24h: 0,
         usage7d: 0,
         usage30d: 0,
+        periodUsageQuality: .empty,
         sparkQuotaWindows: [],
         tasks: [],
         isRunning: false,
         lastUpdated: Date(),
         errorMessage: nil
+    )
+}
+
+enum QuotaDisplayLevel: Equatable {
+    case unavailable
+    case critical
+    case warning
+    case healthy
+
+    static func level(for percent: Int?) -> QuotaDisplayLevel {
+        guard let percent else {
+            return .unavailable
+        }
+        if percent <= 20 {
+            return .critical
+        }
+        if percent <= 40 {
+            return .warning
+        }
+        return .healthy
+    }
+}
+
+struct CumulativeUsage: Equatable, Sendable {
+    var activeTokens: Int
+    var archivedTokens: Int
+    var allTokens: Int
+    var activeSessions: Int
+    var archivedSessions: Int
+    var allSessions: Int
+
+    static let empty = CumulativeUsage(
+        activeTokens: 0,
+        archivedTokens: 0,
+        allTokens: 0,
+        activeSessions: 0,
+        archivedSessions: 0,
+        allSessions: 0
+    )
+}
+
+struct RecentUsage: Equatable, Sendable {
+    var usage20dActiveTokens: Int
+    var usage20dArchivedTokens: Int
+    var usage20dAllTokens: Int
+    var usage20dActiveSessions: Int
+    var usage20dArchivedSessions: Int
+    var usage20dAllSessions: Int
+    var windowDays: Int
+
+    static let empty = RecentUsage(
+        usage20dActiveTokens: 0,
+        usage20dArchivedTokens: 0,
+        usage20dAllTokens: 0,
+        usage20dActiveSessions: 0,
+        usage20dArchivedSessions: 0,
+        usage20dAllSessions: 0,
+        windowDays: 20
+    )
+}
+
+struct DailyUsage: Equatable, Sendable {
+    var usageTodayTokens: Int
+    var dayStartedAt: Date
+    var timeZoneIdentifier: String
+    var isPartial: Bool
+    var missingBaselineSessions: Int
+
+    static let empty = DailyUsage(
+        usageTodayTokens: 0,
+        dayStartedAt: Date(timeIntervalSince1970: 0),
+        timeZoneIdentifier: TimeZone.current.identifier,
+        isPartial: false,
+        missingBaselineSessions: 0
     )
 }
 
@@ -97,6 +177,24 @@ struct PeriodUsage: Equatable, Sendable {
     var month: Int
 
     static let zero = PeriodUsage(day: 0, week: 0, month: 0)
+}
+
+struct PeriodUsageQuality: Equatable, Sendable {
+    var usage24hPartial: Bool
+    var usage7dPartial: Bool
+    var usage30dPartial: Bool
+    var missing24hBaselines: Int
+    var missing7dBaselines: Int
+    var missing30dBaselines: Int
+
+    static let empty = PeriodUsageQuality(
+        usage24hPartial: false,
+        usage7dPartial: false,
+        usage30dPartial: false,
+        missing24hBaselines: 0,
+        missing7dBaselines: 0,
+        missing30dBaselines: 0
+    )
 }
 
 struct CodexTask: Identifiable, Equatable {
@@ -690,13 +788,14 @@ struct SparkQuotaWindow: Identifiable, Equatable {
     }
 
     func displayRemainingPercent(now: Date = Date()) -> Int? {
-        if let resetAt, Int(now.timeIntervalSince1970) >= resetAt {
-            return 100
-        }
-        if let remainingPercent, remainingPercent >= 99 {
-            return 100
-        }
         return remainingPercent
+    }
+
+    func isExpired(at now: Date = Date()) -> Bool {
+        guard let resetAt else {
+            return false
+        }
+        return Int(now.timeIntervalSince1970) >= resetAt
     }
 }
 

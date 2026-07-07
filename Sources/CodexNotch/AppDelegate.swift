@@ -6,10 +6,65 @@ import SwiftUI
 struct CodexNotchApp {
     static func main() {
         let arguments = CommandLine.arguments
+        let snapshotOptions = SnapshotCommandOptions(arguments: Array(arguments.dropFirst()))
+        if snapshotOptions.shouldRecordDeltaSnapshot {
+            let store = CodexUsageStore(
+                codexDirectory: snapshotOptions.codexDirectory,
+                stateDatabase: snapshotOptions.stateDatabase,
+                logsDatabase: snapshotOptions.logsDatabase,
+                deltaDatabase: snapshotOptions.deltaDatabase
+            )
+            let ok = store.recordDeltaSnapshot(range: snapshotOptions.taskHistoryRange)
+            print(ok ? "recorded" : "no-threads")
+            return
+        }
+        if snapshotOptions.shouldPrintNodeSnapshot {
+            let store = CodexUsageStore(
+                codexDirectory: snapshotOptions.codexDirectory,
+                stateDatabase: snapshotOptions.stateDatabase,
+                logsDatabase: snapshotOptions.logsDatabase,
+                deltaDatabase: snapshotOptions.deltaDatabase
+            )
+            if !snapshotOptions.noAppServer {
+                _ = store.refreshAppServerRateLimits()
+            }
+            let snapshot = store.loadSnapshot(
+                includePeriodUsage: true,
+                bypassFastCache: true,
+                rateLimitSource: snapshotOptions.noAppServer ? .localFilesOnly : .appServerFirst,
+                taskHistoryRange: snapshotOptions.taskHistoryRange
+            )
+            if snapshotOptions.nodeJSON {
+                FileHandle.standardOutput.write(SnapshotOutputFormatter.nodeCompatibleJSONData(
+                    for: snapshot,
+                    options: snapshotOptions.nodeCompatibleOptions
+                ))
+                FileHandle.standardOutput.write(Data("\n".utf8))
+            } else {
+                for line in SnapshotOutputFormatter.nodeCompatibleHumanLines(for: snapshot, taskLimit: snapshotOptions.limit) {
+                    print(line)
+                }
+            }
+            return
+        }
         let shouldPrintHumanSnapshot = arguments.contains("--print-snapshot") || arguments.contains("--print-fast-snapshot")
         let shouldPrintJSONSnapshot = arguments.contains("--print-snapshot-json") || arguments.contains("--print-fast-snapshot-json")
         if shouldPrintHumanSnapshot || shouldPrintJSONSnapshot {
-            let snapshot = CodexUsageStore().loadSnapshot(includePeriodUsage: true)
+            let store = CodexUsageStore(
+                codexDirectory: snapshotOptions.codexDirectory,
+                stateDatabase: snapshotOptions.stateDatabase,
+                logsDatabase: snapshotOptions.logsDatabase,
+                deltaDatabase: snapshotOptions.deltaDatabase
+            )
+            if !snapshotOptions.noAppServer {
+                _ = store.refreshAppServerRateLimits()
+            }
+            let snapshot = store.loadSnapshot(
+                includePeriodUsage: true,
+                bypassFastCache: true,
+                rateLimitSource: snapshotOptions.noAppServer ? .localFilesOnly : .appServerFirst,
+                taskHistoryRange: snapshotOptions.taskHistoryRange
+            )
             if shouldPrintJSONSnapshot {
                 FileHandle.standardOutput.write(SnapshotOutputFormatter.jsonData(for: snapshot))
                 FileHandle.standardOutput.write(Data("\n".utf8))
@@ -27,6 +82,141 @@ struct CodexNotchApp {
         app.setActivationPolicy(.accessory)
         ProcessInfo.processInfo.disableAutomaticTermination("codex监测 runs as a persistent notch overlay")
         app.run()
+    }
+}
+
+private struct SnapshotCommandOptions {
+    let arguments: [String]
+    var limit = 80
+    var includeArchived = false
+    var remoteEnabled = false
+    var noAppServer = false
+    var tailBytes = 5 * 1024 * 1024
+    var logScanLimit = 200_000
+    var codexDirectory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
+    var stateDatabase: String?
+    var logsDatabase: String?
+    var deltaDatabase: String?
+
+    init(arguments: [String]) {
+        self.arguments = arguments
+        var index = 0
+        while index < arguments.count {
+            let arg = arguments[index]
+            switch arg {
+            case "--limit":
+                limit = Self.intValue(after: &index, in: arguments, fallback: limit)
+            case "--db":
+                stateDatabase = Self.stringValue(after: &index, in: arguments)
+            case "--logs-db":
+                logsDatabase = Self.stringValue(after: &index, in: arguments)
+            case "--delta-db":
+                deltaDatabase = Self.stringValue(after: &index, in: arguments)
+            case "--tail-bytes":
+                tailBytes = Self.intValue(after: &index, in: arguments, fallback: tailBytes)
+            case "--log-scan-limit":
+                logScanLimit = Self.intValue(after: &index, in: arguments, fallback: logScanLimit)
+            case "--codex-home":
+                if let value = Self.stringValue(after: &index, in: arguments) {
+                    codexDirectory = URL(fileURLWithPath: Self.expandedPath(value))
+                }
+            case "--archived":
+                includeArchived = true
+            case "--remote":
+                remoteEnabled = true
+            case "--no-app-server":
+                noAppServer = true
+            default:
+                break
+            }
+            index += 1
+        }
+    }
+
+    var shouldPrintNodeSnapshot: Bool {
+        arguments.contains("--print-node-snapshot")
+            || arguments.contains("--print-node-snapshot-json")
+    }
+
+    var shouldRecordDeltaSnapshot: Bool {
+        arguments.contains("--record-delta-snapshot")
+    }
+
+    var nodeJSON: Bool {
+        arguments.contains("--print-node-snapshot-json")
+    }
+
+    var taskHistoryRange: TaskHistoryRange {
+        if limit > 80 {
+            return .month
+        }
+        if limit > 60 {
+            return .sevenDays
+        }
+        return .threeDays
+    }
+
+    var nodeCompatibleOptions: NodeCompatibleSnapshotOptions {
+        NodeCompatibleSnapshotOptions(
+            includeArchived: includeArchived,
+            taskLimit: limit,
+            tailBytes: tailBytes,
+            logScanLimit: logScanLimit,
+            remoteEnabled: remoteEnabled,
+            codexDirectory: codexDirectory,
+            stateDatabase: stateDatabase.map(Self.expandedPath)
+                ?? Self.latestSQLiteDatabase(in: codexDirectory, prefix: "state_", fallback: "state_5.sqlite"),
+            logsDatabase: logsDatabase.map(Self.expandedPath)
+                ?? Self.latestSQLiteDatabase(in: codexDirectory, prefix: "logs_", fallback: "logs_2.sqlite"),
+            deltaDatabase: deltaDatabase.map(Self.expandedPath)
+                ?? CodexUsageStore.defaultDeltaDatabasePath(for: codexDirectory)
+        )
+    }
+
+    private static func stringValue(after index: inout Int, in arguments: [String]) -> String? {
+        guard index + 1 < arguments.count else {
+            return nil
+        }
+        index += 1
+        return expandedPath(arguments[index])
+    }
+
+    private static func intValue(after index: inout Int, in arguments: [String], fallback: Int) -> Int {
+        guard let raw = stringValue(after: &index, in: arguments),
+              let value = Int(raw),
+              value > 0 else {
+            return fallback
+        }
+        return value
+    }
+
+    private static func expandedPath(_ path: String) -> String {
+        guard path.hasPrefix("~/") else {
+            return path
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(String(path.dropFirst(2)))
+            .path
+    }
+
+    private static func latestSQLiteDatabase(in directory: URL, prefix: String, fallback: String) -> String {
+        let fallbackPath = directory.appendingPathComponent(fallback).path
+        guard let urls = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else {
+            return fallbackPath
+        }
+        return urls.compactMap { url -> (version: Int, path: String)? in
+            guard url.pathExtension == "sqlite" else {
+                return nil
+            }
+            let name = url.deletingPathExtension().lastPathComponent
+            guard name.hasPrefix(prefix),
+                  let version = Int(name.dropFirst(prefix.count)) else {
+                return nil
+            }
+            return (version, url.path)
+        }
+        .max { $0.version < $1.version }?
+        .path ?? fallbackPath
     }
 }
 

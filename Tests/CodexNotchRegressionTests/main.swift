@@ -21,13 +21,50 @@ final class TestRunner {
     }
 }
 
+private struct CountRecord: Decodable {
+    let count: Int
+}
+
 let runner = TestRunner()
+let repositoryRoot = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+let metricDefinitionsPath = repositoryRoot.appendingPathComponent("docs/METRIC_DEFINITIONS.md").path
+let metricDefinitions = (try? String(contentsOfFile: metricDefinitionsPath, encoding: .utf8)) ?? ""
+for metricID in [
+    "cumulative.active_tokens",
+    "cumulative.archived_tokens",
+    "cumulative.all_tokens",
+    "recent.usage_20d_active_tokens",
+    "recent.usage_20d_archived_tokens",
+    "recent.usage_20d_all_tokens",
+    "daily.usage_today_tokens",
+    "period.usage_24h",
+    "period.usage_7d",
+    "period.usage_30d",
+    "delta.10m",
+    "delta.1h",
+    "delta.24h",
+    "task.total_tokens",
+    "quota.5h",
+    "quota.7d"
+] {
+    runner.check(metricDefinitions.contains(metricID), "metric definitions should document \(metricID)")
+}
 
 runner.check(AppInfo.version == "0.1.2", "app info should expose version 0.1.2")
 runner.check(AppInfo.displayVersion == "0.1.2", "app info should fall back to source version when bundle version is unavailable")
 runner.check(TaskStatus.running.hudLabel == "RUNNING", "HUD running status should display RUNNING")
 runner.check(TaskStatus.recent.hudLabel == "IDLE", "HUD recent status should display as IDLE")
 runner.check(TaskStatus.idle.hudLabel == "IDLE", "HUD idle status should display as IDLE")
+runner.check(QuotaDisplayLevel.level(for: nil) == .unavailable, "missing quota should use unavailable display level")
+runner.check(QuotaDisplayLevel.level(for: 0) == .critical, "zero quota should use critical display level")
+runner.check(QuotaDisplayLevel.level(for: 20) == .critical, "20 percent quota should use critical display level")
+runner.check(QuotaDisplayLevel.level(for: 21) == .warning, "21 percent quota should use warning display level")
+runner.check(QuotaDisplayLevel.level(for: 40) == .warning, "40 percent quota should use warning display level")
+runner.check(QuotaDisplayLevel.level(for: 41) == .healthy, "41 percent quota should use healthy display level")
+runner.check(QuotaDisplayLevel.level(for: 100) == .healthy, "full quota should use healthy display level")
 
 let snapshotFormatterTask = CodexTask(
     id: "snapshot-task",
@@ -51,11 +88,35 @@ let snapshotFormatterSnapshot = UsageSnapshot(
     secondaryPercent: 66,
     primaryResetsAt: 1_783_000_000,
     secondaryResetsAt: 1_783_400_000,
+    cumulativeUsage: CumulativeUsage(
+        activeTokens: 123_456,
+        archivedTokens: 7_890,
+        allTokens: 131_346,
+        activeSessions: 3,
+        archivedSessions: 1,
+        allSessions: 4
+    ),
+    recentUsage: RecentUsage(
+        usage20dActiveTokens: 123_456,
+        usage20dArchivedTokens: 7_890,
+        usage20dAllTokens: 131_346,
+        usage20dActiveSessions: 3,
+        usage20dArchivedSessions: 1,
+        usage20dAllSessions: 4,
+        windowDays: 20
+    ),
+    dailyUsage: DailyUsage(
+        usageTodayTokens: 111,
+        dayStartedAt: Date(timeIntervalSince1970: 0),
+        timeZoneIdentifier: "UTC",
+        isPartial: false,
+        missingBaselineSessions: 0
+    ),
     usage1h: 444,
-    usageToday: 555,
     usage24h: 111,
     usage7d: 222,
     usage30d: 333,
+    periodUsageQuality: .empty,
     sparkQuotaWindows: [
         SparkQuotaWindow(
             id: "spark-5h",
@@ -82,8 +143,20 @@ let snapshotFormatterSnapshot = UsageSnapshot(
 )
 let humanSnapshotLines = SnapshotOutputFormatter.humanLines(for: snapshotFormatterSnapshot)
 runner.check(
-    humanSnapshotLines.contains("usage1h=444 usageToday=555 usage24h=111 usage7d=222 usage30d=333"),
-    "human snapshot output should expose aggregate 1 hour and Today usage"
+    humanSnapshotLines.contains("usage1h=444 usage24h=111 usage7d=222 usage30d=333 source=swift-delta-cache"),
+    "human snapshot output should expose aggregate 1 hour usage and rolling period source"
+)
+runner.check(
+    humanSnapshotLines.contains("daily today=111 partial=false missing=0"),
+    "human snapshot output should expose natural-day token usage"
+)
+runner.check(
+    humanSnapshotLines.contains("cumulative active=123456 archived=7890 all=131346"),
+    "human snapshot output should expose cumulative token totals"
+)
+runner.check(
+    humanSnapshotLines.contains("recent20d active=123456 archived=7890 all=131346"),
+    "human snapshot output should expose recent 20 day token totals"
 )
 runner.check(
     humanSnapshotLines.contains("spark=5h=12%"),
@@ -95,7 +168,7 @@ runner.check(
 )
 runner.check(
     humanSnapshotLines.contains("task=运行中 父任务 12345 delta1h=+3.5千 today=12 11% ctx=6万/26万"),
-    "human snapshot task line should expose one hour delta, Today usage share, and context ratio"
+    "human snapshot task line should expose 1 hour delta, Today usage share, and context ratio"
 )
 runner.check(
     !humanSnapshotLines.contains { $0.contains("subagents=") },
@@ -105,13 +178,18 @@ let jsonSnapshot = try JSONSerialization.jsonObject(
     with: SnapshotOutputFormatter.jsonData(for: snapshotFormatterSnapshot)
 ) as? [String: Any]
 let jsonMonitor = jsonSnapshot?["monitor"] as? [String: Any]
+let jsonCumulativeUsage = jsonSnapshot?["cumulative_usage"] as? [String: Any]
 runner.check(
     jsonSnapshot?["usage_1h"] as? Int == 444,
     "JSON snapshot output should expose aggregate 1 hour usage"
 )
 runner.check(
-    jsonSnapshot?["usage_today"] as? Int == 555,
-    "JSON snapshot output should expose aggregate Today usage"
+    jsonCumulativeUsage?["active_tokens"] as? Int == 123_456,
+    "JSON snapshot output should expose active cumulative tokens"
+)
+runner.check(
+    jsonCumulativeUsage?["metric_id"] as? String == "cumulative.active_tokens",
+    "JSON snapshot output should identify the default cumulative metric"
 )
 runner.check(
     jsonSnapshot?["primary_reset_at"] as? Int == 1_783_000_000,
@@ -199,7 +277,7 @@ runner.check(
 )
 runner.check(
     jsonSnapshotTasks?.first?["delta_10m_tokens"] as? Int == 1200,
-    "JSON snapshot output should expose 10 minute token deltas"
+    "JSON snapshot output should keep legacy 10 minute token deltas for compatibility"
 )
 runner.check(
     jsonSnapshotTasks?.first?["delta_1h_tokens"] as? Int == 3456,
@@ -242,23 +320,29 @@ runner.check(
     "task row subagent badge should stay hidden for zero active subagents"
 )
 
+let appServerFixtureNow = Date()
+let appServerPrimaryReset = Int(appServerFixtureNow.timeIntervalSince1970) + 5 * 60 * 60
+let appServerSecondaryReset = Int(appServerFixtureNow.timeIntervalSince1970) + 7 * 24 * 60 * 60
+let appServerSparkPrimaryReset = appServerPrimaryReset + 600
+let appServerSparkSecondaryReset = appServerSecondaryReset + 600
 let appServerRateLimitOutput = """
-{"jsonrpc":"2.0","id":2,"result":{"rate_limits":{"limit_id":"codex","primary":{"used_percent":20,"resets_at":1783000000},"secondary":{"used_percent":30,"resets_at":1783400000}},"rate_limits_by_limit_id":{"codex":{"limit_id":"codex","primary":{"used_percent":20,"resets_at":1783000000},"secondary":{"used_percent":30,"resets_at":1783400000}},"GPT-5.3-Codex-Spark":{"limit_id":"gpt-5.3-codex-spark","limit_name":"GPT-5.3-Codex-Spark","primary":{"used_percent":100,"resets_at":1783000000},"secondary":{"used_percent":25,"resets_at":1783400000}}}}}
+{"jsonrpc":"2.0","id":2,"result":{"rateLimits":{"limitId":"codex","limitName":null,"primary":{"usedPercent":17,"windowDurationMins":300,"resetsAt":\(appServerPrimaryReset)},"secondary":{"usedPercent":22,"windowDurationMins":10080,"resetsAt":\(appServerSecondaryReset)}},"rateLimitsByLimitId":{"codex_bengalfox":{"limitId":"codex_bengalfox","limitName":"GPT-5.3-Codex-Spark","primary":{"usedPercent":78,"windowDurationMins":300,"resetsAt":\(appServerSparkPrimaryReset)},"secondary":{"usedPercent":42,"windowDurationMins":10080,"resetsAt":\(appServerSparkSecondaryReset)}},"codex":{"limitId":"codex","limitName":null,"primary":{"usedPercent":17,"windowDurationMins":300,"resetsAt":\(appServerPrimaryReset)},"secondary":{"usedPercent":22,"windowDurationMins":10080,"resetsAt":\(appServerSecondaryReset)}}}}}
 """
 let appServerSnapshot = runner.require(
     CodexUsageStore().parseAppServerRateLimits(
         output: appServerRateLimitOutput,
-        now: Date(timeIntervalSince1970: 1_782_900_000)
+        now: appServerFixtureNow
     ),
     "app-server rate limit fixture should parse"
 )
-runner.check(appServerSnapshot.primaryPercent == 80, "app-server codex primary quota should remain the main 5h quota")
-runner.check(appServerSnapshot.secondaryPercent == 70, "app-server codex secondary quota should remain the main 7d quota")
-runner.check(appServerSnapshot.primaryResetsAt == 1783000000, "app-server codex primary reset time should decode")
-runner.check(appServerSnapshot.secondaryResetsAt == 1783400000, "app-server codex secondary reset time should decode")
+runner.check(appServerSnapshot.isPrimaryCodexLimit, "app-server quota should identify codex as the main limit")
+runner.check(appServerSnapshot.primaryPercent == 83, "app-server codex primary quota should remain the main 5h quota")
+runner.check(appServerSnapshot.secondaryPercent == 78, "app-server codex secondary quota should remain the main 7d quota")
+runner.check(appServerSnapshot.primaryResetsAt == appServerPrimaryReset, "app-server codex primary reset time should decode")
+runner.check(appServerSnapshot.secondaryResetsAt == appServerSecondaryReset, "app-server codex secondary reset time should decode")
 runner.check(appServerSnapshot.sparkQuotaWindows.map(\.label) == ["5h", "7d"], "app-server Spark quota windows should decode")
-runner.check(appServerSnapshot.sparkQuotaWindows.first?.remainingPercent == 0, "app-server Spark 5h remaining percent should decode")
-runner.check(appServerSnapshot.sparkQuotaWindows.last?.remainingPercent == 75, "app-server Spark 7d remaining percent should decode")
+runner.check(appServerSnapshot.sparkQuotaWindows.first?.remainingPercent == 22, "app-server Spark 5h remaining percent should decode")
+runner.check(appServerSnapshot.sparkQuotaWindows.last?.remainingPercent == 58, "app-server Spark 7d remaining percent should decode")
 
 @MainActor
 func dateFromISO8601(_ value: String, message: String) -> Date {
@@ -376,7 +460,7 @@ runner.check(radarSnapshot.quotaRows.first?.fiveH == 276.44, "Codex Radar quota 
 runner.check(radarSnapshot.quotaRows.first?.sevenD == 1658.63, "Codex Radar quota row should decode 7d estimate")
 runner.check(radarSnapshot.costUSD == 132.690071, "Codex Radar cost should prefer quota_radar cost")
 runner.check(radarSnapshot.dataSource == .authorizedAPI, "Codex Radar snapshot should preserve the authorized API source")
-runner.check(radarSnapshot.modelIQDate == "2026-07-07-pm", "Codex Radar authorized API snapshot should expose model_iq latest date")
+runner.check(radarSnapshot.modelIQDate == "2026-07-07-pm", "Codex Radar authorized API should expose model_iq latest date for the summary Updated field")
 runner.check(
     radarSnapshot.displayUpdatedAt == dateFromISO8601("2026-06-30T22:27:57Z", message: "Codex Radar display timestamp should parse"),
     "Codex Radar display timestamp should prefer the freshest source data timestamp"
@@ -421,7 +505,6 @@ let radarMissingComparisons = """
 let missingComparisonsSnapshot = try CodexRadarSnapshot.decodePublicSummary(from: radarMissingComparisons, fetchedAt: radarFetchedAt)
 runner.check(missingComparisonsSnapshot.models.count == 1, "Codex Radar should still show latest model when comparisons are missing")
 runner.check(missingComparisonsSnapshot.quotaRows.isEmpty, "Codex Radar should allow an empty quota radar row list")
-runner.check(missingComparisonsSnapshot.modelIQDate == nil, "Codex Radar should allow model_iq latest date to be absent")
 
 runner.check(
     CodexRadarClient.isAllowedPublicSummaryURL(URL(string: "https://codexradar.com/current.json")!),
@@ -2266,8 +2349,8 @@ _ = try Shell.run("/usr/bin/sqlite3", [
       model text,
       reasoning_effort text,
       rollout_path text,
+      created_at integer,
       updated_at integer,
-      created_at integer default 0,
       archived integer default 0
     );
     """
@@ -2289,6 +2372,8 @@ let subagentSessionID = "019ec23f-2f8e-7d50-a71d-b8a2ba679fd4"
 let historicalSubagentSessionID = "019ec23f-7777-7d50-a71d-b8a2ba679fd4"
 let parentOnlySessionID = "019e073a-c032-74e2-966e-b85ede0c9ccb"
 let parentOnlySubagentID = "019ec23f-344a-7171-99d0-f1c2fe671252"
+let pollutedDeltaParentSessionID = "019e073a-c032-74e2-966e-b85ede0c9caa"
+let pollutedDeltaSubagentID = "019ec23f-6666-7171-99d0-f1c2fe671252"
 let staleParentSessionID = "019e073a-c032-74e2-966e-b85ede0c9cd1"
 let staleParentSubagentID = "019ec23f-5555-7171-99d0-f1c2fe671252"
 let longMetaParentSessionID = "019e073a-c032-74e2-966e-b85ede0c9cd0"
@@ -2301,7 +2386,7 @@ let activeToolCallSessionID = "019e073a-c032-74e2-966e-b85ede0c9cd3"
 let codexQuotaSessionID = "019e073a-c032-74e2-966e-b85ede0c9cdb"
 let sparkQuotaSessionID = "019e073a-c032-74e2-966e-b85ede0c9cda"
 let archivedUsageSessionID = "019e073a-c032-74e2-966e-b85ede0c9cdc"
-let todayNewSessionID = "019e073a-c032-74e2-966e-b85ede0c9cdd"
+let archivedOnlyUsageSessionID = "019e073a-c032-74e2-966e-b85ede0c9cdd"
 let sessionDirectory = tempRoot
     .appendingPathComponent("sessions/2026/06/14", isDirectory: true)
 try FileManager.default.createDirectory(at: sessionDirectory, withIntermediateDirectories: true)
@@ -2309,9 +2394,11 @@ let rolloutPath = sessionDirectory
     .appendingPathComponent("rollout-2026-06-14T02-20-00-\(sessionID).jsonl")
 let now = Date()
 let timestamp = ISO8601DateFormatter().string(from: now)
-let localQuotaPrimaryResetAt = Int(now.timeIntervalSince1970) + 3_600
-let localQuotaSecondaryResetAt = Int(now.timeIntervalSince1970) + 7 * 24 * 60 * 60
 let subagentQuotaTimestamp = ISO8601DateFormatter().string(from: now.addingTimeInterval(30))
+let codexPrimaryReset = Int(now.timeIntervalSince1970) + 5 * 60 * 60
+let codexSecondaryReset = Int(now.timeIntervalSince1970) + 7 * 24 * 60 * 60
+let subagentPrimaryReset = codexPrimaryReset + 600
+let subagentSecondaryReset = codexSecondaryReset + 600
 let rolloutBody = """
 {"timestamp":"\(timestamp)","type":"turn_context","payload":{"model":"gpt-5.5","effort":"xhigh","collaboration_mode":{"settings":{"reasoning_effort":"xhigh"}}}}
 {"timestamp":"\(timestamp)","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"正在运行的 Codex 任务"}]}}
@@ -2320,13 +2407,6 @@ let rolloutBody = """
 """
 try rolloutBody.write(to: rolloutPath, atomically: true, encoding: .utf8)
 try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: rolloutPath.path)
-_ = try Shell.run("/usr/bin/sqlite3", [
-    stateDatabase,
-    """
-    insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, updated_at, created_at, archived)
-    values('\(sessionID)', '正在运行的 Codex 任务', 185801, 'gpt-5.5', 'xhigh', '\(rolloutPath.path)', \(Int(now.timeIntervalSince1970)), \(Int(now.timeIntervalSince1970) - 2 * 24 * 60 * 60), 0);
-    """
-])
 
 let subagentRolloutPath = sessionDirectory
     .appendingPathComponent("rollout-2026-06-14T02-20-01-\(subagentSessionID).jsonl")
@@ -2334,7 +2414,7 @@ let subagentRolloutBody = """
 {"timestamp":"\(timestamp)","type":"session_meta","payload":{"id":"\(subagentSessionID)","parent_thread_id":"\(sessionID)","source":{"subagent":{"thread_spawn":{"parent_thread_id":"\(sessionID)","depth":1,"agent_nickname":"Test","agent_role":"explorer"}}},"thread_source":"subagent","agent_nickname":"Test","agent_role":"explorer"}}
 {"timestamp":"\(timestamp)","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"子代理任务不应该显示"}]}}
 {"timestamp":"\(timestamp)","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":10000}}}}
-{"timestamp":"\(subagentQuotaTimestamp)","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":0}},"rate_limits":{"limit_id":"codex","primary":{"used_percent":8,"resets_at":1783000600},"secondary":{"used_percent":2,"resets_at":1783400600}}}}
+{"timestamp":"\(subagentQuotaTimestamp)","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":0}},"rate_limits":{"limit_id":"codex","primary":{"used_percent":8,"resets_at":\(subagentPrimaryReset)},"secondary":{"used_percent":2,"resets_at":\(subagentSecondaryReset)}}}}
 {"timestamp":"\(timestamp)","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":23456}}}}
 """
 try subagentRolloutBody.write(to: subagentRolloutPath, atomically: true, encoding: .utf8)
@@ -2359,13 +2439,6 @@ let parentOnlyBody = """
 """
 try parentOnlyBody.write(to: parentOnlyRolloutPath, atomically: true, encoding: .utf8)
 try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-600)], ofItemAtPath: parentOnlyRolloutPath.path)
-_ = try Shell.run("/usr/bin/sqlite3", [
-    stateDatabase,
-    """
-    insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, updated_at, created_at, archived)
-    values('\(parentOnlySessionID)', '只有子代理活跃的父任务', 80245, 'gpt-5.5', 'high', '\(parentOnlyRolloutPath.path)', \(Int(now.timeIntervalSince1970) - 600), \(Int(now.timeIntervalSince1970) - 2 * 24 * 60 * 60), 0);
-    """
-])
 
 let parentOnlySubagentPath = sessionDirectory
     .appendingPathComponent("rollout-2026-06-14T02-20-03-\(parentOnlySubagentID).jsonl")
@@ -2376,6 +2449,33 @@ let parentOnlySubagentBody = """
 """
 try parentOnlySubagentBody.write(to: parentOnlySubagentPath, atomically: true, encoding: .utf8)
 try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: parentOnlySubagentPath.path)
+
+let pollutedDeltaParentPath = sessionDirectory
+    .appendingPathComponent("rollout-2026-06-14T02-20-14-\(pollutedDeltaParentSessionID).jsonl")
+let pollutedDeltaParentBody = """
+{"timestamp":"\(timestamp)","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high","collaboration_mode":{"settings":{"reasoning_effort":"high"}}}}
+{"timestamp":"\(timestamp)","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"parent token should not absorb subagent deltas"}]}}
+{"timestamp":"\(timestamp)","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":162000000}}}}
+"""
+try pollutedDeltaParentBody.write(to: pollutedDeltaParentPath, atomically: true, encoding: .utf8)
+try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-600)], ofItemAtPath: pollutedDeltaParentPath.path)
+_ = try Shell.run("/usr/bin/sqlite3", [
+    stateDatabase,
+    """
+    insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, updated_at, archived)
+    values('\(pollutedDeltaParentSessionID)', 'parent token should not absorb subagent deltas', 162000000, 'gpt-5.5', 'high', '\(pollutedDeltaParentPath.path)', \(Int(now.timeIntervalSince1970) - 600), 0);
+    """
+])
+
+let pollutedDeltaSubagentPath = sessionDirectory
+    .appendingPathComponent("rollout-2026-06-14T02-20-15-\(pollutedDeltaSubagentID).jsonl")
+let pollutedDeltaSubagentBody = """
+{"timestamp":"\(timestamp)","type":"session_meta","payload":{"id":"\(pollutedDeltaSubagentID)","parent_thread_id":"\(pollutedDeltaParentSessionID)","source":{"subagent":{"thread_spawn":{"parent_thread_id":"\(pollutedDeltaParentSessionID)","depth":1,"agent_nickname":"Delta","agent_role":"explorer"}}},"thread_source":"subagent","agent_nickname":"Delta","agent_role":"explorer"}}
+{"timestamp":"\(timestamp)","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"subagent token should stay separate from parent delta"}]}}
+{"timestamp":"\(timestamp)","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":23000000}}}}
+"""
+try pollutedDeltaSubagentBody.write(to: pollutedDeltaSubagentPath, atomically: true, encoding: .utf8)
+try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-600)], ofItemAtPath: pollutedDeltaSubagentPath.path)
 
 let staleParentPath = sessionDirectory
     .appendingPathComponent("rollout-2026-06-14T02-20-10-\(staleParentSessionID).jsonl")
@@ -2505,7 +2605,7 @@ let codexQuotaPath = sessionDirectory
     .appendingPathComponent("rollout-2026-06-14T02-20-18-\(codexQuotaSessionID).jsonl")
 let codexQuotaBody = """
 {"timestamp":"\(timestamp)","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Codex 额度恢复时间测试"}]}}
-{"timestamp":"\(timestamp)","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":0}},"rate_limits":{"limit_id":"codex","primary":{"used_percent":33,"resets_at":\(localQuotaPrimaryResetAt)},"secondary":{"used_percent":55,"resets_at":\(localQuotaSecondaryResetAt)}}}}
+{"timestamp":"\(timestamp)","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":0}},"rate_limits":{"limit_id":"codex","primary":{"used_percent":33,"resets_at":\(codexPrimaryReset)},"secondary":{"used_percent":55,"resets_at":\(codexSecondaryReset)}}}}
 """
 try codexQuotaBody.write(to: codexQuotaPath, atomically: true, encoding: .utf8)
 try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: codexQuotaPath.path)
@@ -2521,7 +2621,7 @@ let sparkQuotaPath = sessionDirectory
     .appendingPathComponent("rollout-2026-06-14T02-20-17-\(sparkQuotaSessionID).jsonl")
 let sparkQuotaBody = """
 {"timestamp":"\(timestamp)","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Spark 额度测试"}]}}
-{"timestamp":"\(timestamp)","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":0}},"rate_limits":{"limit_id":"gpt-5.3-codex-spark","primary":{"used_percent":40,"resets_at":\(localQuotaPrimaryResetAt)},"secondary":{"used_percent":"10","resets_at":\(localQuotaSecondaryResetAt)}}}}
+{"timestamp":"\(timestamp)","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":0}},"rate_limits":{"limit_id":"codex_bengalfox","limit_name":"GPT-5.3-Codex-Spark","primary":{"used_percent":40,"resets_at":\(codexPrimaryReset)},"secondary":{"used_percent":"10","resets_at":\(codexSecondaryReset)}}}}
 """
 try sparkQuotaBody.write(to: sparkQuotaPath, atomically: true, encoding: .utf8)
 try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: sparkQuotaPath.path)
@@ -2544,9 +2644,20 @@ _ = try Shell.run("/usr/bin/sqlite3", [
     stateDatabase,
     """
     insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, updated_at, archived)
-    values('\(archivedUsageSessionID)', 'Archived usage should be excluded', 999999, 'gpt-5.5', 'high', '\(archivedUsagePath.path)', \(Int(now.timeIntervalSince1970)), 1);
+    values('\(archivedUsageSessionID)', 'Archived usage should be included', 999999, 'gpt-5.5', 'high', '\(archivedUsagePath.path)', \(Int(now.timeIntervalSince1970)), 1);
     """
 ])
+
+let archivedOnlySessionDirectory = tempRoot
+    .appendingPathComponent("archived_sessions/2026/06/14", isDirectory: true)
+try FileManager.default.createDirectory(at: archivedOnlySessionDirectory, withIntermediateDirectories: true)
+let archivedOnlyUsagePath = archivedOnlySessionDirectory
+    .appendingPathComponent("rollout-2026-06-14T02-20-20-\(archivedOnlyUsageSessionID).jsonl")
+let archivedOnlyUsageBody = """
+{"timestamp":"\(timestamp)","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":888888}}}}
+"""
+try archivedOnlyUsageBody.write(to: archivedOnlyUsagePath, atomically: true, encoding: .utf8)
+try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: archivedOnlyUsagePath.path)
 
 let deltaDirectory = tempRoot.appendingPathComponent("context-guard", isDirectory: true)
 try FileManager.default.createDirectory(at: deltaDirectory, withIntermediateDirectories: true)
@@ -2558,8 +2669,7 @@ let staleCurrentMs = observedNowMs - Int64(2 * 60 * 60 * 1_000)
 let staleBaselineMs = observedNowMs - Int64(3 * 60 * 60 * 1_000)
 let staleDeltaSessionID = "019e073a-c032-74e2-966e-b85ede0c9cd8"
 let missingBaselineDeltaSessionID = "019e073a-c032-74e2-966e-b85ede0c9cd9"
-let todayStartMs = Int64((Calendar.current.startOfDay(for: now).timeIntervalSince1970 * 1_000).rounded())
-let todayBaselineMs = todayStartMs - 60_000
+let todayCreatedDeltaSessionID = "019e073a-c032-74e2-966e-b85ede0c9cda"
 _ = try Shell.run("/usr/bin/sqlite3", [
     deltaDatabase,
     """
@@ -2580,18 +2690,20 @@ _ = try Shell.run("/usr/bin/sqlite3", [
       on token_snapshot_history(thread_id, observed_at_ms desc);
     insert into token_snapshots(thread_id, tokens_used, updated_at_ms, observed_at_ms)
     values
-      ('\(sessionID)', 185801, \(observedNowMs), \(observedNowMs)),
-      ('\(parentOnlySessionID)', 80245, \(observedNowMs), \(observedNowMs)),
+      ('\(sessionID)', 102345, \(observedNowMs), \(observedNowMs)),
+      ('\(parentOnlySessionID)', 34567, \(observedNowMs), \(observedNowMs)),
+      ('\(pollutedDeltaParentSessionID)', 185000000, \(observedNowMs), \(observedNowMs)),
       ('\(staleDeltaSessionID)', 10000, \(staleCurrentMs), \(staleCurrentMs)),
       ('\(missingBaselineDeltaSessionID)', 500, \(observedNowMs), \(observedNowMs));
     insert into token_snapshot_history(thread_id, tokens_used, updated_at_ms, observed_at_ms)
     values
-      ('\(sessionID)', 180000, \(oneHourBaselineMs), \(oneHourBaselineMs)),
-      ('\(sessionID)', 150000, \(twentyFourHourBaselineMs), \(twentyFourHourBaselineMs)),
-      ('\(sessionID)', 150000, \(todayBaselineMs), \(todayBaselineMs)),
-      ('\(parentOnlySessionID)', 80000, \(oneHourBaselineMs), \(oneHourBaselineMs)),
-      ('\(parentOnlySessionID)', 60000, \(twentyFourHourBaselineMs), \(twentyFourHourBaselineMs)),
-      ('\(parentOnlySessionID)', 60000, \(todayBaselineMs), \(todayBaselineMs)),
+      ('\(sessionID)', 100000, \(oneHourBaselineMs), \(oneHourBaselineMs)),
+      ('\(sessionID)', 90000, \(twentyFourHourBaselineMs), \(twentyFourHourBaselineMs)),
+      ('\(parentOnlySessionID)', 34000, \(oneHourBaselineMs), \(oneHourBaselineMs)),
+      ('\(parentOnlySessionID)', 14000, \(twentyFourHourBaselineMs), \(twentyFourHourBaselineMs)),
+      ('\(pollutedDeltaParentSessionID)', 162000000, \(oneHourBaselineMs), \(oneHourBaselineMs)),
+      ('\(pollutedDeltaParentSessionID)', 162000000, \(twentyFourHourBaselineMs), \(twentyFourHourBaselineMs)),
+      ('\(pollutedDeltaParentSessionID)', 185000000, \(observedNowMs - 60 * 1000), \(observedNowMs - 60 * 1000)),
       ('\(staleDeltaSessionID)', 1000, \(staleBaselineMs), \(staleBaselineMs));
     """
 ])
@@ -2600,13 +2712,8 @@ _ = try Shell.run("/usr/bin/sqlite3", [
     """
     insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, updated_at, archived)
     values('\(missingBaselineDeltaSessionID)', 'Today baseline missing', 500, 'gpt-5.5', 'high', '', \(Int(now.timeIntervalSince1970)), 0);
-    """
-])
-_ = try Shell.run("/usr/bin/sqlite3", [
-    stateDatabase,
-    """
-    insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, updated_at, created_at, archived)
-    values('\(todayNewSessionID)', 'Today new thread without baseline', 700, 'gpt-5.5', 'high', '', \(Int(now.timeIntervalSince1970)), \(Int(now.timeIntervalSince1970)), 0);
+    insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, created_at, updated_at, archived)
+    values('\(todayCreatedDeltaSessionID)', 'Today created baseline missing', 600, 'gpt-5.5', 'high', '', \(Int(now.timeIntervalSince1970)), \(Int(now.timeIntervalSince1970)), 0);
     """
 ])
 
@@ -2619,19 +2726,288 @@ let localSnapshot = localStore.loadSnapshot(
     now: now
 )
 runner.check(localSnapshot.isRunning, "recent session rollout should mark local Codex as running")
-runner.check(localSnapshot.usage1h == 6046, "aggregate 1 hour usage should sum current parent thread deltas")
-runner.check(localSnapshot.usageToday == 56746, "aggregate Today usage should sum current parent natural-day deltas")
+runner.check(localSnapshot.usage1h == 2912, "aggregate 1 hour usage should sum parent-only recent delta snapshots")
 runner.check(localSnapshot.tasks.first?.delta1hTokens != localSnapshot.usage1h, "aggregate 1 hour usage should not reuse the first visible task delta")
-runner.check(localSnapshot.tasks.first { $0.id == sessionID }?.todayTokens == 35801, "session Today usage should use the natural-day baseline")
-runner.check(localSnapshot.tasks.first { $0.id == parentOnlySessionID }?.todayTokens == 20245, "parent-only session Today usage should use the natural-day baseline")
-runner.check(localSnapshot.tasks.first { $0.id == todayNewSessionID }?.todayTokens == 700, "today-created sessions without a baseline should count from zero")
-runner.check(localSnapshot.tasks.first { $0.id == missingBaselineDeltaSessionID }?.todayTokens == nil, "missing natural-day baseline should hide old session Today usage")
+runner.check(localSnapshot.tasks.first { $0.id == sessionID }?.todayTokens == 12345, "session Today usage should use the parent-only 24 hour delta baseline")
+runner.check(localSnapshot.tasks.first { $0.id == parentOnlySessionID }?.todayTokens == 20567, "parent-only session Today usage should use the parent-only 24 hour delta baseline")
+runner.check(localSnapshot.tasks.first { $0.id == todayCreatedDeltaSessionID }?.todayTokens == 600, "today-created session without baseline should count from zero for Today usage")
+runner.check(localSnapshot.tasks.first { $0.id == missingBaselineDeltaSessionID }?.todayTokens == nil, "missing natural-day baseline without created_at should hide session Today usage")
+let pollutedDeltaTask = runner.require(
+    localSnapshot.tasks.first { $0.id == pollutedDeltaParentSessionID },
+    "polluted delta parent task should be visible"
+)
+runner.check(pollutedDeltaTask.tokenCount == 162000000, "parent task total should stay parent-only even when a subagent has tokens")
+runner.check(pollutedDeltaTask.delta1hTokens == 0, "parent 1 hour delta should not include subagent token totals")
+runner.check(pollutedDeltaTask.todayTokens == 0, "parent Today delta should not include subagent token totals")
+runner.check(pollutedDeltaTask.todaySharePercent == 0, "zero Today delta should not clamp to a false 100 percent share")
 runner.check(localSnapshot.primaryPercent == 67, "local JSONL Codex quota should expose main 5h quota")
 runner.check(localSnapshot.secondaryPercent == 45, "local JSONL Codex quota should expose main 7d quota")
-runner.check(localSnapshot.primaryResetsAt == localQuotaPrimaryResetAt, "local JSONL Codex quota should expose primary reset time")
-runner.check(localSnapshot.secondaryResetsAt == localQuotaSecondaryResetAt, "local JSONL Codex quota should expose secondary reset time")
+runner.check(localSnapshot.primaryResetsAt == codexPrimaryReset, "local JSONL Codex quota should expose primary reset time")
+runner.check(localSnapshot.secondaryResetsAt == codexSecondaryReset, "local JSONL Codex quota should expose secondary reset time")
 runner.check(localSnapshot.primaryPercent != 92, "subagent Codex quota should not override the main 5h quota")
 runner.check(localSnapshot.sparkQuotaWindows.map(\.remainingPercent) == [60, 90], "local JSONL Spark quota windows should decode")
+let localSnapshotJSON = try JSONSerialization.jsonObject(
+    with: SnapshotOutputFormatter.jsonData(for: localSnapshot)
+) as? [String: Any]
+let localSnapshotSparkWindows = localSnapshotJSON?["spark_quota_windows"] as? [[String: Any]]
+let localSnapshotCumulative = localSnapshotJSON?["cumulative_usage"] as? [String: Any]
+let localSnapshotRecent = localSnapshotJSON?["recent_usage"] as? [String: Any]
+runner.check(localSnapshotJSON?["primary_percent"] as? Int == 67, "compact JSON should expose main Codex 5h quota")
+runner.check(localSnapshotJSON?["secondary_percent"] as? Int == 45, "compact JSON should expose main Codex 7d quota")
+runner.check(localSnapshotSparkWindows?.compactMap { $0["remaining_percent"] as? Int } == [60, 90], "compact JSON should keep Spark quota separate")
+let staleSparkNow = Date(timeIntervalSince1970: 1_790_000_000)
+let staleSparkRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("CodexNotchStaleSpark-\(UUID().uuidString)")
+try FileManager.default.createDirectory(at: staleSparkRoot, withIntermediateDirectories: true)
+defer {
+    try? FileManager.default.removeItem(at: staleSparkRoot)
+}
+let staleSparkStateDatabase = staleSparkRoot.appendingPathComponent("state_5.sqlite").path
+let staleSparkLogsDatabase = staleSparkRoot.appendingPathComponent("logs_2.sqlite").path
+_ = try Shell.run("/usr/bin/sqlite3", [
+    staleSparkStateDatabase,
+    """
+    create table threads(
+      id text,
+      title text,
+      tokens_used integer,
+      model text,
+      reasoning_effort text,
+      rollout_path text,
+      created_at integer,
+      updated_at integer,
+      archived integer default 0
+    );
+    """
+])
+_ = try Shell.run("/usr/bin/sqlite3", [
+    staleSparkLogsDatabase,
+    """
+    create table logs(
+      thread_id text,
+      ts integer,
+      target text,
+      feedback_log_body text
+    );
+    """
+])
+let staleSparkSessionDirectory = staleSparkRoot.appendingPathComponent("sessions/2026/06/14", isDirectory: true)
+try FileManager.default.createDirectory(at: staleSparkSessionDirectory, withIntermediateDirectories: true)
+let staleSparkSessionID = "019e073a-c032-74e2-966e-b85ede0c9cae"
+let staleSparkPath = staleSparkSessionDirectory
+    .appendingPathComponent("rollout-2026-06-14T02-20-17-\(staleSparkSessionID).jsonl")
+let staleSparkTimestamp = ISO8601DateFormatter().string(from: staleSparkNow)
+let staleSparkBody = """
+{"timestamp":"\(staleSparkTimestamp)","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":0}},"rate_limits":{"limit_id":"codex_bengalfox","limit_name":"GPT-5.3-Codex-Spark","primary":{"resets_at":\(Int(staleSparkNow.timeIntervalSince1970) - 300)},"secondary":{"resets_at":\(Int(staleSparkNow.timeIntervalSince1970) - 300)}}}}
+"""
+try staleSparkBody.write(to: staleSparkPath, atomically: true, encoding: .utf8)
+_ = try Shell.run("/usr/bin/sqlite3", [
+    staleSparkStateDatabase,
+    """
+    insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, updated_at, archived)
+    values('\(staleSparkSessionID)', '过期 Spark 额度', 0, 'gpt-5.5', 'high', '\(staleSparkPath.path)', \(Int(staleSparkNow.timeIntervalSince1970)), 0);
+    """
+])
+let staleSparkStore = CodexUsageStore(codexDirectory: staleSparkRoot)
+let staleSparkSnapshot = staleSparkStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: staleSparkNow
+)
+runner.check(
+    staleSparkSnapshot.sparkQuotaWindows.isEmpty,
+    "expired Spark windows should not display fake 100%"
+)
+let expectedActiveCumulativeTokens = try Shell.sqliteJSON(
+    database: stateDatabase,
+    query: "select coalesce(sum(tokens_used), 0) as count from threads where archived = 0;",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? 0
+let expectedArchivedCumulativeTokens = try Shell.sqliteJSON(
+    database: stateDatabase,
+    query: "select coalesce(sum(tokens_used), 0) as count from threads where archived = 1;",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? 0
+let recentWindowStart = Int(now.timeIntervalSince1970) - (20 * 24 * 60 * 60)
+let expectedRecentActiveTokens = try Shell.sqliteJSON(
+    database: stateDatabase,
+    query: "select coalesce(sum(tokens_used), 0) as count from threads where archived = 0 and updated_at >= \(recentWindowStart);",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? 0
+let expectedRecentArchivedTokens = try Shell.sqliteJSON(
+    database: stateDatabase,
+    query: "select coalesce(sum(tokens_used), 0) as count from threads where archived = 1 and updated_at >= \(recentWindowStart);",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? 0
+let expectedPeriodUsage24h = 12_945
+let expectedPeriodUsage7d = 102_945
+let expectedPeriodUsage30d = 102_945
+runner.check(localSnapshot.cumulativeUsage.activeTokens == expectedActiveCumulativeTokens, "snapshot cumulative active tokens should match readonly state DB")
+runner.check(localSnapshot.cumulativeUsage.archivedTokens == expectedArchivedCumulativeTokens, "snapshot cumulative archived tokens should match readonly state DB")
+runner.check(localSnapshot.cumulativeUsage.allTokens == expectedActiveCumulativeTokens + expectedArchivedCumulativeTokens, "snapshot cumulative all tokens should equal active plus archived")
+runner.check(localSnapshot.recentUsage.usage20dActiveTokens == expectedRecentActiveTokens, "snapshot recent 20d active tokens should match readonly state DB")
+runner.check(localSnapshot.recentUsage.usage20dArchivedTokens == expectedRecentArchivedTokens, "snapshot recent 20d archived tokens should include archived sessions")
+runner.check(localSnapshot.recentUsage.usage20dAllTokens == expectedRecentActiveTokens + expectedRecentArchivedTokens, "snapshot recent 20d all tokens should equal active plus archived")
+runner.check(localSnapshot.recentUsage.usage20dAllTokens != localSnapshot.usage30d, "recent 20d all tokens should not reuse period usage30d")
+runner.check(localSnapshotCumulative?["active_tokens"] as? Int == expectedActiveCumulativeTokens, "compact JSON should expose active cumulative tokens from state DB")
+runner.check(localSnapshotCumulative?["archived_tokens"] as? Int == expectedArchivedCumulativeTokens, "compact JSON should expose archived cumulative tokens from state DB")
+runner.check(localSnapshotRecent?["usage_20d_active_tokens"] as? Int == expectedRecentActiveTokens, "compact JSON should expose recent 20d active tokens")
+runner.check(localSnapshotRecent?["usage_20d_archived_tokens"] as? Int == expectedRecentArchivedTokens, "compact JSON should expose recent 20d archived tokens")
+runner.check(localSnapshotRecent?["usage_20d_all_tokens"] as? Int == expectedRecentActiveTokens + expectedRecentArchivedTokens, "compact JSON should expose recent 20d all tokens")
+
+let periodArchivedRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("CodexNotchPeriodArchived-\(UUID().uuidString)")
+try FileManager.default.createDirectory(at: periodArchivedRoot, withIntermediateDirectories: true)
+defer {
+    try? FileManager.default.removeItem(at: periodArchivedRoot)
+}
+
+let periodArchivedStateDatabase = periodArchivedRoot.appendingPathComponent("state_5.sqlite").path
+let periodArchivedLogsDatabase = periodArchivedRoot.appendingPathComponent("logs_2.sqlite").path
+let periodArchivedSessionsRoot = periodArchivedRoot.appendingPathComponent("sessions/2026/06/14", isDirectory: true)
+try FileManager.default.createDirectory(at: periodArchivedSessionsRoot, withIntermediateDirectories: true)
+_ = try Shell.run("/usr/bin/sqlite3", [
+    periodArchivedStateDatabase,
+    """
+    create table threads(
+      id text,
+      title text,
+      tokens_used integer,
+      model text,
+      reasoning_effort text,
+      rollout_path text,
+      created_at integer,
+      updated_at integer,
+      archived integer default 0
+    );
+    """
+])
+_ = try Shell.run("/usr/bin/sqlite3", [
+    periodArchivedLogsDatabase,
+    """
+    create table logs(
+      thread_id text,
+      ts integer,
+      target text,
+      feedback_log_body text
+    );
+    """
+])
+
+let periodActiveSessionID = "019e073a-c032-74e2-966e-b85ede0c9ca1"
+let periodArchivedSessionID = "019e073a-c032-74e2-966e-b85ede0c9ca2"
+let periodWindowNow = now.timeIntervalSince1970
+let periodActiveRollout = periodArchivedSessionsRoot
+    .appendingPathComponent("rollout-2026-06-14T20-00-00-\(periodActiveSessionID).jsonl")
+let periodArchivedRollout = periodArchivedSessionsRoot
+    .appendingPathComponent("rollout-2026-06-14T20-00-01-\(periodArchivedSessionID).jsonl")
+let periodActiveRolloutBody = """
+{\"timestamp\":\"\(ISO8601DateFormatter().string(from: now))\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"total_tokens\":111}}}}
+"""
+let periodArchivedRolloutBody = """
+{\"timestamp\":\"\(ISO8601DateFormatter().string(from: now))\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"total_tokens\":222}}}}
+"""
+try periodActiveRolloutBody.write(to: periodActiveRollout, atomically: true, encoding: .utf8)
+try periodArchivedRolloutBody.write(to: periodArchivedRollout, atomically: true, encoding: .utf8)
+try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: periodActiveRollout.path)
+try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: periodArchivedRollout.path)
+
+_ = try Shell.run("/usr/bin/sqlite3", [
+    periodArchivedStateDatabase,
+    """
+    insert into threads(
+      id, title, tokens_used, model, reasoning_effort, rollout_path, created_at, updated_at, archived
+    )
+    values
+      ('\(periodActiveSessionID)', 'active session', 111, 'gpt-5.5', 'high', '\(periodActiveRollout.path)', 0, \(Int(periodWindowNow)), 0),
+      ('\(periodArchivedSessionID)', 'archived session', 222, 'gpt-5.5', 'high', '\(periodArchivedRollout.path)', 0, \(Int(periodWindowNow)), 1);
+    """
+])
+let periodArchivedDeltaDirectory = periodArchivedRoot.appendingPathComponent("context-guard", isDirectory: true)
+try FileManager.default.createDirectory(at: periodArchivedDeltaDirectory, withIntermediateDirectories: true)
+let periodArchivedDeltaDatabase = periodArchivedDeltaDirectory.appendingPathComponent("usage-deltas.sqlite").path
+let periodObservedAtMs = Int64((now.timeIntervalSince1970 * 1_000).rounded())
+let period25hBaselineMs = periodObservedAtMs - Int64(25 * 60 * 60 * 1_000)
+let period8dBaselineMs = periodObservedAtMs - Int64(8 * 24 * 60 * 60 * 1_000)
+let period31dBaselineMs = periodObservedAtMs - Int64(31 * 24 * 60 * 60 * 1_000)
+_ = try Shell.run("/usr/bin/sqlite3", [
+    periodArchivedDeltaDatabase,
+    """
+    create table token_snapshots (
+      thread_id text primary key,
+      tokens_used integer not null,
+      updated_at_ms integer not null,
+      observed_at_ms integer not null
+    );
+    create table token_snapshot_history (
+      thread_id text not null,
+      tokens_used integer not null,
+      updated_at_ms integer not null,
+      observed_at_ms integer not null,
+      primary key(thread_id, observed_at_ms)
+    );
+    create index idx_token_snapshot_history_lookup
+      on token_snapshot_history(thread_id, observed_at_ms desc);
+    insert into token_snapshot_history(thread_id, tokens_used, updated_at_ms, observed_at_ms)
+    values
+      ('\(periodActiveSessionID)', 10, \(period25hBaselineMs), \(period25hBaselineMs)),
+      ('\(periodArchivedSessionID)', 20, \(period25hBaselineMs), \(period25hBaselineMs)),
+      ('\(periodActiveSessionID)', 5, \(period8dBaselineMs), \(period8dBaselineMs)),
+      ('\(periodArchivedSessionID)', 15, \(period8dBaselineMs), \(period8dBaselineMs)),
+      ('\(periodActiveSessionID)', 1, \(period31dBaselineMs), \(period31dBaselineMs)),
+      ('\(periodArchivedSessionID)', 2, \(period31dBaselineMs), \(period31dBaselineMs));
+    """
+])
+
+let periodArchivedStore = CodexUsageStore(codexDirectory: periodArchivedRoot)
+let periodUsage = periodArchivedStore.loadUsageTotals(now: now)
+let periodSnapshot = periodArchivedStore.loadSnapshot(
+    includePeriodUsage: true,
+    bypassFastCache: true,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now
+)
+
+let periodExpectedDay = (111 - 10) + (222 - 20)
+let periodExpectedWeek = (111 - 5) + (222 - 15)
+let periodExpectedMonth = (111 - 1) + (222 - 2)
+
+let periodExpectedDayWithoutArchived = try Shell.sqliteJSON(
+    database: periodArchivedStateDatabase,
+    query: "select coalesce(sum(tokens_used), 0) as count from threads where archived = 0 and updated_at >= \(Int(periodWindowNow) - 24 * 60 * 60);",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? 0
+
+runner.check(periodUsage?.day == periodExpectedDay, "period usage should include archived sessions in 24h rolling deltas")
+runner.check(periodUsage?.week == periodExpectedWeek, "period usage should include archived sessions in 7d rolling deltas")
+runner.check(periodUsage?.month == periodExpectedMonth, "period usage should include archived sessions in 30d rolling deltas")
+runner.check(periodSnapshot.usage24h == periodExpectedDay, "snapshot period 24h usage should include archived rolling deltas")
+runner.check(periodSnapshot.usage7d == periodExpectedWeek, "snapshot period 7d usage should include archived rolling deltas")
+runner.check(periodSnapshot.usage30d == periodExpectedMonth, "snapshot period 30d usage should include archived rolling deltas")
+runner.check(periodUsage?.day != periodExpectedDayWithoutArchived, "period usage 24h should not use active sessions only")
+
+let appServerFirstStore = CodexUsageStore(
+    codexDirectory: tempRoot,
+    initialAppServerRateLimits: appServerSnapshot
+)
+let appServerFirstSnapshot = appServerFirstStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .appServerFirst,
+    taskHistoryRange: .day,
+    now: now
+)
+runner.check(appServerFirstSnapshot.primaryPercent == 83, "app-server-first should use the main Codex 5h quota over local quota noise")
+runner.check(appServerFirstSnapshot.secondaryPercent == 78, "app-server-first should use the main Codex 7d quota over local quota noise")
+runner.check(appServerFirstSnapshot.sparkQuotaWindows.map(\.remainingPercent) == [22, 58], "app-server-first should keep Spark quota in Spark windows")
 runner.check(localSnapshot.tasks.contains { $0.id == sessionID && $0.status == .running }, "recent session rollout should appear in running task list")
 runner.check(localSnapshot.tasks.first { $0.id == sessionID }?.title == "正在运行的 Codex 任务", "session rollout should use the user message as task title")
 runner.check(localSnapshot.tasks.first { $0.id == sessionID }?.detail.contains("gpt-5.5 · 超高推理") == true, "session rollout should use turn context model and effort")
@@ -2645,8 +3021,8 @@ runner.check(localSnapshot.tasks.first { $0.id == sessionID }?.activeSubagentCou
 runner.check(localSnapshot.tasks.first { $0.id == parentOnlySessionID }?.activeSubagentCount == 1, "parent running through subagent activity should show one subagent")
 runner.check(localSnapshot.tasks.first { $0.id == longMetaParentSessionID }?.activeSubagentCount == 1, "parent running through long metadata subagent activity should show one subagent")
 runner.check(localSnapshot.tasks.contains { $0.id == staleParentSessionID && $0.status == .running }, "active subagent should synthesize a running parent task even when the parent is outside the task range")
-runner.check(localSnapshot.tasks.first { $0.id == sessionID }?.tokenCount == 185801, "parent task token count should include parent and all subagent session totals")
-runner.check(localSnapshot.tasks.first { $0.id == parentOnlySessionID }?.tokenCount == 80245, "parent running through subagent activity should include subagent token usage")
+runner.check(localSnapshot.tasks.first { $0.id == sessionID }?.tokenCount == 102345, "parent task token count should stay parent-only")
+runner.check(localSnapshot.tasks.first { $0.id == parentOnlySessionID }?.tokenCount == 34567, "parent running through subagent activity should keep parent-only token usage")
 runner.check(localSnapshot.tasks.first { $0.id == longMetaParentSessionID }?.tokenCount == 22222, "parent running through long metadata subagent activity should keep parent-only token usage")
 runner.check(localSnapshot.tasks.first { $0.id == staleDBTokenSessionID }?.tokenCount == 120000000, "recent task token count should prefer fresher rollout totals over stale database tokens")
 runner.check(localSnapshot.tasks.contains { $0.id == activeToolCallSessionID && $0.status == .running }, "quiet tool calls should keep the running indicator on until a task-level completion event arrives")
@@ -2677,6 +3053,7 @@ _ = try Shell.run("/usr/bin/sqlite3", [
       model text,
       reasoning_effort text,
       rollout_path text,
+      created_at integer,
       updated_at integer,
       archived integer default 0
     );
@@ -2703,8 +3080,8 @@ try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: mi
 _ = try Shell.run("/usr/bin/sqlite3", [
     mixedUsageStateDatabase,
     """
-    insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, updated_at, archived)
-    values('\(mixedUsageSessionID)', '日志更完整的任务', 0, 'gpt-5.5', 'high', '\(mixedUsagePath.path)', \(Int(now.timeIntervalSince1970)), 0);
+    insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, created_at, updated_at, archived)
+    values('\(mixedUsageSessionID)', '状态数据库仅记录', 999, 'gpt-5.5', 'high', '\(mixedUsagePath.path)', \(Int(now.timeIntervalSince1970)), \(Int(now.timeIntervalSince1970)), 0);
     """
 ])
 _ = try Shell.run("/usr/bin/sqlite3", [
@@ -2715,7 +3092,7 @@ _ = try Shell.run("/usr/bin/sqlite3", [
     """
 ])
 let mixedUsageStore = CodexUsageStore(codexDirectory: mixedUsageRoot, ripgrepCandidates: [])
-runner.check(mixedUsageStore.loadUsageTotals(now: now)?.day == 10000, "local usage totals should merge logs when logs have more complete token counts than rollouts")
+runner.check(mixedUsageStore.loadUsageTotals(now: now)?.day == 999, "new-thread period usage should use state current totals even when rollout/log tokens differ")
 
 let logCacheRoot = URL(fileURLWithPath: NSTemporaryDirectory())
     .appendingPathComponent("CodexNotchLogCache-\(UUID().uuidString)")
@@ -2735,6 +3112,7 @@ _ = try Shell.run("/usr/bin/sqlite3", [
       model text,
       reasoning_effort text,
       rollout_path text,
+      created_at integer,
       updated_at integer,
       archived integer default 0
     );
@@ -2761,8 +3139,8 @@ try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: lo
 _ = try Shell.run("/usr/bin/sqlite3", [
     logCacheStateDatabase,
     """
-    insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, updated_at, archived)
-    values('\(logCacheSessionID)', '仅日志统计', 0, 'gpt-5.5', 'high', '\(logCachePath.path)', \(Int(now.timeIntervalSince1970)), 0);
+    insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, created_at, updated_at, archived)
+    values('\(logCacheSessionID)', '日志与 state 对照', 1000, 'gpt-5.5', 'high', '\(logCachePath.path)', \(Int(now.timeIntervalSince1970)), \(Int(now.timeIntervalSince1970)), 0);
     """
 ])
 _ = try Shell.run("/usr/bin/sqlite3", [
@@ -2773,7 +3151,7 @@ _ = try Shell.run("/usr/bin/sqlite3", [
     """
 ])
 let logCacheStore = CodexUsageStore(codexDirectory: logCacheRoot, ripgrepCandidates: [])
-runner.check(logCacheStore.loadUsageTotals(now: now)?.day == 1000, "log fallback usage should be available when rollout usage is empty")
+runner.check(logCacheStore.loadUsageTotals(now: now)?.day == 1000, "new-thread state totals should remain dominant when rollout/log data differs")
 _ = try Shell.run("/usr/bin/sqlite3", [
     logCacheLogsDatabase,
     """
@@ -2781,7 +3159,7 @@ _ = try Shell.run("/usr/bin/sqlite3", [
     values('\(logCacheSessionID)', \(Int(now.timeIntervalSince1970) + 1), 'codex_otel.trace_safe', 'event.kind=response.completed tool_token_count=2000');
     """
 ])
-runner.check(logCacheStore.loadUsageTotals(now: now.addingTimeInterval(1))?.day == 3000, "log fallback usage cache should refresh when logs database changes")
+runner.check(logCacheStore.loadUsageTotals(now: now.addingTimeInterval(1))?.day == 1000, "new-thread state totals should be stable even when logs database changes")
 
 let cachedLocalSnapshot = localStore.loadSnapshot(
     includePeriodUsage: false,
@@ -2792,8 +3170,10 @@ let cachedLocalSnapshot = localStore.loadSnapshot(
 )
 runner.check(cachedLocalSnapshot.tasks.contains { $0.id == parentOnlySessionID && $0.status == .running }, "fast snapshot cache should preserve active parent task ids")
 runner.check(cachedLocalSnapshot.tasks.first { $0.id == parentOnlySessionID }?.activeSubagentCount == 1, "fast snapshot cache should preserve active subagent counts")
-runner.check(localStore.loadUsageTotals(now: now)?.day == 120743379, "session rollout token counts should contribute to local usage totals")
-runner.check(localStore.loadUsageTotals(now: now.addingTimeInterval(1))?.day == 120743379, "unchanged local usage totals should remain stable across cached refreshes")
+runner.check(localStore.loadUsageTotals(now: now)?.day == expectedPeriodUsage24h, "24h local usage should use parent rolling delta baselines")
+runner.check(localStore.loadUsageTotals(now: now)?.week == expectedPeriodUsage7d, "7d local usage should not inflate missing-baseline threads")
+runner.check(localStore.loadUsageTotals(now: now)?.month == expectedPeriodUsage30d, "30d local usage should not inflate missing-baseline threads")
+runner.check(localStore.loadUsageTotals(now: now.addingTimeInterval(1))?.day == expectedPeriodUsage24h, "unchanged local rolling usage totals should remain stable across refreshes")
 let localExportSnapshot = localStore.loadSnapshot(
     includePeriodUsage: true,
     bypassFastCache: true,
@@ -2801,7 +3181,284 @@ let localExportSnapshot = localStore.loadSnapshot(
     taskHistoryRange: .day,
     now: now
 )
-runner.check(localExportSnapshot.usage24h == 120743379, "export snapshots should include active period usage totals")
+runner.check(localExportSnapshot.usage24h == expectedPeriodUsage24h, "export snapshots should expose 24h rolling delta usage")
+runner.check(localExportSnapshot.usage7d == expectedPeriodUsage7d, "export snapshots should expose 7d rolling delta usage")
+runner.check(localExportSnapshot.usage30d == expectedPeriodUsage30d, "export snapshots should expose 30d rolling delta usage")
+let localExportSnapshotJSON = try JSONSerialization.jsonObject(
+    with: SnapshotOutputFormatter.jsonData(for: localExportSnapshot)
+) as? [String: Any]
+runner.check(localExportSnapshotJSON?["usage_24h"] as? Int == expectedPeriodUsage24h, "compact JSON should expose rolling delta usage_24h")
+runner.check(localExportSnapshotJSON?["usage_7d"] as? Int == expectedPeriodUsage7d, "compact JSON should expose rolling delta usage_7d")
+runner.check(localExportSnapshotJSON?["usage_30d"] as? Int == expectedPeriodUsage30d, "compact JSON should expose rolling delta usage_30d")
+
+let defaultDeltaPath = CodexUsageStore.defaultDeltaDatabasePath(
+    for: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
+)
+runner.check(
+    defaultDeltaPath.contains("Application Support/CodexNotch/usage-deltas.sqlite"),
+    "default user delta cache should live in CodexNotch Application Support"
+)
+
+let stateMtimeBeforeDeltaRecord = try FileManager.default.attributesOfItem(atPath: stateDatabase)[.modificationDate] as? Date
+let logsMtimeBeforeDeltaRecord = try FileManager.default.attributesOfItem(atPath: logsDatabase)[.modificationDate] as? Date
+runner.check(localStore.recordDeltaSnapshot(now: now.addingTimeInterval(2), range: .day), "Swift should record delta snapshots into its own cache")
+let stateMtimeAfterDeltaRecord = try FileManager.default.attributesOfItem(atPath: stateDatabase)[.modificationDate] as? Date
+let logsMtimeAfterDeltaRecord = try FileManager.default.attributesOfItem(atPath: logsDatabase)[.modificationDate] as? Date
+runner.check(stateMtimeBeforeDeltaRecord == stateMtimeAfterDeltaRecord, "recording Swift deltas should not modify the Codex state database")
+runner.check(logsMtimeBeforeDeltaRecord == logsMtimeAfterDeltaRecord, "recording Swift deltas should not modify the Codex logs database")
+
+let localDeltaRows = try Shell.sqliteJSON(
+    database: deltaDatabase,
+    query: "select count(*) as count from token_snapshot_history;",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? 0
+runner.check(localDeltaRows > 0, "Swift delta cache should keep token snapshot history")
+let pollutedDeltaRows = try Shell.sqliteJSON(
+    database: deltaDatabase,
+    query: "select count(*) as count from token_snapshot_history where thread_id = '\(pollutedDeltaParentSessionID)' and tokens_used > 162000000;",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? -1
+runner.check(pollutedDeltaRows == 0, "Swift delta cache should prune parent rows polluted by merged subagent token totals")
+
+let nodeCompatibleData = SnapshotOutputFormatter.nodeCompatibleJSONData(
+    for: localExportSnapshot,
+    options: NodeCompatibleSnapshotOptions(
+        includeArchived: false,
+        taskLimit: 8,
+        tailBytes: 5 * 1024 * 1024,
+        logScanLimit: 200_000,
+        remoteEnabled: false,
+        codexDirectory: tempRoot,
+        stateDatabase: stateDatabase,
+        logsDatabase: logsDatabase,
+        deltaDatabase: deltaDatabase
+    )
+)
+let nodeCompatibleObject = try JSONSerialization.jsonObject(with: nodeCompatibleData) as? [String: Any]
+let nodeCompatibleCumulative = nodeCompatibleObject?["cumulativeUsage"] as? [String: Any]
+let nodeCompatibleRecent = nodeCompatibleObject?["recentUsage"] as? [String: Any]
+let nodeCompatibleDaily = nodeCompatibleObject?["dailyUsage"] as? [String: Any]
+let nodeCompatiblePeriod = nodeCompatibleObject?["periodUsage"] as? [String: Any]
+let nodeCompatibleRateLimits = nodeCompatibleObject?["rateLimits"] as? [String: Any]
+let nodeCompatibleSparkWindows = nodeCompatibleObject?["sparkQuotaWindows"] as? [[String: Any]]
+let nodeCompatiblePrimary = nodeCompatibleRateLimits?["primary"] as? [String: Any]
+let nodeCompatibleSecondary = nodeCompatibleRateLimits?["secondary"] as? [String: Any]
+let nodeCompatibleActive = nodeCompatibleObject?["active"] as? [String: Any]
+let nodeCompatibleTasks = nodeCompatibleObject?["tasks"] as? [[String: Any]]
+runner.check(nodeCompatibleObject?["generatedAt"] as? String != nil, "node-compatible JSON should include generatedAt")
+runner.check(nodeCompatibleCumulative?["activeTokens"] as? Int == expectedActiveCumulativeTokens, "node-compatible JSON should expose active cumulative tokens")
+runner.check(nodeCompatibleCumulative?["metricId"] as? String == "cumulative.active_tokens", "node-compatible JSON should identify the default cumulative metric")
+runner.check(nodeCompatibleRecent?["usage20dActiveTokens"] as? Int == expectedRecentActiveTokens, "node-compatible JSON should expose recent 20d active tokens")
+runner.check(nodeCompatibleRecent?["usage20dArchivedTokens"] as? Int == expectedRecentArchivedTokens, "node-compatible JSON should expose recent 20d archived tokens")
+runner.check(nodeCompatibleRecent?["usage20dAllTokens"] as? Int == expectedRecentActiveTokens + expectedRecentArchivedTokens, "node-compatible JSON should expose recent 20d all tokens")
+runner.check(nodeCompatibleRecent?["metricId"] as? String == "recent.usage_20d_all_tokens", "node-compatible JSON should identify recent 20d all metric")
+runner.check(nodeCompatibleDaily?["usageTodayTokens"] as? Int == localExportSnapshot.dailyUsage.usageTodayTokens, "node-compatible JSON should expose natural-day usage")
+runner.check(nodeCompatibleDaily?["metricId"] as? String == "daily.usage_today_tokens", "node-compatible JSON should identify natural-day usage metric")
+runner.check((nodeCompatiblePeriod?["usage24h"] as? Int) == expectedPeriodUsage24h, "node-compatible JSON should expose rolling delta periodUsage usage24h")
+runner.check((nodeCompatiblePeriod?["usage7d"] as? Int) == expectedPeriodUsage7d, "node-compatible JSON should expose rolling delta periodUsage usage7d")
+runner.check((nodeCompatiblePeriod?["usage30d"] as? Int) == expectedPeriodUsage30d, "node-compatible JSON should expose rolling delta periodUsage usage30d")
+runner.check(nodeCompatiblePeriod?["usage30d"] as? Int != nil && nodeCompatibleRecent?["usage20dAllTokens"] as? Int != nil, "periodUsage should remain available alongside recent 20d usage")
+runner.check(nodeCompatibleRateLimits?["limitId"] as? String == "codex", "node-compatible JSON should identify the main quota as codex")
+runner.check(nodeCompatibleRateLimits?["ok"] as? Bool == true, "node-compatible JSON should mark main quota as available")
+runner.check(nodeCompatibleSparkWindows?.compactMap { $0["label"] as? String } == ["5h", "7d"], "node-compatible JSON should expose Spark labels")
+runner.check(nodeCompatibleSparkWindows?.compactMap { $0["remaining_percent"] as? Int } == [60, 90], "node-compatible JSON should expose Spark remaining percent values")
+runner.check(nodeCompatiblePrimary?["remainingPercent"] as? Int == 67, "node-compatible JSON should expose main Codex 5h quota")
+runner.check(nodeCompatiblePrimary?["usedPercent"] as? Int == 33, "node-compatible JSON should not expose Spark 5h as primary")
+runner.check(nodeCompatiblePrimary?["resetsAt"] as? Int == codexPrimaryReset, "node-compatible JSON should expose main Codex 5h reset")
+runner.check(nodeCompatibleSecondary?["remainingPercent"] as? Int == 45, "node-compatible JSON should expose main Codex 7d quota")
+runner.check(nodeCompatibleSecondary?["usedPercent"] as? Int == 55, "node-compatible JSON should not expose Spark 7d as secondary")
+runner.check(nodeCompatibleSecondary?["resetsAt"] as? Int == codexSecondaryReset, "node-compatible JSON should expose main Codex 7d reset")
+runner.check(nodeCompatibleActive?["runningTasks"] as? Int != nil, "node-compatible JSON should expose active runningTasks")
+runner.check(nodeCompatibleTasks?.first?["tokensUsed"] as? Int != nil, "node-compatible JSON tasks should expose tokensUsed")
+
+let recentPriorityRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("CodexNotchRecentPriority-\(UUID().uuidString)")
+try FileManager.default.createDirectory(at: recentPriorityRoot, withIntermediateDirectories: true)
+defer {
+    try? FileManager.default.removeItem(at: recentPriorityRoot)
+}
+let recentPriorityStateDatabase = recentPriorityRoot.appendingPathComponent("state_5.sqlite").path
+let recentPriorityLogsDatabase = recentPriorityRoot.appendingPathComponent("logs_2.sqlite").path
+let recentStart = Int(now.timeIntervalSince1970) - (20 * 24 * 60 * 60)
+let oldTimestamp = recentStart - 10
+let nowTimestamp = Int(now.timeIntervalSince1970)
+_ = try Shell.run("/usr/bin/sqlite3", [
+    recentPriorityStateDatabase,
+    """
+    create table threads(
+      id text,
+      title text,
+      tokens_used integer,
+      model text,
+      reasoning_effort text,
+      rollout_path text,
+      created_at integer,
+      updated_at integer,
+      recency_at integer,
+      archived integer default 0
+    );
+    insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, created_at, updated_at, recency_at, archived)
+    values
+      ('recent-active-recency', 'Recent active by recency', 100, 'gpt-5.5', 'high', '', \(oldTimestamp), \(oldTimestamp), \(nowTimestamp), 0),
+      ('recent-archived-recency', 'Recent archived by recency', 200, 'gpt-5.5', 'high', '', \(oldTimestamp), \(oldTimestamp), \(nowTimestamp), 1),
+      ('recent-created-fallback', 'Recent created fallback', 400, 'gpt-5.5', 'high', '', \(nowTimestamp), 0, 0, 0),
+      ('old-recency-wins', 'Old recency wins over updated', 800, 'gpt-5.5', 'high', '', \(nowTimestamp), \(nowTimestamp), \(oldTimestamp), 0);
+    """
+])
+_ = try Shell.run("/usr/bin/sqlite3", [
+    recentPriorityLogsDatabase,
+    """
+    create table logs(
+      thread_id text,
+      ts integer,
+      target text,
+      feedback_log_body text
+    );
+    """
+])
+let recentPriorityStore = CodexUsageStore(codexDirectory: recentPriorityRoot)
+let recentPrioritySnapshot = recentPriorityStore.loadSnapshot(
+    includePeriodUsage: true,
+    bypassFastCache: true,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now
+)
+runner.check(recentPrioritySnapshot.recentUsage.usage20dActiveTokens == 500, "recent 20d active usage should use recency_at first and created_at as fallback")
+runner.check(recentPrioritySnapshot.recentUsage.usage20dArchivedTokens == 200, "recent 20d archived usage should include archived sessions")
+runner.check(recentPrioritySnapshot.recentUsage.usage20dAllTokens == 700, "recent 20d all usage should include active plus archived only inside the window")
+runner.check(recentPrioritySnapshot.usage30d == 1500, "period 30 day usage should use state recency windows and include older in-window sessions")
+
+let legacyMigrationRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("CodexNotchLegacyMigration-\(UUID().uuidString)")
+try FileManager.default.createDirectory(at: legacyMigrationRoot, withIntermediateDirectories: true)
+defer {
+    try? FileManager.default.removeItem(at: legacyMigrationRoot)
+}
+let legacyStateDatabase = legacyMigrationRoot.appendingPathComponent("state_5.sqlite").path
+let legacyLogsDatabase = legacyMigrationRoot.appendingPathComponent("logs_2.sqlite").path
+let legacySessionDirectory = legacyMigrationRoot.appendingPathComponent("sessions/2026/06/14", isDirectory: true)
+try FileManager.default.createDirectory(at: legacySessionDirectory, withIntermediateDirectories: true)
+let legacySessionID = "019e073a-c032-74e2-966e-b85ede0c9cff"
+let legacySessionPath = legacySessionDirectory.appendingPathComponent("rollout-2026-06-14T02-20-20-\(legacySessionID).jsonl")
+try #"{"timestamp":"\#(timestamp)","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":2000}}}}"#
+    .write(to: legacySessionPath, atomically: true, encoding: .utf8)
+try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: legacySessionPath.path)
+_ = try Shell.run("/usr/bin/sqlite3", [
+    legacyStateDatabase,
+    """
+    create table threads(
+      id text,
+      title text,
+      tokens_used integer,
+      model text,
+      reasoning_effort text,
+      rollout_path text,
+      created_at integer,
+      updated_at integer,
+      archived integer default 0
+    );
+    insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, updated_at, archived)
+    values('\(legacySessionID)', 'Legacy migration', 2000, 'gpt-5.5', 'high', '\(legacySessionPath.path)', \(Int(now.timeIntervalSince1970)), 0);
+    """
+])
+_ = try Shell.run("/usr/bin/sqlite3", [
+    legacyLogsDatabase,
+    """
+    create table logs(
+      thread_id text,
+      ts integer,
+      target text,
+      feedback_log_body text
+    );
+    """
+])
+let legacyDeltaDirectory = legacyMigrationRoot.appendingPathComponent("context-guard", isDirectory: true)
+try FileManager.default.createDirectory(at: legacyDeltaDirectory, withIntermediateDirectories: true)
+let legacyDeltaDatabase = legacyDeltaDirectory.appendingPathComponent("usage-deltas.sqlite").path
+let legacyBaselineMs = Int64(((now.timeIntervalSince1970 - 3_700) * 1_000).rounded())
+_ = try Shell.run("/usr/bin/sqlite3", [
+    legacyDeltaDatabase,
+    """
+    create table token_snapshot_history (
+      thread_id text not null,
+      tokens_used integer not null,
+      updated_at_ms integer not null,
+      observed_at_ms integer not null,
+      primary key(thread_id, observed_at_ms)
+    );
+    insert into token_snapshot_history(thread_id, tokens_used, updated_at_ms, observed_at_ms)
+    values('\(legacySessionID)', 1500, \(legacyBaselineMs), \(legacyBaselineMs));
+    create table monitor_file_cache(path text primary key);
+    """
+])
+let migratedDeltaDatabase = legacyMigrationRoot.appendingPathComponent("SwiftCache/usage-deltas.sqlite").path
+let legacyStore = CodexUsageStore(
+    codexDirectory: legacyMigrationRoot,
+    deltaDatabase: migratedDeltaDatabase,
+    ripgrepCandidates: []
+)
+runner.check(legacyStore.recordDeltaSnapshot(now: now, range: .day), "Swift delta recording should migrate legacy token history")
+runner.check(legacyStore.recordDeltaSnapshot(now: now.addingTimeInterval(1), range: .day), "legacy migration should be idempotent on repeated records")
+let migratedHistoryRows = try Shell.sqliteJSON(
+    database: migratedDeltaDatabase,
+    query: "select count(*) as count from token_snapshot_history where thread_id = '\(legacySessionID)';",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? 0
+runner.check(migratedHistoryRows >= 2, "migrated Swift cache should contain legacy and current token history rows")
+
+let missingLegacyTablesRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("CodexNotchMissingLegacyTables-\(UUID().uuidString)")
+try FileManager.default.createDirectory(at: missingLegacyTablesRoot, withIntermediateDirectories: true)
+defer {
+    try? FileManager.default.removeItem(at: missingLegacyTablesRoot)
+}
+let missingLegacyState = missingLegacyTablesRoot.appendingPathComponent("state_5.sqlite").path
+let missingLegacyLogs = missingLegacyTablesRoot.appendingPathComponent("logs_2.sqlite").path
+_ = try Shell.run("/usr/bin/sqlite3", [
+    missingLegacyState,
+    """
+    create table threads(
+      id text,
+      title text,
+      tokens_used integer,
+      model text,
+      reasoning_effort text,
+      rollout_path text,
+      created_at integer,
+      updated_at integer,
+      archived integer default 0
+    );
+    insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, updated_at, archived)
+    values('\(legacySessionID)', 'Legacy missing token tables', 42, 'gpt-5.5', 'high', '', \(Int(now.timeIntervalSince1970)), 0);
+    """
+])
+_ = try Shell.run("/usr/bin/sqlite3", [
+    missingLegacyLogs,
+    """
+    create table logs(
+      thread_id text,
+      ts integer,
+      target text,
+      feedback_log_body text
+    );
+    """
+])
+let missingLegacyDeltaDir = missingLegacyTablesRoot.appendingPathComponent("context-guard", isDirectory: true)
+try FileManager.default.createDirectory(at: missingLegacyDeltaDir, withIntermediateDirectories: true)
+_ = try Shell.run("/usr/bin/sqlite3", [
+    missingLegacyDeltaDir.appendingPathComponent("usage-deltas.sqlite").path,
+    "create table monitor_file_cache(path text primary key);"
+])
+let missingLegacyStore = CodexUsageStore(
+    codexDirectory: missingLegacyTablesRoot,
+    deltaDatabase: missingLegacyTablesRoot.appendingPathComponent("SwiftCache/usage-deltas.sqlite").path,
+    ripgrepCandidates: []
+)
+runner.check(missingLegacyStore.recordDeltaSnapshot(now: now, range: .day), "legacy cache without token tables should not block Swift delta recording")
 
 let largeUsageRoot = URL(fileURLWithPath: NSTemporaryDirectory())
     .appendingPathComponent("CodexNotchLargeUsage-\(UUID().uuidString)")
@@ -2821,6 +3478,7 @@ _ = try Shell.run("/usr/bin/sqlite3", [
       model text,
       reasoning_effort text,
       rollout_path text,
+      created_at integer,
       updated_at integer,
       archived integer default 0
     );
@@ -2857,14 +3515,14 @@ try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: 
 _ = try Shell.run("/usr/bin/sqlite3", [
     largeUsageStateDatabase,
     """
-    insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, updated_at, archived)
-    values('\(largeUsageSessionID)', '大文件统计任务', 777777, 'gpt-5.5', 'high', '\(largeUsagePath.path)', \(Int(now.timeIntervalSince1970)), 0);
+    insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, created_at, updated_at, archived)
+    values('\(largeUsageSessionID)', '大文件统计任务', 777777, 'gpt-5.5', 'high', '\(largeUsagePath.path)', \(Int(now.timeIntervalSince1970)), \(Int(now.timeIntervalSince1970)), 1);
     """
 ])
 let largeUsageStore = CodexUsageStore(codexDirectory: largeUsageRoot, ripgrepCandidates: [fakeRipgrepPath])
-runner.check(largeUsageStore.loadUsageTotals(now: now)?.day == 1, "large rollout usage totals should use exact token events when fast search is available")
+runner.check(largeUsageStore.loadUsageTotals(now: now)?.day == 777777, "large archived new-thread usage should use state current totals regardless of rollout search path")
 let largeUsageFallbackStore = CodexUsageStore(codexDirectory: largeUsageRoot, ripgrepCandidates: [])
-runner.check(largeUsageFallbackStore.loadUsageTotals(now: now)?.day == 0, "large rollout usage totals should not count whole database tokens when fast search is unavailable")
+runner.check(largeUsageFallbackStore.loadUsageTotals(now: now)?.day == 777777, "large archived new-thread usage should be state-driven when fast search is unavailable")
 
 let tokenCacheRoot = URL(fileURLWithPath: NSTemporaryDirectory())
     .appendingPathComponent("CodexNotchTokenCache-\(UUID().uuidString)")

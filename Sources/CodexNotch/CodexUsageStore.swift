@@ -21,6 +21,7 @@ private enum UsageScanPolicy {
     static let ripgrepTimeout: DispatchTimeInterval = .seconds(12)
     static let appServerSuccessCacheTTL: TimeInterval = 5 * 60
     static let appServerFailureCacheTTL: TimeInterval = 5 * 60
+    static let deltaHistoryRetentionDays = 31
 }
 
 final class CodexUsageStore: @unchecked Sendable {
@@ -36,6 +37,7 @@ final class CodexUsageStore: @unchecked Sendable {
     private let stateDatabase: String
     private let logsDatabase: String
     private let deltaDatabase: String
+    private let legacyDeltaDatabase: String?
     private let sessionIndexPath: String
     private let appServerExecutable = "/Applications/Codex.app/Contents/Resources/codex"
     private let ripgrepCandidates: [String]
@@ -63,27 +65,61 @@ final class CodexUsageStore: @unchecked Sendable {
 
     init(
         codexDirectory: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex"),
+        stateDatabase: String? = nil,
+        logsDatabase: String? = nil,
         deltaDatabase: String? = nil,
-        ripgrepCandidates: [String] = UsageScanPolicy.ripgrepCandidates
+        ripgrepCandidates: [String] = UsageScanPolicy.ripgrepCandidates,
+        initialAppServerRateLimits: RateLimitSnapshot? = nil
     ) {
         self.codexDirectory = codexDirectory
         self.ripgrepCandidates = ripgrepCandidates
+        let legacyDeltaPath = codexDirectory.appendingPathComponent("context-guard/usage-deltas.sqlite").path
         self.deltaDatabase = Self.expandedPath(
             deltaDatabase
                 ?? ProcessInfo.processInfo.environment["CODEX_USAGE_DELTA_DB"]
-                ?? codexDirectory.appendingPathComponent("context-guard/usage-deltas.sqlite").path
+                ?? Self.defaultDeltaDatabasePath(for: codexDirectory)
         )
-        self.stateDatabase = Self.latestSQLiteDatabase(
-            in: codexDirectory,
-            prefix: "state_",
-            fallback: "state_5.sqlite"
-        )
-        self.logsDatabase = Self.latestSQLiteDatabase(
-            in: codexDirectory,
-            prefix: "logs_",
-            fallback: "logs_2.sqlite"
-        )
+        self.legacyDeltaDatabase = self.deltaDatabase == legacyDeltaPath ? nil : legacyDeltaPath
+        self.stateDatabase = stateDatabase.map(Self.expandedPath)
+            ?? Self.latestSQLiteDatabase(
+                in: codexDirectory,
+                prefix: "state_",
+                fallback: "state_5.sqlite"
+            )
+        self.logsDatabase = logsDatabase.map(Self.expandedPath)
+            ?? Self.latestSQLiteDatabase(
+                in: codexDirectory,
+                prefix: "logs_",
+                fallback: "logs_2.sqlite"
+            )
         self.sessionIndexPath = codexDirectory.appendingPathComponent("session_index.jsonl").path
+        if let initialAppServerRateLimits {
+            self.appServerRateLimitCache = AppServerRateLimitCache(
+                createdAt: Date(),
+                state: .success(initialAppServerRateLimits)
+            )
+        }
+    }
+
+    static func defaultDeltaDatabasePath(for codexDirectory: URL) -> String {
+        let defaultCodexPath = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex")
+            .standardizedFileURL
+            .path
+        let requestedCodexPath = codexDirectory.standardizedFileURL.path
+        guard requestedCodexPath == defaultCodexPath else {
+            return codexDirectory.appendingPathComponent("context-guard/usage-deltas.sqlite").path
+        }
+
+        let applicationSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support", isDirectory: true)
+        return applicationSupport
+            .appendingPathComponent("CodexNotch", isDirectory: true)
+            .appendingPathComponent("usage-deltas.sqlite")
+            .path
     }
 
     private static func expandedPath(_ path: String) -> String {
@@ -154,34 +190,49 @@ final class CodexUsageStore: @unchecked Sendable {
             )
             let activeSubagentParents = loadActiveSubagentParentThreads(now: now)
             let subagentUsage = loadSubagentUsage(range: taskHistoryRange, now: now)
-            let threads = withSubagentUsage(
-                mergeThreadRecords(databaseThreads + sessionThreads + activeSubagentParents),
-                usage: subagentUsage
+            let baseThreads = mergeThreadRecords(databaseThreads + sessionThreads + activeSubagentParents)
+            let displayThreads = withSubagentUsage(baseThreads, usage: subagentUsage)
+            let usageDeltaDatabaseThreads = try loadUsageDeltaThreads(range: .month, now: now)
+            let usageDeltaSessionThreads = loadRecentSessionThreads(
+                range: .month,
+                now: now,
+                knownTokens: tokenMap(from: usageDeltaDatabaseThreads)
+            )
+            let usageDeltaThreads = mergeThreadRecords(
+                usageDeltaDatabaseThreads + usageDeltaSessionThreads + activeSubagentParents
             )
             let activeThreadIDs = ((try? loadActiveThreadIDs(now: now)) ?? [])
                 .union(activeSessionThreadIDs(from: sessionThreads, now: now))
                 .union(activeSubagentParents.map(\.id))
-            let usage = includePeriodUsage
-                ? (loadUsageTotals(now: now, fallbackThreads: threads) ?? fallbackUsage ?? .zero)
-                : (fallbackUsage ?? .zero)
-            let rateLimitPaths = candidateRateLimitPaths(from: threads)
+            let cumulativeUsage = loadCumulativeUsage()
+            let recentUsage = loadRecentUsage(now: now)
+            let rateLimitPaths = candidateRateLimitPaths(from: displayThreads)
             let rateLimitResult = loadRateLimits(from: rateLimitPaths, source: rateLimitSource, now: now)
             let deltaStartedAt = Date()
-            let deltas = loadTokenDeltas(for: threads, now: now)
-            let aggregateDeltas = aggregateTokenDeltas(from: deltas)
+            recordDeltaSnapshot(for: usageDeltaThreads, now: now)
+            let usageResult = includePeriodUsage
+                ? loadRollingPeriodUsage(for: usageDeltaThreads, now: now)
+                : PeriodUsageResult(usage: fallbackUsage ?? .zero, quality: .empty)
+            let dailyUsage = loadDailyUsage(for: usageDeltaThreads, now: now)
+            let deltas = loadTokenDeltas(for: baseThreads, now: now)
+            let aggregateDeltas = loadAggregateTokenDeltas(for: baseThreads, now: now)
             let deltaDurationMs = elapsedMilliseconds(since: deltaStartedAt)
             let taskResult = buildTasks(
-                from: threads,
+                from: displayThreads,
                 activeThreadIDs: activeThreadIDs,
                 deltas: deltas,
-                todayTotalTokens: aggregateDeltas.deltaTodayTokens ?? 0,
+                todayTotalTokens: dailyUsage.usageTodayTokens,
                 now: now,
                 contextTaskLimit: contextTaskLimit
             )
             cacheFastSnapshot(
-                threads: threads,
+                threads: displayThreads,
+                usageThreads: usageDeltaThreads,
                 activeThreadIDs: activeThreadIDs,
                 rateLimits: rateLimitResult.snapshot,
+                periodUsage: usageResult.usage,
+                periodUsageQuality: usageResult.quality,
+                dailyUsage: dailyUsage,
                 signaturePaths: rateLimitPaths,
                 rateLimitSourceName: rateLimitResult.source,
                 rateLimitSource: rateLimitSource,
@@ -194,11 +245,14 @@ final class CodexUsageStore: @unchecked Sendable {
                 secondaryPercent: rateLimitResult.snapshot.secondaryDisplayPercent(now: now),
                 primaryResetsAt: rateLimitResult.snapshot.primaryResetsAt,
                 secondaryResetsAt: rateLimitResult.snapshot.secondaryResetsAt,
+                cumulativeUsage: cumulativeUsage,
+                recentUsage: recentUsage,
+                dailyUsage: dailyUsage,
                 usage1h: aggregateDeltas.delta1hTokens,
-                usageToday: aggregateDeltas.deltaTodayTokens,
-                usage24h: usage.day,
-                usage7d: usage.week,
-                usage30d: usage.month,
+                usage24h: usageResult.usage.day,
+                usage7d: usageResult.usage.week,
+                usage30d: usageResult.usage.month,
+                periodUsageQuality: usageResult.quality,
                 sparkQuotaWindows: displaySparkQuotaWindows(rateLimitResult.snapshot, now: now),
                 tasks: taskResult.tasks,
                 isRunning: taskResult.tasks.contains { $0.status == .running },
@@ -219,21 +273,38 @@ final class CodexUsageStore: @unchecked Sendable {
         }
     }
 
+    @discardableResult
+    func recordDeltaSnapshot(now: Date = Date(), range: TaskHistoryRange = .month) -> Bool {
+        let databaseThreads = (try? loadUsageDeltaThreads(range: range, now: now)) ?? []
+        let sessionThreads = loadRecentSessionThreads(
+            range: range,
+            now: now,
+            knownTokens: tokenMap(from: databaseThreads)
+        )
+        let threads = mergeThreadRecords(databaseThreads + sessionThreads + loadActiveSubagentParentThreads(now: now))
+        return recordDeltaSnapshot(for: threads, now: now)
+    }
+
     func loadUsageTotals(now: Date = Date()) -> PeriodUsage? {
-        let periodThreads = (try? loadThreadsForPeriodUsage(now: now)) ?? []
-        let archivedThreadIDs = loadArchivedThreadIDs()
-        let sessionThreads = loadSessionUsageThreads(
+        let databaseThreads = (try? loadUsageDeltaThreads(range: .month, now: now)) ?? []
+        let sessionThreads = loadRecentSessionThreads(
             range: .month,
             now: now,
-            knownTokens: tokenMap(from: periodThreads),
-            excludedThreadIDs: archivedThreadIDs
+            knownTokens: tokenMap(from: databaseThreads)
         )
-        let usageThreads = mergeThreadRecords(periodThreads + sessionThreads)
-        guard !usageThreads.isEmpty,
-              let usage = try? loadPeriodUsage(now: now, threads: usageThreads) else {
-            return nil
-        }
-        return usage
+        let threads = mergeThreadRecords(databaseThreads + sessionThreads + loadActiveSubagentParentThreads(now: now))
+        return loadRollingPeriodUsage(for: threads, now: now).usage
+    }
+
+    func loadDailyUsage(now: Date = Date()) -> DailyUsage {
+        let databaseThreads = (try? loadUsageDeltaThreads(range: .month, now: now)) ?? []
+        let sessionThreads = loadRecentSessionThreads(
+            range: .month,
+            now: now,
+            knownTokens: tokenMap(from: databaseThreads)
+        )
+        let threads = mergeThreadRecords(databaseThreads + sessionThreads + loadActiveSubagentParentThreads(now: now))
+        return loadDailyUsage(for: threads, now: now)
     }
 
     func rateLimitWatchPaths() -> [String] {
@@ -256,11 +327,14 @@ final class CodexUsageStore: @unchecked Sendable {
             secondaryPercent: nil,
             primaryResetsAt: nil,
             secondaryResetsAt: nil,
+            cumulativeUsage: loadCumulativeUsage(),
+            recentUsage: loadRecentUsage(now: now),
+            dailyUsage: .empty,
             usage1h: nil,
-            usageToday: nil,
             usage24h: 0,
             usage7d: 0,
             usage30d: 0,
+            periodUsageQuality: .empty,
             sparkQuotaWindows: [],
             tasks: [],
             isRunning: false,
@@ -276,26 +350,6 @@ final class CodexUsageStore: @unchecked Sendable {
                 monitorModelTokens: 0
             )
         )
-    }
-
-    private func loadUsageTotals(now: Date, fallbackThreads: [ThreadRecord]?) -> PeriodUsage? {
-        let periodThreads = (try? loadThreadsForPeriodUsage(now: now)) ?? []
-        let archivedThreadIDs = loadArchivedThreadIDs()
-        let activeFallbackThreads = (fallbackThreads ?? []).filter {
-            !archivedThreadIDs.contains($0.id.lowercased())
-        }
-        let knownTokens = tokenMap(from: periodThreads + activeFallbackThreads)
-        let sessionThreads = loadSessionUsageThreads(
-            range: .month,
-            now: now,
-            knownTokens: knownTokens,
-            excludedThreadIDs: archivedThreadIDs
-        )
-        let usageThreads = mergeThreadRecords(periodThreads + sessionThreads + activeFallbackThreads)
-        guard !usageThreads.isEmpty else {
-            return nil
-        }
-        return try? loadPeriodUsage(now: now, threads: usageThreads)
     }
 
     private func cachedFastSnapshot(
@@ -317,17 +371,20 @@ final class CodexUsageStore: @unchecked Sendable {
             return nil
         }
 
-        let usage = fallbackUsage ?? .zero
+        let usage = fallbackUsage ?? cache.periodUsage
+        let cumulativeUsage = loadCumulativeUsage()
+        let recentUsage = loadRecentUsage(now: now)
+        let dailyUsage = cache.dailyUsage
         let snapshotStartedAt = Date()
         let deltaStartedAt = Date()
         let deltas = loadTokenDeltas(for: cache.threads, now: now)
-        let aggregateDeltas = aggregateTokenDeltas(from: deltas)
+        let aggregateDeltas = loadAggregateTokenDeltas(for: cache.threads, now: now)
         let deltaDurationMs = elapsedMilliseconds(since: deltaStartedAt)
         let taskResult = buildTasks(
             from: cache.threads,
             activeThreadIDs: cache.activeThreadIDs,
             deltas: deltas,
-            todayTotalTokens: aggregateDeltas.deltaTodayTokens ?? 0,
+            todayTotalTokens: dailyUsage.usageTodayTokens,
             now: now,
             contextTaskLimit: contextTaskLimit
         )
@@ -337,11 +394,14 @@ final class CodexUsageStore: @unchecked Sendable {
             secondaryPercent: cache.rateLimits.secondaryDisplayPercent(now: now),
             primaryResetsAt: cache.rateLimits.primaryResetsAt,
             secondaryResetsAt: cache.rateLimits.secondaryResetsAt,
+            cumulativeUsage: cumulativeUsage,
+            recentUsage: recentUsage,
+            dailyUsage: dailyUsage,
             usage1h: aggregateDeltas.delta1hTokens,
-            usageToday: aggregateDeltas.deltaTodayTokens,
             usage24h: usage.day,
             usage7d: usage.week,
             usage30d: usage.month,
+            periodUsageQuality: cache.periodUsageQuality,
             sparkQuotaWindows: displaySparkQuotaWindows(cache.rateLimits, now: now),
             tasks: taskResult.tasks,
             isRunning: taskResult.tasks.contains { $0.status == .running },
@@ -361,8 +421,12 @@ final class CodexUsageStore: @unchecked Sendable {
 
     private func cacheFastSnapshot(
         threads: [ThreadRecord],
+        usageThreads: [ThreadRecord],
         activeThreadIDs: Set<String>,
         rateLimits: RateLimitSnapshot,
+        periodUsage: PeriodUsage,
+        periodUsageQuality: PeriodUsageQuality,
+        dailyUsage: DailyUsage,
         signaturePaths: [String],
         rateLimitSourceName: String,
         rateLimitSource: RateLimitSourcePreference,
@@ -379,8 +443,12 @@ final class CodexUsageStore: @unchecked Sendable {
             signature: signature,
             rolloutPaths: rolloutPaths,
             threads: threads,
+            usageThreads: usageThreads,
             activeThreadIDs: activeThreadIDs,
             rateLimits: rateLimits,
+            periodUsage: periodUsage,
+            periodUsageQuality: periodUsageQuality,
+            dailyUsage: dailyUsage,
             rateLimitSourceName: rateLimitSourceName,
             rateLimitSource: rateLimitSource,
             taskHistoryRange: taskHistoryRange
@@ -390,7 +458,9 @@ final class CodexUsageStore: @unchecked Sendable {
 
     private func loadRecentThreads(range: TaskHistoryRange = .threeDays, now: Date = Date()) throws -> [ThreadRecord] {
         let since = Int(now.timeIntervalSince1970) - range.seconds
-        let createdAtExpression = threadTableHasColumn("created_at") ? "coalesce(created_at, 0)" : "0"
+        let createdAtExpression = threadTableColumns().contains("created_at")
+            ? "coalesce(created_at, 0)"
+            : "0"
         let query = """
         select
           id,
@@ -408,21 +478,338 @@ final class CodexUsageStore: @unchecked Sendable {
         limit \(range.queryLimit);
         """
         return withSessionIndexNames(
-            try Shell.sqliteJSON(database: stateDatabase, query: query, as: [ThreadRecord].self)
+            try Shell.sqliteJSON(database: stateDatabase, query: query, as: [ThreadRecord].self, readOnly: true)
         )
         .filter { !isSubagentThread($0) }
     }
 
-    private func threadTableHasColumn(_ name: String) -> Bool {
-        guard let columns = try? Shell.sqliteJSON(
+    private func loadUsageDeltaThreads(range: TaskHistoryRange = .month, now: Date = Date()) throws -> [ThreadRecord] {
+        let since = Int(now.timeIntervalSince1970) - range.seconds
+        let columns = threadTableColumns()
+        let createdAtExpression = columns.contains("created_at") ? "coalesce(created_at, 0)" : "0"
+        let recencyCandidates = ["recency_at", "updated_at", "created_at"]
+            .filter { columns.contains($0) }
+            .map { "nullif(\($0), 0)" }
+        let recencyExpression = recencyCandidates.isEmpty
+            ? "0"
+            : "coalesce(\(recencyCandidates.joined(separator: ", ")), 0)"
+        let query = """
+        select
+          id,
+          coalesce(title, '未命名任务') as title,
+          coalesce(tokens_used, 0) as tokens_used,
+          model,
+          reasoning_effort,
+          coalesce(rollout_path, '') as rollout_path,
+          coalesce(updated_at, 0) as updated_at,
+          \(createdAtExpression) as created_at
+        from threads
+        where \(recencyExpression) >= \(since)
+        order by \(recencyExpression) desc;
+        """
+        return withSessionIndexNames(
+            try Shell.sqliteJSON(database: stateDatabase, query: query, as: [ThreadRecord].self, readOnly: true)
+        )
+        .filter { !isSubagentThread($0) }
+    }
+
+    func loadCumulativeUsage() -> CumulativeUsage {
+        let query = """
+        select
+          coalesce(sum(case when archived = 0 then coalesce(tokens_used, 0) else 0 end), 0) as active_tokens,
+          coalesce(sum(case when archived = 1 then coalesce(tokens_used, 0) else 0 end), 0) as archived_tokens,
+          coalesce(sum(coalesce(tokens_used, 0)), 0) as all_tokens,
+          coalesce(sum(case when archived = 0 then 1 else 0 end), 0) as active_sessions,
+          coalesce(sum(case when archived = 1 then 1 else 0 end), 0) as archived_sessions,
+          count(*) as all_sessions
+        from threads;
+        """
+        guard let record = try? Shell.sqliteJSON(
+            database: stateDatabase,
+            query: query,
+            as: [CumulativeUsageRecord].self,
+            readOnly: true
+        ).first else {
+            return .empty
+        }
+
+        return CumulativeUsage(
+            activeTokens: record.activeTokens,
+            archivedTokens: record.archivedTokens,
+            allTokens: record.allTokens,
+            activeSessions: record.activeSessions,
+            archivedSessions: record.archivedSessions,
+            allSessions: record.allSessions
+        )
+    }
+
+    func loadRecentUsage(now: Date = Date(), windowDays: Int = 20) -> RecentUsage {
+        let safeWindowDays = max(1, windowDays)
+        let start = Int(now.timeIntervalSince1970) - (safeWindowDays * 24 * 60 * 60)
+        let recencyExpression = recentUsageRecencyExpression()
+        let query = """
+        select
+          coalesce(sum(case when archived = 0 then coalesce(tokens_used, 0) else 0 end), 0) as usage_20d_active_tokens,
+          coalesce(sum(case when archived = 1 then coalesce(tokens_used, 0) else 0 end), 0) as usage_20d_archived_tokens,
+          coalesce(sum(coalesce(tokens_used, 0)), 0) as usage_20d_all_tokens,
+          coalesce(sum(case when archived = 0 then 1 else 0 end), 0) as usage_20d_active_sessions,
+          coalesce(sum(case when archived = 1 then 1 else 0 end), 0) as usage_20d_archived_sessions,
+          count(*) as usage_20d_all_sessions
+        from threads
+        where \(recencyExpression) >= \(start);
+        """
+        guard let record = try? Shell.sqliteJSON(
+            database: stateDatabase,
+            query: query,
+            as: [RecentUsageRecord].self,
+            readOnly: true
+        ).first else {
+            return .empty
+        }
+
+        return RecentUsage(
+            usage20dActiveTokens: record.usage20dActiveTokens,
+            usage20dArchivedTokens: record.usage20dArchivedTokens,
+            usage20dAllTokens: record.usage20dAllTokens,
+            usage20dActiveSessions: record.usage20dActiveSessions,
+            usage20dArchivedSessions: record.usage20dArchivedSessions,
+            usage20dAllSessions: record.usage20dAllSessions,
+            windowDays: safeWindowDays
+        )
+    }
+
+    private func loadStateWindowUsageTotals(now: Date = Date()) -> PeriodUsage? {
+        let dayStart = Int(now.timeIntervalSince1970) - (24 * 60 * 60)
+        let weekStart = Int(now.timeIntervalSince1970) - (7 * 24 * 60 * 60)
+        let monthStart = Int(now.timeIntervalSince1970) - (30 * 24 * 60 * 60)
+        let recencyExpression = recentUsageRecencyExpression()
+        let query = """
+        select
+          coalesce(sum(case when \(recencyExpression) >= \(dayStart) then coalesce(tokens_used, 0) else 0 end), 0) as day,
+          coalesce(sum(case when \(recencyExpression) >= \(weekStart) then coalesce(tokens_used, 0) else 0 end), 0) as week,
+          coalesce(sum(case when \(recencyExpression) >= \(monthStart) then coalesce(tokens_used, 0) else 0 end), 0) as month
+        from threads;
+        """
+        guard let record = try? Shell.sqliteJSON(
+            database: stateDatabase,
+            query: query,
+            as: [PeriodUsageRecord].self,
+            readOnly: true
+        ).first else {
+            return nil
+        }
+
+        return PeriodUsage(day: record.day, week: record.week, month: record.month)
+    }
+
+    private func loadRollingPeriodUsage(for threads: [ThreadRecord], now: Date) -> PeriodUsageResult {
+        let nowMs = Int64((now.timeIntervalSince1970 * 1_000).rounded())
+        let dayCutoff = nowMs - Int64(24 * 60 * 60 * 1_000)
+        let weekCutoff = nowMs - Int64(7 * 24 * 60 * 60 * 1_000)
+        let monthCutoff = nowMs - Int64(30 * 24 * 60 * 60 * 1_000)
+        let rows = loadRollingDeltaRows(
+            for: threads,
+            tenMinuteCutoff: nil,
+            oneHourCutoff: nil,
+            dayCutoff: dayCutoff,
+            weekCutoff: weekCutoff,
+            monthCutoff: monthCutoff,
+            todayCutoff: nil
+        )
+
+        var usage24h = 0
+        var usage7d = 0
+        var usage30d = 0
+        var missing24h = 0
+        var missing7d = 0
+        var missing30d = 0
+
+        for row in rows {
+            if let delta = rollingDelta(current: row.tokensUsed, baseline: row.baseline24h, createdAtMs: row.createdAtMs, cutoffMs: dayCutoff) {
+                usage24h += delta
+            } else {
+                missing24h += 1
+            }
+            if let delta = rollingDelta(current: row.tokensUsed, baseline: row.baseline7d, createdAtMs: row.createdAtMs, cutoffMs: weekCutoff) {
+                usage7d += delta
+            } else {
+                missing7d += 1
+            }
+            if let delta = rollingDelta(current: row.tokensUsed, baseline: row.baseline30d, createdAtMs: row.createdAtMs, cutoffMs: monthCutoff) {
+                usage30d += delta
+            } else {
+                missing30d += 1
+            }
+        }
+
+        return PeriodUsageResult(
+            usage: PeriodUsage(day: usage24h, week: usage7d, month: usage30d),
+            quality: PeriodUsageQuality(
+                usage24hPartial: missing24h > 0,
+                usage7dPartial: missing7d > 0,
+                usage30dPartial: missing30d > 0,
+                missing24hBaselines: missing24h,
+                missing7dBaselines: missing7d,
+                missing30dBaselines: missing30d
+            )
+        )
+    }
+
+    private func loadDailyUsage(for threads: [ThreadRecord], now: Date) -> DailyUsage {
+        let calendar = Calendar.current
+        let dayStart = calendar.startOfDay(for: now)
+        let dayStartMs = Int64((dayStart.timeIntervalSince1970 * 1_000).rounded())
+        let rows = loadRollingDeltaRows(
+            for: threads,
+            tenMinuteCutoff: nil,
+            oneHourCutoff: nil,
+            dayCutoff: nil,
+            weekCutoff: nil,
+            monthCutoff: nil,
+            todayCutoff: dayStartMs
+        )
+
+        var todayTokens = 0
+        var missing = 0
+        for row in rows {
+            if let delta = rollingDelta(current: row.tokensUsed, baseline: row.baselineToday, createdAtMs: row.createdAtMs, cutoffMs: dayStartMs) {
+                todayTokens += delta
+            } else {
+                missing += 1
+            }
+        }
+
+        return DailyUsage(
+            usageTodayTokens: todayTokens,
+            dayStartedAt: dayStart,
+            timeZoneIdentifier: TimeZone.current.identifier,
+            isPartial: missing > 0,
+            missingBaselineSessions: missing
+        )
+    }
+
+    private func loadRollingDeltaRows(
+        for threads: [ThreadRecord],
+        tenMinuteCutoff: Int64?,
+        oneHourCutoff: Int64?,
+        dayCutoff: Int64?,
+        weekCutoff: Int64?,
+        monthCutoff: Int64?,
+        todayCutoff: Int64?
+    ) -> [RollingDeltaRecord] {
+        let currentRows = threads
+            .filter { !$0.id.isEmpty && $0.tokensUsed >= 0 }
+            .map { thread -> String in
+                let id = sqliteLiteral(thread.id.lowercased())
+                let tokens = max(0, thread.tokensUsed)
+                let createdAtMs = Int64(max(0, thread.createdAt)) * 1_000
+                return "(\(id), \(tokens), \(createdAtMs))"
+            }
+
+        guard !currentRows.isEmpty else {
+            return []
+        }
+
+        ensureDeltaCacheSchema()
+
+        let tenMinuteSelect = baselineSelectSQL(cutoff: tenMinuteCutoff, alias: "baseline_10m")
+        let oneHourSelect = baselineSelectSQL(cutoff: oneHourCutoff, alias: "baseline_1h")
+        let daySelect = baselineSelectSQL(cutoff: dayCutoff, alias: "baseline_24h")
+        let weekSelect = baselineSelectSQL(cutoff: weekCutoff, alias: "baseline_7d")
+        let monthSelect = baselineSelectSQL(cutoff: monthCutoff, alias: "baseline_30d")
+        let todaySelect = baselineSelectSQL(cutoff: todayCutoff, alias: "baseline_today")
+        let query = """
+        WITH current_rows(thread_id, tokens_used, created_at_ms) AS (
+          VALUES \(currentRows.joined(separator: ",\n                 "))
+        )
+        SELECT
+          current_rows.thread_id,
+          current_rows.tokens_used,
+          current_rows.created_at_ms,
+          \(tenMinuteSelect),
+          \(oneHourSelect),
+          \(daySelect),
+          \(weekSelect),
+          \(monthSelect),
+          \(todaySelect)
+        FROM current_rows;
+        """
+
+        return (try? Shell.sqliteJSON(
+            database: deltaDatabase,
+            query: query,
+            as: [RollingDeltaRecord].self,
+            readOnly: true
+        )) ?? []
+    }
+
+    private func baselineSelectSQL(cutoff: Int64?, alias: String) -> String {
+        guard let cutoff else {
+            return "NULL AS \(alias)"
+        }
+        return """
+        (
+            SELECT baseline.tokens_used
+            FROM (
+              SELECT h.tokens_used, h.observed_at_ms
+              FROM token_snapshot_history AS h
+              WHERE h.thread_id = current_rows.thread_id
+                AND h.observed_at_ms <= \(cutoff)
+              UNION ALL
+              SELECT s.tokens_used, s.observed_at_ms
+              FROM token_snapshots AS s
+              WHERE s.thread_id = current_rows.thread_id
+                AND s.observed_at_ms <= \(cutoff)
+            ) AS baseline
+            ORDER BY baseline.observed_at_ms DESC
+            LIMIT 1
+          ) AS \(alias)
+        """
+    }
+
+    private func rollingDelta(
+        current: Int,
+        baseline: Int?,
+        allowCreatedFallback: Bool = true,
+        createdAtMs: Int64,
+        cutoffMs: Int64
+    ) -> Int? {
+        if let baseline {
+            return max(0, current - baseline)
+        }
+        if allowCreatedFallback, createdAtMs > 0 && createdAtMs >= cutoffMs {
+            return max(0, current)
+        }
+        return nil
+    }
+
+    private func ensureDeltaCacheSchema() {
+        ensureDeltaDatabaseDirectory()
+        _ = try? Shell.sqliteExec(
+            database: deltaDatabase,
+            query: "\(deltaSchemaSQL())\n\(legacyDeltaMigrationSQL())"
+        )
+    }
+
+    private func recentUsageRecencyExpression() -> String {
+        let columns = threadTableColumns()
+        let candidates = ["recency_at", "updated_at", "created_at"]
+            .filter { columns.contains($0) }
+            .map { "nullif(\($0), 0)" }
+        guard !candidates.isEmpty else {
+            return "0"
+        }
+        return "coalesce(\(candidates.joined(separator: ", ")), 0)"
+    }
+
+    private func threadTableColumns() -> Set<String> {
+        let records = (try? Shell.sqliteJSON(
             database: stateDatabase,
             query: "pragma table_info(threads);",
-            as: [SQLiteTableColumn].self,
+            as: [SQLiteNameRecord].self,
             readOnly: true
-        ) else {
-            return false
-        }
-        return columns.contains { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+        )) ?? []
+        return Set(records.map(\.name))
     }
 
     private func loadRecentSessionThreads(
@@ -456,7 +843,7 @@ final class CodexUsageStore: @unchecked Sendable {
                 reasoningEffort: runtime?.reasoningEffort,
                 rolloutPath: candidate.path,
                 updatedAt: candidate.updatedAt,
-                createdAt: candidate.createdAt
+                createdAt: candidate.databaseTokens > 0 ? 0 : candidate.updatedAt
             )
         }
     }
@@ -465,16 +852,14 @@ final class CodexUsageStore: @unchecked Sendable {
         range: TaskHistoryRange,
         now: Date,
         knownTokens: [String: Int] = [:],
-        excludedThreadIDs: Set<String> = []
+        includeArchivedSessions: Bool = false
     ) -> [ThreadRecord] {
         loadRecentSessionCandidates(
             range: range,
             now: now,
-            knownTokens: knownTokens
+            knownTokens: knownTokens,
+            includeArchivedSessions: includeArchivedSessions
         ).compactMap { candidate in
-            guard !excludedThreadIDs.contains(candidate.sessionID.lowercased()) else {
-                return nil
-            }
             let tokensUsed = tokenTotalForPeriodUsage(
                 path: candidate.path,
                 databaseTokens: candidate.databaseTokens,
@@ -493,7 +878,7 @@ final class CodexUsageStore: @unchecked Sendable {
                 reasoningEffort: nil,
                 rolloutPath: candidate.path,
                 updatedAt: candidate.updatedAt,
-                createdAt: candidate.createdAt
+                createdAt: candidate.databaseTokens > 0 ? 0 : candidate.updatedAt
             )
         }
     }
@@ -501,10 +886,14 @@ final class CodexUsageStore: @unchecked Sendable {
     private func loadRecentSessionCandidates(
         range: TaskHistoryRange,
         now: Date,
-        knownTokens: [String: Int]
+        knownTokens: [String: Int],
+        includeArchivedSessions: Bool = false
     ) -> [RecentSessionCandidate] {
         let since = Int(now.timeIntervalSince1970) - range.seconds
-        let paths = recentTaskSessionPaths(limit: max(range.queryLimit * 3, 80))
+        let pathLimit = max(range.queryLimit * 3, 80)
+        let paths = includeArchivedSessions
+            ? recentSessionPaths(limit: pathLimit)
+            : recentTaskSessionPaths(limit: pathLimit)
         let pathSessionIDs = paths.compactMap { sessionID(from: $0)?.lowercased() }
         var resolvedKnownTokens = knownTokens
         let missingTokenIDs = pathSessionIDs.filter { resolvedKnownTokens[$0] == nil }
@@ -523,12 +912,12 @@ final class CodexUsageStore: @unchecked Sendable {
             guard updatedAt >= since else {
                 return nil
             }
+
             return RecentSessionCandidate(
                 path: path,
                 sessionID: sessionID,
                 modifiedAt: modifiedAt,
                 updatedAt: updatedAt,
-                createdAt: 0,
                 databaseTokens: resolvedKnownTokens[sessionID.lowercased()] ?? 0
             )
         }
@@ -662,6 +1051,13 @@ final class CodexUsageStore: @unchecked Sendable {
         }
     }
 
+    private func parentTokenCount(for thread: ThreadRecord) -> Int {
+        guard !thread.rolloutPath.isEmpty else {
+            return thread.tokensUsed
+        }
+        return tokenTotalForFastSnapshot(path: thread.rolloutPath, databaseTokens: thread.tokensUsed)
+    }
+
     private func tokenTotalForFastSnapshot(
         path: String,
         databaseTokens: Int,
@@ -729,6 +1125,156 @@ final class CodexUsageStore: @unchecked Sendable {
         )
     }
 
+    @discardableResult
+    private func recordDeltaSnapshot(for threads: [ThreadRecord], now: Date) -> Bool {
+        let rows = threads
+            .filter { !$0.id.isEmpty && $0.tokensUsed >= 0 }
+            .map { thread -> String in
+                let id = sqliteLiteral(thread.id.lowercased())
+                let tokens = max(0, thread.tokensUsed)
+                let updatedAtMs = max(0, thread.updatedAt) * 1_000
+                return "(\(id), \(tokens), \(updatedAtMs), __OBSERVED_AT_MS__)"
+            }
+
+        guard !rows.isEmpty else {
+            return false
+        }
+
+        let cleanupRows = threads
+            .filter { !$0.id.isEmpty && $0.tokensUsed >= 0 }
+            .map { thread in
+                "(\(sqliteLiteral(thread.id.lowercased())), \(max(0, thread.tokensUsed)))"
+            }
+            .joined(separator: ",\n")
+        let observedAtMs = Int64((now.timeIntervalSince1970 * 1_000).rounded())
+        let values = rows
+            .joined(separator: ",\n")
+            .replacingOccurrences(of: "__OBSERVED_AT_MS__", with: String(observedAtMs))
+        let query = """
+        \(deltaSchemaSQL())
+        \(legacyDeltaMigrationSQL())
+        WITH current_rows(thread_id, tokens_used) AS (
+          VALUES \(cleanupRows)
+        )
+        DELETE FROM token_snapshots
+        WHERE EXISTS (
+          SELECT 1
+          FROM current_rows
+          WHERE current_rows.thread_id = lower(token_snapshots.thread_id)
+            AND token_snapshots.tokens_used > current_rows.tokens_used
+        );
+
+        WITH current_rows(thread_id, tokens_used) AS (
+          VALUES \(cleanupRows)
+        )
+        DELETE FROM token_snapshot_history
+        WHERE EXISTS (
+          SELECT 1
+          FROM current_rows
+          WHERE current_rows.thread_id = lower(token_snapshot_history.thread_id)
+            AND token_snapshot_history.tokens_used > current_rows.tokens_used
+        );
+
+        INSERT INTO token_snapshots(thread_id, tokens_used, updated_at_ms, observed_at_ms)
+        VALUES \(values)
+        ON CONFLICT(thread_id) DO UPDATE SET
+          tokens_used = excluded.tokens_used,
+          updated_at_ms = excluded.updated_at_ms,
+          observed_at_ms = excluded.observed_at_ms;
+
+        INSERT INTO token_snapshot_history(thread_id, tokens_used, updated_at_ms, observed_at_ms)
+        VALUES \(values)
+        ON CONFLICT(thread_id, observed_at_ms) DO UPDATE SET
+          tokens_used = excluded.tokens_used,
+          updated_at_ms = excluded.updated_at_ms;
+
+        DELETE FROM token_snapshot_history
+        WHERE observed_at_ms < \(observedAtMs - Int64(UsageScanPolicy.deltaHistoryRetentionDays * 24 * 60 * 60 * 1_000));
+        """
+
+        do {
+            ensureDeltaDatabaseDirectory()
+            try Shell.sqliteExec(database: deltaDatabase, query: query)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func ensureDeltaDatabaseDirectory() {
+        let directory = URL(fileURLWithPath: deltaDatabase).deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    }
+
+    private func deltaSchemaSQL() -> String {
+        """
+        CREATE TABLE IF NOT EXISTS token_snapshots (
+          thread_id TEXT PRIMARY KEY,
+          tokens_used INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL,
+          observed_at_ms INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS token_snapshot_history (
+          thread_id TEXT NOT NULL,
+          tokens_used INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL,
+          observed_at_ms INTEGER NOT NULL,
+          PRIMARY KEY(thread_id, observed_at_ms)
+        );
+        CREATE INDEX IF NOT EXISTS idx_token_snapshot_history_lookup
+          ON token_snapshot_history(thread_id, observed_at_ms DESC);
+        """
+    }
+
+    private func legacyDeltaMigrationSQL() -> String {
+        guard let legacyDeltaDatabase,
+              FileManager.default.fileExists(atPath: legacyDeltaDatabase) else {
+            return ""
+        }
+
+        let hasSnapshots = legacyDeltaHasTable("token_snapshots", database: legacyDeltaDatabase)
+        let hasHistory = legacyDeltaHasTable("token_snapshot_history", database: legacyDeltaDatabase)
+        guard hasSnapshots || hasHistory else {
+            return ""
+        }
+
+        let legacy = sqliteLiteral(legacyDeltaDatabase)
+        var statements = ["ATTACH DATABASE \(legacy) AS legacy_delta;"]
+        if hasSnapshots {
+            statements.append("""
+        INSERT OR IGNORE INTO token_snapshots(thread_id, tokens_used, updated_at_ms, observed_at_ms)
+        SELECT lower(thread_id), tokens_used, updated_at_ms, observed_at_ms
+        FROM legacy_delta.token_snapshots;
+        """)
+        }
+        if hasHistory {
+            statements.append("""
+        INSERT OR IGNORE INTO token_snapshot_history(thread_id, tokens_used, updated_at_ms, observed_at_ms)
+        SELECT lower(thread_id), tokens_used, updated_at_ms, observed_at_ms
+        FROM legacy_delta.token_snapshot_history;
+        """)
+        }
+        statements.append("DETACH DATABASE legacy_delta;")
+        return statements.joined(separator: "\n")
+    }
+
+    private func legacyDeltaHasTable(_ table: String, database: String) -> Bool {
+        let query = """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name = \(sqliteLiteral(table))
+        LIMIT 1;
+        """
+        let records = (try? Shell.sqliteJSON(
+            database: database,
+            query: query,
+            as: [SQLiteNameRecord].self,
+            readOnly: true
+        )) ?? []
+        return !records.isEmpty
+    }
+
     private func loadThreadTokenMap(for ids: [String]) -> [String: Int] {
         let uniqueIDs = Array(Set(ids.filter { !$0.isEmpty })).sorted()
         guard !uniqueIDs.isEmpty else {
@@ -744,7 +1290,7 @@ final class CodexUsageStore: @unchecked Sendable {
         where id in (\(quotedIDs));
         """
 
-        guard let records = try? Shell.sqliteJSON(database: stateDatabase, query: query, as: [ThreadTokenRecord].self) else {
+        guard let records = try? Shell.sqliteJSON(database: stateDatabase, query: query, as: [ThreadTokenRecord].self, readOnly: true) else {
             return [:]
         }
 
@@ -779,15 +1325,7 @@ final class CodexUsageStore: @unchecked Sendable {
 
     private func mergeThreadRecord(_ existing: ThreadRecord, with candidate: ThreadRecord) -> ThreadRecord {
         let updatedAt = max(existing.updatedAt, candidate.updatedAt)
-        let createdAt: Int
-        switch (existing.createdAt, candidate.createdAt) {
-        case (let first, let second) where first > 0 && second > 0:
-            createdAt = min(first, second)
-        case (let first, _) where first > 0:
-            createdAt = first
-        case (_, let second):
-            createdAt = second
-        }
+        let createdAt = [existing.createdAt, candidate.createdAt].filter { $0 > 0 }.min() ?? 0
         let title = bestTitle(existing.title, candidate.title)
         let tokensUsed = max(existing.tokensUsed, candidate.tokensUsed)
         let rolloutPath = candidate.rolloutPath.isEmpty ? existing.rolloutPath : candidate.rolloutPath
@@ -828,11 +1366,10 @@ final class CodexUsageStore: @unchecked Sendable {
           coalesce(updated_at, 0) as updated_at
         from threads
         where updated_at >= \(monthStart)
-          and archived = 0
         order by updated_at desc;
         """
         return withSessionIndexNames(
-            try Shell.sqliteJSON(database: stateDatabase, query: query, as: [ThreadRecord].self)
+            try Shell.sqliteJSON(database: stateDatabase, query: query, as: [ThreadRecord].self, readOnly: true)
         )
     }
 
@@ -845,7 +1382,8 @@ final class CodexUsageStore: @unchecked Sendable {
         guard let records = try? Shell.sqliteJSON(
             database: stateDatabase,
             query: query,
-            as: [ThreadIDRecord].self
+            as: [ThreadIDRecord].self,
+            readOnly: true
         ) else {
             return []
         }
@@ -960,7 +1498,7 @@ final class CodexUsageStore: @unchecked Sendable {
         order by ts desc;
         """
 
-        let records = try Shell.sqliteJSON(database: logsDatabase, query: query, as: [UsageLogRecord].self)
+        let records = try Shell.sqliteJSON(database: logsDatabase, query: query, as: [UsageLogRecord].self, readOnly: true)
         let dayStart = Int(now.timeIntervalSince1970) - (24 * 60 * 60)
         let weekStart = Int(now.timeIntervalSince1970) - (7 * 24 * 60 * 60)
 
@@ -1240,7 +1778,7 @@ final class CodexUsageStore: @unchecked Sendable {
         group by thread_id;
         """
 
-        let records = try Shell.sqliteJSON(database: logsDatabase, query: query, as: [ActivityRecord].self)
+        let records = try Shell.sqliteJSON(database: logsDatabase, query: query, as: [ActivityRecord].self, readOnly: true)
         let nowEpoch = Int(now.timeIntervalSince1970)
 
         return Set(records.compactMap { record in
@@ -1260,14 +1798,7 @@ final class CodexUsageStore: @unchecked Sendable {
     }
 
     private func loadTokenDeltas(for threads: [ThreadRecord], now: Date) -> [String: TokenDeltaWindow] {
-        let currentRows = threads
-            .filter { !$0.id.isEmpty && $0.tokensUsed >= 0 }
-            .map { thread in
-                "(\(sqliteLiteral(thread.id.lowercased())), \(max(0, thread.tokensUsed)), \(max(0, thread.createdAt)))"
-            }
-
-        guard !currentRows.isEmpty,
-              FileManager.default.fileExists(atPath: deltaDatabase) else {
+        guard !threads.isEmpty else {
             return [:]
         }
 
@@ -1275,129 +1806,49 @@ final class CodexUsageStore: @unchecked Sendable {
         let tenMinutesAgo = nowMs - Int64(10 * 60 * 1_000)
         let oneHourAgo = nowMs - Int64(60 * 60 * 1_000)
         let twentyFourHoursAgo = nowMs - Int64(24 * 60 * 60 * 1_000)
-        let todayStart = Calendar.current.startOfDay(for: now)
-        let todayStartMs = Int64((todayStart.timeIntervalSince1970 * 1_000).rounded())
-        let todayStartEpoch = Int(todayStart.timeIntervalSince1970)
-        let query = """
-        WITH current_rows(thread_id, tokens_used, created_at) AS (
-          VALUES \(currentRows.joined(separator: ",\n                 "))
-        ),
-        rows_with_baselines AS (
-          SELECT
-            current_rows.thread_id,
-            current_rows.tokens_used,
-            current_rows.created_at,
-            (
-              SELECT baseline.tokens_used
-              FROM (
-                SELECT h.tokens_used, h.observed_at_ms
-                FROM token_snapshot_history AS h
-                WHERE h.thread_id = current_rows.thread_id
-                  AND h.observed_at_ms <= \(tenMinutesAgo)
-                UNION ALL
-                SELECT s.tokens_used, s.observed_at_ms
-                FROM token_snapshots AS s
-                WHERE s.thread_id = current_rows.thread_id
-                  AND s.observed_at_ms <= \(tenMinutesAgo)
-              ) AS baseline
-              ORDER BY baseline.observed_at_ms DESC
-              LIMIT 1
-            ) AS baseline_10m,
-            (
-              SELECT baseline.tokens_used
-              FROM (
-                SELECT h.tokens_used, h.observed_at_ms
-                FROM token_snapshot_history AS h
-                WHERE h.thread_id = current_rows.thread_id
-                  AND h.observed_at_ms <= \(oneHourAgo)
-                UNION ALL
-                SELECT s.tokens_used, s.observed_at_ms
-                FROM token_snapshots AS s
-                WHERE s.thread_id = current_rows.thread_id
-                  AND s.observed_at_ms <= \(oneHourAgo)
-              ) AS baseline
-              ORDER BY baseline.observed_at_ms DESC
-              LIMIT 1
-            ) AS baseline_1h,
-            (
-              SELECT baseline.tokens_used
-              FROM (
-                SELECT h.tokens_used, h.observed_at_ms
-                FROM token_snapshot_history AS h
-                WHERE h.thread_id = current_rows.thread_id
-                  AND h.observed_at_ms <= \(twentyFourHoursAgo)
-                UNION ALL
-                SELECT s.tokens_used, s.observed_at_ms
-                FROM token_snapshots AS s
-                WHERE s.thread_id = current_rows.thread_id
-                  AND s.observed_at_ms <= \(twentyFourHoursAgo)
-              ) AS baseline
-              ORDER BY baseline.observed_at_ms DESC
-              LIMIT 1
-            ) AS baseline_24h
-            ,
-            (
-              SELECT baseline.tokens_used
-              FROM (
-                SELECT h.tokens_used, h.observed_at_ms
-                FROM token_snapshot_history AS h
-                WHERE h.thread_id = current_rows.thread_id
-                  AND h.observed_at_ms <= \(todayStartMs)
-                UNION ALL
-                SELECT s.tokens_used, s.observed_at_ms
-                FROM token_snapshots AS s
-                WHERE s.thread_id = current_rows.thread_id
-                  AND s.observed_at_ms <= \(todayStartMs)
-              ) AS baseline
-              ORDER BY baseline.observed_at_ms DESC
-              LIMIT 1
-            ) AS baseline_today
-          FROM current_rows
+        let dayStartMs = Int64((Calendar.current.startOfDay(for: now).timeIntervalSince1970 * 1_000).rounded())
+        let records = loadRollingDeltaRows(
+            for: threads,
+            tenMinuteCutoff: tenMinutesAgo,
+            oneHourCutoff: oneHourAgo,
+            dayCutoff: twentyFourHoursAgo,
+            weekCutoff: nil,
+            monthCutoff: nil,
+            todayCutoff: dayStartMs
         )
-        SELECT
-          thread_id,
-          CASE
-            WHEN baseline_10m IS NULL THEN NULL
-            WHEN tokens_used >= baseline_10m THEN tokens_used - baseline_10m
-            ELSE 0
-          END AS delta_10m_tokens,
-          CASE
-            WHEN baseline_1h IS NULL THEN NULL
-            WHEN tokens_used >= baseline_1h THEN tokens_used - baseline_1h
-            ELSE 0
-          END AS delta_1h_tokens,
-          CASE
-            WHEN baseline_24h IS NULL THEN NULL
-            WHEN tokens_used >= baseline_24h THEN tokens_used - baseline_24h
-            ELSE 0
-          END AS delta_24h_tokens,
-          CASE
-            WHEN baseline_today IS NOT NULL AND tokens_used >= baseline_today THEN tokens_used - baseline_today
-            WHEN baseline_today IS NOT NULL THEN 0
-            WHEN created_at >= \(todayStartEpoch) THEN tokens_used
-            ELSE NULL
-          END AS delta_today_tokens
-        FROM rows_with_baselines;
-        """
-
-        guard let records = try? Shell.sqliteJSON(
-            database: deltaDatabase,
-            query: query,
-            as: [TokenDeltaRecord].self,
-            readOnly: true
-        ) else {
-            return [:]
-        }
 
         return Dictionary(
             records.map {
                 (
                     $0.threadId.lowercased(),
                     TokenDeltaWindow(
-                        delta10mTokens: $0.delta10mTokens,
-                        delta1hTokens: $0.delta1hTokens,
-                        delta24hTokens: $0.delta24hTokens,
-                        deltaTodayTokens: $0.deltaTodayTokens
+                        delta10mTokens: rollingDelta(
+                            current: $0.tokensUsed,
+                            baseline: $0.baseline10m,
+                            allowCreatedFallback: false,
+                            createdAtMs: $0.createdAtMs,
+                            cutoffMs: tenMinutesAgo
+                        ),
+                        delta1hTokens: rollingDelta(
+                            current: $0.tokensUsed,
+                            baseline: $0.baseline1h,
+                            allowCreatedFallback: false,
+                            createdAtMs: $0.createdAtMs,
+                            cutoffMs: oneHourAgo
+                        ),
+                        delta24hTokens: rollingDelta(
+                            current: $0.tokensUsed,
+                            baseline: $0.baseline24h,
+                            allowCreatedFallback: false,
+                            createdAtMs: $0.createdAtMs,
+                            cutoffMs: twentyFourHoursAgo
+                        ),
+                        deltaTodayTokens: rollingDelta(
+                            current: $0.tokensUsed,
+                            baseline: $0.baselineToday,
+                            createdAtMs: $0.createdAtMs,
+                            cutoffMs: dayStartMs
+                        )
                     )
                 )
             },
@@ -1405,22 +1856,54 @@ final class CodexUsageStore: @unchecked Sendable {
         )
     }
 
-    private func aggregateTokenDeltas(from deltas: [String: TokenDeltaWindow]) -> TokenDeltaWindow {
-        func sum(_ values: [Int?]) -> Int? {
-            let present = values.compactMap { $0 }
-            guard !present.isEmpty else {
-                return nil
-            }
-            return present.reduce(0, +)
+    private func loadAggregateTokenDeltas(for threads: [ThreadRecord], now: Date) -> TokenDeltaWindow {
+        guard !threads.isEmpty else {
+            return TokenDeltaWindow(delta10mTokens: nil, delta1hTokens: nil)
         }
 
-        let windows = Array(deltas.values)
-        return TokenDeltaWindow(
-            delta10mTokens: sum(windows.map(\.delta10mTokens)),
-            delta1hTokens: sum(windows.map(\.delta1hTokens)),
-            delta24hTokens: sum(windows.map(\.delta24hTokens)),
-            deltaTodayTokens: sum(windows.map(\.deltaTodayTokens))
+        let nowMs = Int64((now.timeIntervalSince1970 * 1_000).rounded())
+        let tenMinutesAgo = nowMs - Int64(10 * 60 * 1_000)
+        let oneHourAgo = nowMs - Int64(60 * 60 * 1_000)
+        let rows = loadRollingDeltaRows(
+            for: threads,
+            tenMinuteCutoff: tenMinutesAgo,
+            oneHourCutoff: oneHourAgo,
+            dayCutoff: nil,
+            weekCutoff: nil,
+            monthCutoff: nil,
+            todayCutoff: nil
         )
+
+        let delta10m = rows.compactMap {
+            rollingDelta(
+                current: $0.tokensUsed,
+                baseline: $0.baseline10m,
+                allowCreatedFallback: false,
+                createdAtMs: $0.createdAtMs,
+                cutoffMs: tenMinutesAgo
+            )
+        }.reduce(0, +)
+        let delta1h = rows.compactMap {
+            rollingDelta(
+                current: $0.tokensUsed,
+                baseline: $0.baseline1h,
+                allowCreatedFallback: false,
+                createdAtMs: $0.createdAtMs,
+                cutoffMs: oneHourAgo
+            )
+        }.reduce(0, +)
+
+        return TokenDeltaWindow(
+            delta10mTokens: delta10m,
+            delta1hTokens: delta1h
+        )
+    }
+
+    private func totalDelta24h(for threads: [ThreadRecord], deltas: [String: TokenDeltaWindow]) -> Int {
+        let trackedIDs = Set(threads.map { $0.id.lowercased() })
+        return trackedIDs.reduce(0) { total, threadID in
+            total + max(0, deltas[threadID]?.delta24hTokens ?? 0)
+        }
     }
 
     private func buildTasks(
@@ -1948,7 +2431,7 @@ final class CodexUsageStore: @unchecked Sendable {
         return nil
     }
 
-    private func candidateRateLimitPaths(from threads: [ThreadRecord], recentLimit: Int = 12) -> [String] {
+    private func candidateRateLimitPaths(from threads: [ThreadRecord], recentLimit: Int = 80) -> [String] {
         var seen = Set<String>()
         var paths: [String] = []
 
@@ -2092,54 +2575,77 @@ final class CodexUsageStore: @unchecked Sendable {
     }
 
     private func loadRateLimits(from paths: [String], source: RateLimitSourcePreference, now: Date) -> RateLimitLoadResult {
-        let local = loadLatestRateLimits(from: paths)
+        let local = loadLatestRateLimits(from: paths, now: now)
         switch source {
         case .appServerFirst:
             let appServer = loadAppServerRateLimits(now: now, allowBlocking: false)
-            if hasRateLimitData(local) {
-                if let appServer, !appServer.sparkQuotaWindows.isEmpty {
+            if let appServer, hasMainRateLimitData(appServer) {
+                return RateLimitLoadResult(
+                    snapshot: appServer.withSparkQuotaWindows(
+                        mergedSparkQuotaWindows(from: [appServer, local], now: now, preferSourceOrder: true)
+                    ),
+                    source: hasAnyRateLimitData(local) ? "app-server-cache+local-jsonl" : "app-server-cache"
+                )
+            }
+
+            if hasMainRateLimitData(local) {
+                if let appServer, hasAnyRateLimitData(appServer) {
                     return RateLimitLoadResult(
                         snapshot: local.withSparkQuotaWindows(
-                            (appServer.sparkQuotaWindows + local.sparkQuotaWindows).deduplicatedSparkQuotaWindows
+                            mergedSparkQuotaWindows(from: [appServer, local], now: now, preferSourceOrder: true)
                         ),
-                        source: local.sparkQuotaWindows.isEmpty ? "local-jsonl+app-server-cache" : "local-jsonl"
+                        source: "local-jsonl+app-server-cache"
                     )
                 }
                 return RateLimitLoadResult(snapshot: local, source: "local-jsonl")
             }
-            if let appServer {
+
+            if let appServer, hasAnyRateLimitData(appServer) {
                 return RateLimitLoadResult(snapshot: appServer, source: "app-server-cache")
             }
-            return RateLimitLoadResult(snapshot: local, source: "none")
+
+            return RateLimitLoadResult(
+                snapshot: local,
+                source: hasAnyRateLimitData(local) ? "local-jsonl" : "none"
+            )
         case .localFilesOnly:
             return RateLimitLoadResult(
                 snapshot: local,
-                source: hasRateLimitData(local) ? "local-jsonl" : "none"
+                source: hasAnyRateLimitData(local) ? "local-jsonl" : "none"
             )
         }
     }
 
-    private func hasRateLimitData(_ snapshot: RateLimitSnapshot) -> Bool {
+    private func hasMainRateLimitData(_ snapshot: RateLimitSnapshot) -> Bool {
         snapshot.primaryPercent != nil
             || snapshot.secondaryPercent != nil
             || snapshot.primaryResetsAt != nil
             || snapshot.secondaryResetsAt != nil
+    }
+
+    private func hasAnyRateLimitData(_ snapshot: RateLimitSnapshot) -> Bool {
+        hasMainRateLimitData(snapshot)
             || !snapshot.sparkQuotaWindows.isEmpty
     }
 
     private func loadLatestRateLimits(from paths: [String]) -> RateLimitSnapshot {
+        loadLatestRateLimits(from: paths, now: Date())
+    }
+
+    private func loadLatestRateLimits(from paths: [String], now: Date) -> RateLimitSnapshot {
         let snapshots = paths
             .filter { !$0.isEmpty && FileManager.default.fileExists(atPath: $0) }
             .compactMap { readRateLimitSnapshot(from: $0) }
-        let sparkQuotaWindows = mergedSparkQuotaWindows(from: snapshots)
+        let sparkQuotaWindows = mergedSparkQuotaWindows(from: snapshots, now: now)
 
         if let codexSnapshot = snapshots
-            .filter(\.isPrimaryCodexLimit)
+            .filter({ $0.isPrimaryCodexLimit && hasMainRateLimitData($0) })
             .max(by: { ($0.capturedAt ?? .distantPast) < ($1.capturedAt ?? .distantPast) }) {
             return codexSnapshot.withSparkQuotaWindows(sparkQuotaWindows)
         }
 
         if let latestSnapshot = snapshots
+            .filter({ hasMainRateLimitData($0) })
             .max(by: { ($0.capturedAt ?? .distantPast) < ($1.capturedAt ?? .distantPast) }) {
             return latestSnapshot.withSparkQuotaWindows(sparkQuotaWindows)
         }
@@ -2155,17 +2661,37 @@ final class CodexUsageStore: @unchecked Sendable {
         )
     }
 
-    private func mergedSparkQuotaWindows(from snapshots: [RateLimitSnapshot]) -> [SparkQuotaWindow] {
-        let sortedSnapshots = snapshots.sorted {
-            ($0.capturedAt ?? .distantPast) > ($1.capturedAt ?? .distantPast)
+    private func mergedSparkQuotaWindows(
+        from snapshots: [RateLimitSnapshot],
+        now: Date = Date(),
+        preferSourceOrder: Bool = false
+    ) -> [SparkQuotaWindow] {
+        let sortedSnapshots = if preferSourceOrder {
+            Array(snapshots.enumerated())
+        } else {
+            snapshots
+                .enumerated()
+                .sorted {
+                    let leftTime = $0.element.capturedAt ?? .distantPast
+                    let rightTime = $1.element.capturedAt ?? .distantPast
+                    if leftTime != rightTime {
+                        return leftTime > rightTime
+                    }
+                    return $0.offset < $1.offset
+                }
         }
         return sortedSnapshots
-            .flatMap(\.sparkQuotaWindows)
+            .flatMap { snapshots in
+                snapshots.element.sparkQuotaWindows
+                    .filter { !$0.isExpired(at: now) }
+            }
             .deduplicatedSparkQuotaWindows
     }
 
     private func displaySparkQuotaWindows(_ snapshot: RateLimitSnapshot, now: Date) -> [SparkQuotaWindow] {
-        snapshot.sparkQuotaWindows.map { window in
+        snapshot.sparkQuotaWindows
+            .filter { !$0.isExpired(at: now) }
+            .map { window in
             SparkQuotaWindow(
                 id: window.id,
                 label: window.label,
@@ -2202,7 +2728,7 @@ final class CodexUsageStore: @unchecked Sendable {
             return nil
         }
 
-        let output = try? Shell.run("/bin/zsh", ["-lc", appServerRateLimitScript()], timeout: 4)
+        let output = try? Shell.run("/bin/zsh", ["-lc", appServerRateLimitScript()], timeout: 8)
         guard let output,
               let snapshot = parseAppServerRateLimits(output: output, now: now) else {
             cacheAppServerRateLimits(.failure, now: now)
@@ -2227,7 +2753,7 @@ final class CodexUsageStore: @unchecked Sendable {
         return """
         {
           printf '%s\\n' '\(initialize)' '\(initialized)' '\(readRateLimits)'
-          sleep 2.2
+          sleep 5.5
         } | '\(appServerExecutable)' app-server --stdio
         """
     }
@@ -2245,7 +2771,7 @@ final class CodexUsageStore: @unchecked Sendable {
             }
 
             let snapshot = result.rateLimitsByLimitId?["codex"] ?? result.rateLimits
-            guard snapshot.limitId == nil || snapshot.limitId == "codex" else {
+            guard isCodexMainRateLimit(snapshot.limitId) else {
                 continue
             }
 
@@ -2353,6 +2879,10 @@ final class CodexUsageStore: @unchecked Sendable {
             return nil
         }
 
+        let meta = sessionMeta(from: rolloutPath)
+        let runtime = sessionRuntimeInfo(from: rolloutPath)
+        let isSubagentSession = meta?.isSubagent == true
+        let isSparkRuntime = isSparkRateLimit(runtime?.model)
         let lines = output.split(separator: "\n", omittingEmptySubsequences: true).reversed()
         for line in lines {
             guard line.contains("\"token_count\""),
@@ -2366,7 +2896,8 @@ final class CodexUsageStore: @unchecked Sendable {
                 continue
             }
 
-            let limitID = rateLimits["limit_id"] as? String
+            let limitID = stringValue(rateLimits["limit_id"])
+            let limitName = stringValue(rateLimits["limit_name"])
             let primary = rateLimits["primary"] as? [String: Any]
             let secondary = rateLimits["secondary"] as? [String: Any]
             let primaryPercent = remainingPercent(fromUsedPercent: primary?["used_percent"])
@@ -2374,6 +2905,11 @@ final class CodexUsageStore: @unchecked Sendable {
             let primaryResetsAt = intValue(primary?["resets_at"])
             let secondaryResetsAt = intValue(secondary?["resets_at"])
             let isSparkLimit = isSparkRateLimit(limitID)
+                || isSparkRateLimit(limitName)
+                || isSparkRuntime
+            let isMainCodexLimit = isCodexMainRateLimit(limitID)
+                && !isSubagentSession
+                && !isSparkRuntime
             let sparkWindows = isSparkLimit
                 ? sparkQuotaWindows(
                     primary: primary,
@@ -2381,14 +2917,14 @@ final class CodexUsageStore: @unchecked Sendable {
                 )
                 : []
 
-            if primaryPercent != nil || secondaryPercent != nil || !sparkWindows.isEmpty {
+            if isMainCodexLimit || !sparkWindows.isEmpty {
                 return RateLimitSnapshot(
-                    primaryPercent: isSparkLimit ? nil : primaryPercent,
-                    secondaryPercent: isSparkLimit ? nil : secondaryPercent,
-                    primaryResetsAt: isSparkLimit ? nil : primaryResetsAt,
-                    secondaryResetsAt: isSparkLimit ? nil : secondaryResetsAt,
+                    primaryPercent: isMainCodexLimit ? primaryPercent : nil,
+                    secondaryPercent: isMainCodexLimit ? secondaryPercent : nil,
+                    primaryResetsAt: isMainCodexLimit ? primaryResetsAt : nil,
+                    secondaryResetsAt: isMainCodexLimit ? secondaryResetsAt : nil,
                     capturedAt: capturedAt,
-                    isPrimaryCodexLimit: limitID == "codex",
+                    isPrimaryCodexLimit: isMainCodexLimit,
                     sparkQuotaWindows: sparkWindows
                 )
             }
@@ -2662,7 +3198,15 @@ final class CodexUsageStore: @unchecked Sendable {
             .replacingOccurrences(of: "_", with: "-")
             .lowercased()
         return normalized.contains("spark")
+            || normalized.contains("bengalfox")
             || normalized.contains("gpt-5.3-codex-spark")
+    }
+
+    private func isCodexMainRateLimit(_ value: String?) -> Bool {
+        value?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "_", with: "-")
+            .lowercased() == "codex"
     }
 
     private func elapsedMilliseconds(since start: Date) -> Int {
@@ -2675,8 +3219,12 @@ private struct FastSnapshotCache {
     let signature: StoreSignature
     let rolloutPaths: [String]
     let threads: [ThreadRecord]
+    let usageThreads: [ThreadRecord]
     let activeThreadIDs: Set<String>
     let rateLimits: RateLimitSnapshot
+    let periodUsage: PeriodUsage
+    let periodUsageQuality: PeriodUsageQuality
+    let dailyUsage: DailyUsage
     let rateLimitSourceName: String
     let rateLimitSource: RateLimitSourcePreference
     let taskHistoryRange: TaskHistoryRange
@@ -2692,8 +3240,75 @@ private struct BuildTasksResult {
     let contextScans: Int
 }
 
-private struct SQLiteTableColumn: Decodable {
-    let name: String
+private struct CumulativeUsageRecord: Decodable {
+    let activeTokens: Int
+    let archivedTokens: Int
+    let allTokens: Int
+    let activeSessions: Int
+    let archivedSessions: Int
+    let allSessions: Int
+
+    enum CodingKeys: String, CodingKey {
+        case activeTokens = "active_tokens"
+        case archivedTokens = "archived_tokens"
+        case allTokens = "all_tokens"
+        case activeSessions = "active_sessions"
+        case archivedSessions = "archived_sessions"
+        case allSessions = "all_sessions"
+    }
+}
+
+private struct RecentUsageRecord: Decodable {
+    let usage20dActiveTokens: Int
+    let usage20dArchivedTokens: Int
+    let usage20dAllTokens: Int
+    let usage20dActiveSessions: Int
+    let usage20dArchivedSessions: Int
+    let usage20dAllSessions: Int
+
+    enum CodingKeys: String, CodingKey {
+        case usage20dActiveTokens = "usage_20d_active_tokens"
+        case usage20dArchivedTokens = "usage_20d_archived_tokens"
+        case usage20dAllTokens = "usage_20d_all_tokens"
+        case usage20dActiveSessions = "usage_20d_active_sessions"
+        case usage20dArchivedSessions = "usage_20d_archived_sessions"
+        case usage20dAllSessions = "usage_20d_all_sessions"
+    }
+}
+
+private struct PeriodUsageRecord: Decodable {
+    let day: Int
+    let week: Int
+    let month: Int
+}
+
+private struct PeriodUsageResult {
+    let usage: PeriodUsage
+    let quality: PeriodUsageQuality
+}
+
+private struct RollingDeltaRecord: Decodable {
+    let threadId: String
+    let tokensUsed: Int
+    let createdAtMs: Int64
+    let baseline10m: Int?
+    let baseline1h: Int?
+    let baseline24h: Int?
+    let baseline7d: Int?
+    let baseline30d: Int?
+    let baselineToday: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case threadId = "thread_id"
+        case tokensUsed = "tokens_used"
+        case createdAtMs = "created_at_ms"
+        case baseline10m = "baseline_10m"
+        case baseline1h = "baseline_1h"
+        case baseline24h = "baseline_24h"
+        case baseline7d = "baseline_7d"
+        case baseline30d = "baseline_30d"
+        case baselineToday = "baseline_today"
+    }
 }
 
 private struct RecentPathsCache {
@@ -2733,15 +3348,27 @@ private struct TokenDeltaRecord: Decodable {
     let delta10mTokens: Int?
     let delta1hTokens: Int?
     let delta24hTokens: Int?
-    let deltaTodayTokens: Int?
 
     enum CodingKeys: String, CodingKey {
         case threadId = "thread_id"
         case delta10mTokens = "delta_10m_tokens"
         case delta1hTokens = "delta_1h_tokens"
         case delta24hTokens = "delta_24h_tokens"
-        case deltaTodayTokens = "delta_today_tokens"
     }
+}
+
+private struct TokenDeltaAggregateRecord: Decodable {
+    let delta10mTokens: Int?
+    let delta1hTokens: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case delta10mTokens = "delta_10m_tokens"
+        case delta1hTokens = "delta_1h_tokens"
+    }
+}
+
+private struct SQLiteNameRecord: Decodable {
+    let name: String
 }
 
 private struct SessionTokenScanResult {
@@ -2756,7 +3383,6 @@ private struct RecentSessionCandidate {
     let sessionID: String
     let modifiedAt: Date
     let updatedAt: Int
-    let createdAt: Int
     let databaseTokens: Int
 }
 

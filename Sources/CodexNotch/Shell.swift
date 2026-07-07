@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import SQLite3
 
 enum ShellError: Error, LocalizedError {
     case launchFailed(String)
@@ -119,6 +120,10 @@ enum Shell {
         return String(output[start...end])
     }
 
+    static func sqliteExec(database: String, query: String) throws {
+        try SQLiteJSONReader.exec(database: database, query: query)
+    }
+
     static func terminateProcessTree(rootPID: pid_t, signal: Int32) {
         for pid in descendantProcessIDs(of: rootPID).reversed() {
             kill(pid, signal)
@@ -171,5 +176,34 @@ enum Shell {
         }
 
         return relationships
+    }
+}
+
+private enum SQLiteJSONReader {
+    static func exec(database: String, query: String) throws {
+        var connection: OpaquePointer?
+        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
+        guard sqlite3_open_v2(database, &connection, flags, nil) == SQLITE_OK,
+              let connection else {
+            let message = connection.map { String(cString: sqlite3_errmsg($0)) } ?? "open failed"
+            if let connection {
+                sqlite3_close(connection)
+            }
+            throw ShellError.nonZeroExit("sqlite3", 1, message)
+        }
+        defer {
+            sqlite3_close(connection)
+        }
+
+        sqlite3_busy_timeout(connection, 1_000)
+        var errorMessage: UnsafeMutablePointer<Int8>?
+        let status = sqlite3_exec(connection, query, nil, nil, &errorMessage)
+        guard status == SQLITE_OK else {
+            let message = errorMessage.map { String(cString: $0) } ?? String(cString: sqlite3_errmsg(connection))
+            if let errorMessage {
+                sqlite3_free(errorMessage)
+            }
+            throw ShellError.nonZeroExit("sqlite3", status, message)
+        }
     }
 }

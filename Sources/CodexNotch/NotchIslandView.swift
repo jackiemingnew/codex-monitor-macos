@@ -275,7 +275,7 @@ struct NotchIslandView: View {
     private var collapsedMetrics: [CollapsedMetric] {
         switch effectiveDisplaySource {
         case .automatic, .codex:
-            let todayTokens = snapshot.usageToday
+            let todayTokens = snapshot.dailyUsage.usageTodayTokens
             var metrics = [
                 CollapsedMetric(
                     id: "5h",
@@ -296,7 +296,7 @@ struct NotchIslandView: View {
                 CollapsedMetric(
                     id: "tok",
                     label: "Today",
-                    value: (todayTokens ?? 0) > 0 ? Formatters.compactTokensEnglish(todayTokens ?? 0) : "--",
+                    value: todayTokens > 0 ? Formatters.compactTokensEnglish(todayTokens) : "--",
                     color: MonitorTheme.textPrimary,
                     labelWidth: 26,
                     valueWidth: 48
