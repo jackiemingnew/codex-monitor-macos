@@ -31,6 +31,8 @@ private struct CollapsedMetric: Identifiable {
     let label: String
     let value: String
     let color: Color
+    var labelWidth: CGFloat? = nil
+    var valueWidth: CGFloat? = nil
 }
 
 private enum MonitorTheme {
@@ -53,6 +55,19 @@ private enum MonitorTheme {
     static let warning = Color(red: 0.92, green: 0.68, blue: 0.42)
     static let critical = Color(red: 0.88, green: 0.45, blue: 0.45)
     static let neutral = Color.white.opacity(0.34)
+
+    static func quotaColor(for percent: Int?) -> Color {
+        guard let percent else {
+            return textTertiary
+        }
+        if percent <= 20 {
+            return critical
+        }
+        if percent <= 40 {
+            return warning
+        }
+        return healthy
+    }
 }
 
 private struct HUDVisualEffectView: NSViewRepresentable {
@@ -162,6 +177,7 @@ struct NotchIslandView: View {
                 .minimumScaleFactor(0.72)
         }
         .layoutPriority(1)
+        .frame(width: collapsedStatusWidth, alignment: .leading)
     }
 
     private var rateLimitBlock: some View {
@@ -171,6 +187,10 @@ struct NotchIslandView: View {
             }
         }
         .layoutPriority(2)
+    }
+
+    private var collapsedStatusWidth: CGFloat? {
+        effectiveDisplaySource == .codex ? 46 : nil
     }
 
     private var effectiveDisplaySource: NotchDisplaySource {
@@ -261,19 +281,25 @@ struct NotchIslandView: View {
                     id: "5h",
                     label: "5h",
                     value: Formatters.percent(snapshot.primaryPercent),
-                    color: MonitorTheme.healthy
+                    color: MonitorTheme.quotaColor(for: snapshot.primaryPercent),
+                    labelWidth: 12,
+                    valueWidth: 32
                 ),
                 CollapsedMetric(
                     id: "7d",
                     label: "7d",
                     value: Formatters.percent(snapshot.secondaryPercent),
-                    color: MonitorTheme.running
+                    color: MonitorTheme.quotaColor(for: snapshot.secondaryPercent),
+                    labelWidth: 12,
+                    valueWidth: 32
                 ),
                 CollapsedMetric(
                     id: "tok",
                     label: "Today",
                     value: (todayTokens ?? 0) > 0 ? Formatters.compactTokensEnglish(todayTokens ?? 0) : "--",
-                    color: MonitorTheme.textPrimary
+                    color: MonitorTheme.textPrimary,
+                    labelWidth: 26,
+                    valueWidth: 48
                 )
             ]
             let usage1h = snapshot.usage1h
@@ -282,15 +308,17 @@ struct NotchIslandView: View {
                     id: "usage1h",
                     label: "1h",
                     value: Formatters.signedCompactTokensEnglish(usage1h),
-                    color: (usage1h ?? 0) > 0 ? MonitorTheme.running : MonitorTheme.textSecondary
+                    color: (usage1h ?? 0) > 0 ? MonitorTheme.running : MonitorTheme.textSecondary,
+                    labelWidth: 12,
+                    valueWidth: 56
                 )
             )
             return metrics
         case .remoteCodex:
             let remote = remoteViewModel.snapshot
             return [
-                CollapsedMetric(id: "ok", label: "正", value: "\(remote.healthyCount)", color: MonitorTheme.healthy),
-                CollapsedMetric(id: "bad", label: "异", value: "\(remote.quotaCount + remote.abnormalCount)", color: collapsedSeverity == .error ? MonitorTheme.critical : MonitorTheme.warning)
+                CollapsedMetric(id: "ok", label: "正", value: "\(remote.healthyCount)", color: MonitorTheme.healthy, labelWidth: 10, valueWidth: 18),
+                CollapsedMetric(id: "bad", label: "异", value: "\(remote.quotaCount + remote.abnormalCount)", color: collapsedSeverity == .error ? MonitorTheme.critical : MonitorTheme.warning, labelWidth: 10, valueWidth: 18)
             ]
         case .newAPI:
             return balanceCollapsedMetrics(newAPIViewModel.snapshot)
@@ -301,8 +329,8 @@ struct NotchIslandView: View {
 
     private func balanceCollapsedMetrics(_ snapshot: BalanceMonitorSnapshot) -> [CollapsedMetric] {
         [
-            CollapsedMetric(id: "\(snapshot.source.rawValue)-accounts", label: "账", value: "\(snapshot.accounts.count)", color: MonitorTheme.healthy),
-            CollapsedMetric(id: "\(snapshot.source.rawValue)-amount", label: "余", value: snapshot.totalAmountText, color: MonitorTheme.running)
+            CollapsedMetric(id: "\(snapshot.source.rawValue)-accounts", label: "账", value: "\(snapshot.accounts.count)", color: MonitorTheme.healthy, labelWidth: 10, valueWidth: 18),
+            CollapsedMetric(id: "\(snapshot.source.rawValue)-amount", label: "余", value: snapshot.totalAmountText, color: MonitorTheme.running, labelWidth: 10, valueWidth: 52)
         ]
     }
 
@@ -318,6 +346,7 @@ private struct CollapsedMetricRow: View {
                 .foregroundStyle(MonitorTheme.textTertiary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.70)
+                .frame(width: metric.labelWidth, alignment: .leading)
 
             Text(metric.value)
                 .font(.system(size: 9.5, weight: .semibold))
@@ -325,6 +354,7 @@ private struct CollapsedMetricRow: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.68)
                 .monospacedDigit()
+                .frame(width: metric.valueWidth, alignment: .trailing)
         }
     }
 }
@@ -770,16 +800,7 @@ struct DetailPanelView: View {
     }
 
     private func quotaColor(for percent: Int?) -> Color {
-        guard let percent else {
-            return MonitorTheme.textTertiary
-        }
-        if percent <= 5 {
-            return MonitorTheme.critical
-        }
-        if percent <= 20 {
-            return MonitorTheme.warning
-        }
-        return MonitorTheme.healthy
+        MonitorTheme.quotaColor(for: percent)
     }
 
     private func quotaResetText(
@@ -1335,26 +1356,42 @@ private struct QuotaBarCell: View {
     let color: Color
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack(alignment: .firstTextBaseline) {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text(label)
                     .font(.system(size: 10.4, weight: .semibold))
                     .foregroundStyle(MonitorTheme.textPrimary)
-                Spacer(minLength: 8)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+                    .allowsTightening(true)
+                    .layoutPriority(0.8)
+                Spacer(minLength: 4)
                 Text(value)
                     .font(.system(size: 10.4, weight: .semibold))
                     .foregroundStyle(color)
                     .monospacedDigit()
-                if let resetText {
-                    Text(resetText)
-                        .font(.system(size: 9.2, weight: .medium))
-                        .foregroundStyle(MonitorTheme.textTertiary)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.72)
-                }
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                    .allowsTightening(true)
+                    .layoutPriority(2)
             }
 
-            CapsuleQuotaBar(value: percent, color: color)
+            HStack(alignment: .center, spacing: 6) {
+                CapsuleQuotaBar(value: percent, color: color)
+                    .layoutPriority(1)
+
+                if let resetText {
+                    Text(resetText)
+                        .font(.system(size: 8.8, weight: .medium))
+                        .foregroundStyle(MonitorTheme.textTertiary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.62)
+                        .allowsTightening(true)
+                        .truncationMode(.tail)
+                        .frame(width: 58, alignment: .trailing)
+                        .layoutPriority(2)
+                }
+            }
         }
         .frame(maxWidth: .infinity)
     }
@@ -1373,9 +1410,10 @@ private struct SparkQuotaChip: View {
             Text(window.remainingText)
                 .font(.system(size: 10, weight: .semibold, design: .rounded))
                 .monospacedDigit()
-                .foregroundStyle(MonitorTheme.running)
+                .foregroundStyle(MonitorTheme.quotaColor(for: window.remainingPercent))
                 .lineLimit(1)
                 .minimumScaleFactor(0.78)
+                .allowsTightening(true)
         }
         .padding(.horizontal, 7)
         .padding(.vertical, 3)
@@ -1408,6 +1446,8 @@ private struct SparkMetricChip: View {
                 .font(.system(size: 9.2, weight: .medium))
                 .foregroundStyle(MonitorTheme.textTertiary)
                 .lineLimit(1)
+                .minimumScaleFactor(0.78)
+                .allowsTightening(true)
 
             Text(value)
                 .font(.system(size: 10, weight: .semibold, design: .rounded))
@@ -1415,6 +1455,7 @@ private struct SparkMetricChip: View {
                 .foregroundStyle(MonitorTheme.textPrimary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.78)
+                .allowsTightening(true)
         }
         .padding(.horizontal, 7)
         .padding(.vertical, 3)
