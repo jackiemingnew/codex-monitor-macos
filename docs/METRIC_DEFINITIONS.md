@@ -39,7 +39,10 @@ adds, removes, renames, or changes the formula for a usage metric in
   and must not be displayed or exported as all-time cumulative totals.
 - `daily.usage_today_tokens` is the local natural-day consumption value. Its
   cutoff is local 00:00, not `now - 24h`; folded/collapsed UI labels named
-  `Today` must use this metric.
+  `Today` and local detail cards labeled `今日` must use this metric.
+- `period.usage_24h` remains a rolling 24 hour export/internal metric. The local
+  Codex detail page does not display it as the first bottom card; that card uses
+  `daily.usage_today_tokens` so visible UI matches the natural-day Today metric.
 - If a parent thread predates a window but has no Swift cache baseline at or
   before the cutoff, `period.*` and `daily.*` must mark the result partial and
   omit that thread from the delta instead of treating the full cumulative total

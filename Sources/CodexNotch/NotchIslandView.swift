@@ -1195,7 +1195,7 @@ struct DetailPanelView: View {
 
     private var periodUsage: some View {
         HStack(spacing: 8) {
-            PeriodUsageCell(label: "24小时", value: Formatters.compactTokens(snapshot.usage24h))
+            PeriodUsageCell(label: "今日", value: Formatters.compactTokens(snapshot.dailyUsage.usageTodayTokens))
             PeriodUsageCell(label: "7天", value: Formatters.compactTokens(snapshot.usage7d))
             PeriodUsageCell(label: "30天", value: Formatters.compactTokens(snapshot.usage30d))
         }

@@ -430,7 +430,7 @@ struct SettingsView: View {
             .pickerStyle(.segmented)
 
             Toggle(isOn: $draft.showPeriodUsage) {
-                HelpLabel(title: "显示 24小时 / 7天 / 30天", help: "控制详情页底部是否显示 Codex 三个时间窗口的 token 用量。")
+                HelpLabel(title: "显示 今日 / 7天 / 30天", help: "控制详情页底部是否显示 Codex token 用量；今日按本地自然日统计。")
             }
             Toggle(isOn: $draft.showSparkQuota) {
                 HelpLabel(title: "显示 GPT-5.3-Codex-Spark 额度", help: "开启后在 Codex 详情页显示 Spark 专属 5小时和7天额度。只复用已有额度数据，不增加刷新频率。")
