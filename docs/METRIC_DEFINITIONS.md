@@ -19,7 +19,7 @@ adds, removes, renames, or changes the formula for a usage metric in
 | `period.usage_24h` | Rolling 24 hour token consumption | Swift delta cache + `state_*.sqlite` current totals | `sum(current parent tokens_used - baseline parent tokens_used at or before now - 24h)` | parent active + archived |
 | `period.usage_7d` | Rolling 7 day token consumption | Swift delta cache + `state_*.sqlite` current totals | `sum(current parent tokens_used - baseline parent tokens_used at or before now - 7d)` | parent active + archived |
 | `period.usage_30d` | Rolling 30 day token consumption | Swift delta cache + `state_*.sqlite` current totals | `sum(current parent tokens_used - baseline parent tokens_used at or before now - 30d)` | parent active + archived |
-| `delta.1h` | Primary visible per-task token increase since the latest baseline older than 1 hour | Swift delta cache | `current parent tokens_used - baseline parent tokens_used` | tracked parent task rows |
+| `delta.1h` | Retained one-hour token increase since the latest baseline older than 1 hour | Swift delta cache | `current parent tokens_used - baseline parent tokens_used` | compatibility exports and internal calculations |
 | `delta.10m` | Legacy/internal token increase since the latest baseline older than 10 minutes | Swift delta cache | `current parent tokens_used - baseline parent tokens_used` | compatibility export fields only |
 | `delta.24h` | Per-task token increase since the latest baseline older than 24 hours | Swift delta cache | `current parent tokens_used - baseline parent tokens_used` | tracked parent task rows |
 | `context.usage_percent` | Optional context-window usage display | rollout JSONL `token_count` tail scan | `last_token_usage.input_tokens / model_context_window` | visible task rows when enabled |
@@ -62,7 +62,8 @@ adds, removes, renames, or changes the formula for a usage metric in
   must use a future independent metric if they become visible.
 - `period.*`, `daily.*`, `delta.*`, and `task.total_tokens` are parent-only.
   Subagent tokens must not be folded into a parent task or period delta.
-- `delta.1h` is the default user-visible task table movement metric.
+- `delta.1h` remains available for compatibility exports and internal
+  calculations, but is not shown in the folded top pill by default.
   `delta.10m` remains available only for compatibility exports and internal
   calculations; it must not be used as the details table movement column.
 - `context.usage_percent` is disabled by default. When enabled, the app may read
@@ -77,6 +78,9 @@ adds, removes, renames, or changes the formula for a usage metric in
 - `quota.spark.5h` and `quota.spark.7d` prefer app-server
   `rateLimitsByLimitId.codex_bengalfox` / `GPT-5.3-Codex-Spark`. Local JSONL
   Spark windows are fallback only.
+- Spark is the only model-specific quota exposed in the current UI and JSON
+  contract. New model-specific quota families must be added through the internal
+  model-quota descriptor path instead of another hard-coded parser branch.
 - Expired or stale local Spark quota windows must be hidden or exported as
   unavailable. They must never be converted into a precise `100%` remaining
   value.

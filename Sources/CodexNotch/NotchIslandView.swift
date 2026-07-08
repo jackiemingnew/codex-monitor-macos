@@ -276,7 +276,7 @@ struct NotchIslandView: View {
         switch effectiveDisplaySource {
         case .automatic, .codex:
             let todayTokens = snapshot.dailyUsage.usageTodayTokens
-            var metrics = [
+            return [
                 CollapsedMetric(
                     id: "5h",
                     label: "5h",
@@ -302,18 +302,6 @@ struct NotchIslandView: View {
                     valueWidth: 48
                 )
             ]
-            let usage1h = snapshot.usage1h
-            metrics.append(
-                CollapsedMetric(
-                    id: "usage1h",
-                    label: "1h",
-                    value: Formatters.signedCompactTokensEnglish(usage1h),
-                    color: (usage1h ?? 0) > 0 ? MonitorTheme.running : MonitorTheme.textSecondary,
-                    labelWidth: 12,
-                    valueWidth: 56
-                )
-            )
-            return metrics
         case .remoteCodex:
             let remote = remoteViewModel.snapshot
             return [

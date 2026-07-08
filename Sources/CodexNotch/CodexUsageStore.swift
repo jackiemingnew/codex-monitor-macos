@@ -33,6 +33,63 @@ final class CodexUsageStore: @unchecked Sendable {
         let payloadStatus: String?
     }
 
+    private struct ModelQuotaFamily {
+        let id: String
+        let displayName: String
+        let matchTerms: [String]
+        let windows: [ModelQuotaWindowSpec]
+
+        func matches(_ values: [String?]) -> Bool {
+            values.contains { value in
+                guard let value else {
+                    return false
+                }
+                let normalized = ModelQuotaFamily.normalized(value)
+                return matchTerms.contains { normalized.contains($0) }
+            }
+        }
+
+        static let spark = ModelQuotaFamily(
+            id: "spark",
+            displayName: "GPT-5.3-Codex-Spark",
+            matchTerms: [
+                "spark",
+                "bengalfox",
+                "gpt-5.3-codex-spark"
+            ],
+            windows: [
+                ModelQuotaWindowSpec(idSuffix: "5h", label: "5h", source: .primary),
+                ModelQuotaWindowSpec(idSuffix: "7d", label: "7d", source: .secondary)
+            ]
+        )
+
+        private static func normalized(_ value: String) -> String {
+            value
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "_", with: "-")
+                .lowercased()
+        }
+    }
+
+    private struct ModelQuotaWindowSpec {
+        enum Source {
+            case primary
+            case secondary
+        }
+
+        let idSuffix: String
+        let label: String
+        let source: Source
+    }
+
+    private struct ModelQuotaWindowSource {
+        let usedPercent: Double?
+        let resetAt: Int?
+        let resetText: String?
+    }
+
+    private static let exposedModelQuotaFamilies: [ModelQuotaFamily] = [.spark]
+
     private let codexDirectory: URL
     private let stateDatabase: String
     private let logsDatabase: String
@@ -2797,65 +2854,79 @@ final class CodexUsageStore: @unchecked Sendable {
 
     private func sparkQuotaWindows(from snapshotsByLimitID: [String: AppServerRateLimitSnapshot]) -> [SparkQuotaWindow] {
         snapshotsByLimitID
-            .filter { key, snapshot in
-                isSparkRateLimit(key)
-                    || isSparkRateLimit(snapshot.limitId)
-                    || isSparkRateLimit(snapshot.limitName)
-            }
             .sorted { lhs, rhs in lhs.key < rhs.key }
-            .flatMap { key, snapshot in
-                sparkQuotaWindows(
-                    limitID: snapshot.limitId ?? key,
-                    primary: snapshot.primary,
-                    secondary: snapshot.secondary
+            .flatMap { key, snapshot -> [SparkQuotaWindow] in
+                guard let family = modelQuotaFamily(
+                    matching: [key, snapshot.limitId, snapshot.limitName],
+                    in: Self.exposedModelQuotaFamilies
+                ) else {
+                    return []
+                }
+                return modelQuotaWindows(
+                    family: family,
+                    windowIDPrefix: snapshot.limitId ?? key,
+                    primary: modelQuotaWindowSource(snapshot.primary),
+                    secondary: modelQuotaWindowSource(snapshot.secondary)
                 )
             }
             .deduplicatedSparkQuotaWindows
     }
 
-    private func sparkQuotaWindows(
-        limitID: String,
-        primary: AppServerRateLimitWindow?,
-        secondary: AppServerRateLimitWindow?
+    private func modelQuotaWindows(
+        family: ModelQuotaFamily,
+        windowIDPrefix: String,
+        primary: ModelQuotaWindowSource?,
+        secondary: ModelQuotaWindowSource?
     ) -> [SparkQuotaWindow] {
-        [
-            sparkQuotaWindow(
-                id: "\(limitID)-5h",
-                label: "5h",
-                usedPercent: primary.map { Double($0.usedPercent) },
-                resetAt: primary?.resetsAt,
-                resetText: nil
-            ),
-            sparkQuotaWindow(
-                id: "\(limitID)-7d",
-                label: "7d",
-                usedPercent: secondary.map { Double($0.usedPercent) },
-                resetAt: secondary?.resetsAt,
-                resetText: nil
+        family.windows.compactMap { spec in
+            let source = switch spec.source {
+            case .primary:
+                primary
+            case .secondary:
+                secondary
+            }
+            return sparkQuotaWindow(
+                id: "\(windowIDPrefix)-\(spec.idSuffix)",
+                label: spec.label,
+                usedPercent: source?.usedPercent,
+                resetAt: source?.resetAt,
+                resetText: source?.resetText
             )
-        ].compactMap { $0 }
+        }
     }
 
     private func sparkQuotaWindows(
         primary: [String: Any]?,
         secondary: [String: Any]?
     ) -> [SparkQuotaWindow] {
-        [
-            sparkQuotaWindow(
-                id: "spark-5h",
-                label: "5h",
-                usedPercent: doubleValue(primary?["used_percent"]),
-                resetAt: intValue(primary?["resets_at"]),
-                resetText: stringValue(primary?["reset_label"])
-            ),
-            sparkQuotaWindow(
-                id: "spark-7d",
-                label: "7d",
-                usedPercent: doubleValue(secondary?["used_percent"]),
-                resetAt: intValue(secondary?["resets_at"]),
-                resetText: stringValue(secondary?["reset_label"])
-            )
-        ].compactMap { $0 }
+        modelQuotaWindows(
+            family: .spark,
+            windowIDPrefix: ModelQuotaFamily.spark.id,
+            primary: modelQuotaWindowSource(primary),
+            secondary: modelQuotaWindowSource(secondary)
+        )
+    }
+
+    private func modelQuotaWindowSource(_ window: AppServerRateLimitWindow?) -> ModelQuotaWindowSource? {
+        guard let window else {
+            return nil
+        }
+        return ModelQuotaWindowSource(
+            usedPercent: Double(window.usedPercent),
+            resetAt: window.resetsAt,
+            resetText: nil
+        )
+    }
+
+    private func modelQuotaWindowSource(_ window: [String: Any]?) -> ModelQuotaWindowSource? {
+        guard let window else {
+            return nil
+        }
+        return ModelQuotaWindowSource(
+            usedPercent: doubleValue(window["used_percent"]),
+            resetAt: intValue(window["resets_at"]),
+            resetText: stringValue(window["reset_label"])
+        )
     }
 
     private func sparkQuotaWindow(
@@ -2880,6 +2951,10 @@ final class CodexUsageStore: @unchecked Sendable {
         )
     }
 
+    private func modelQuotaFamily(matching values: [String?], in families: [ModelQuotaFamily]) -> ModelQuotaFamily? {
+        families.first { $0.matches(values) }
+    }
+
     private func readRateLimitSnapshot(from rolloutPath: String) -> RateLimitSnapshot? {
         guard let output = tokenCountLines(from: rolloutPath, lineLimit: 600) else {
             return nil
@@ -2888,7 +2963,10 @@ final class CodexUsageStore: @unchecked Sendable {
         let meta = sessionMeta(from: rolloutPath)
         let runtime = sessionRuntimeInfo(from: rolloutPath)
         let isSubagentSession = meta?.isSubagent == true
-        let isSparkRuntime = isSparkRateLimit(runtime?.model)
+        let isSparkRuntime = modelQuotaFamily(
+            matching: [runtime?.model],
+            in: Self.exposedModelQuotaFamilies
+        ) != nil
         let lines = output.split(separator: "\n", omittingEmptySubsequences: true).reversed()
         for line in lines {
             guard line.contains("\"token_count\""),
@@ -2910,13 +2988,14 @@ final class CodexUsageStore: @unchecked Sendable {
             let secondaryPercent = remainingPercent(fromUsedPercent: secondary?["used_percent"])
             let primaryResetsAt = intValue(primary?["resets_at"])
             let secondaryResetsAt = intValue(secondary?["resets_at"])
-            let isSparkLimit = isSparkRateLimit(limitID)
-                || isSparkRateLimit(limitName)
-                || isSparkRuntime
+            let sparkFamily = modelQuotaFamily(
+                matching: [limitID, limitName, runtime?.model],
+                in: Self.exposedModelQuotaFamilies
+            )
             let isMainCodexLimit = isCodexMainRateLimit(limitID)
                 && !isSubagentSession
                 && !isSparkRuntime
-            let sparkWindows = isSparkLimit
+            let sparkWindows = sparkFamily != nil
                 ? sparkQuotaWindows(
                     primary: primary,
                     secondary: secondary
@@ -3193,19 +3272,6 @@ final class CodexUsageStore: @unchecked Sendable {
             return nil
         }
         return min(100, max(0, 100 - usedPercent))
-    }
-
-    private func isSparkRateLimit(_ value: String?) -> Bool {
-        guard let value else {
-            return false
-        }
-        let normalized = value
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "_", with: "-")
-            .lowercased()
-        return normalized.contains("spark")
-            || normalized.contains("bengalfox")
-            || normalized.contains("gpt-5.3-codex-spark")
     }
 
     private func isCodexMainRateLimit(_ value: String?) -> Bool {

@@ -326,7 +326,7 @@ let appServerSecondaryReset = Int(appServerFixtureNow.timeIntervalSince1970) + 7
 let appServerSparkPrimaryReset = appServerPrimaryReset + 600
 let appServerSparkSecondaryReset = appServerSecondaryReset + 600
 let appServerRateLimitOutput = """
-{"jsonrpc":"2.0","id":2,"result":{"rateLimits":{"limitId":"codex","limitName":null,"primary":{"usedPercent":17,"windowDurationMins":300,"resetsAt":\(appServerPrimaryReset)},"secondary":{"usedPercent":22,"windowDurationMins":10080,"resetsAt":\(appServerSecondaryReset)}},"rateLimitsByLimitId":{"codex_bengalfox":{"limitId":"codex_bengalfox","limitName":"GPT-5.3-Codex-Spark","primary":{"usedPercent":78,"windowDurationMins":300,"resetsAt":\(appServerSparkPrimaryReset)},"secondary":{"usedPercent":42,"windowDurationMins":10080,"resetsAt":\(appServerSparkSecondaryReset)}},"codex":{"limitId":"codex","limitName":null,"primary":{"usedPercent":17,"windowDurationMins":300,"resetsAt":\(appServerPrimaryReset)},"secondary":{"usedPercent":22,"windowDurationMins":10080,"resetsAt":\(appServerSecondaryReset)}}}}}
+{"jsonrpc":"2.0","id":2,"result":{"rateLimits":{"limitId":"codex","limitName":null,"primary":{"usedPercent":17,"windowDurationMins":300,"resetsAt":\(appServerPrimaryReset)},"secondary":{"usedPercent":22,"windowDurationMins":10080,"resetsAt":\(appServerSecondaryReset)}},"rateLimitsByLimitId":{"codex_bengalfox":{"limitId":"codex_bengalfox","limitName":"GPT-5.3-Codex-Spark","primary":{"usedPercent":78,"windowDurationMins":300,"resetsAt":\(appServerSparkPrimaryReset)},"secondary":{"usedPercent":42,"windowDurationMins":10080,"resetsAt":\(appServerSparkSecondaryReset)}},"codex_luna":{"limitId":"codex_luna","limitName":"GPT-5.6-Codex-Luna","primary":{"usedPercent":12,"windowDurationMins":300,"resetsAt":\(appServerSparkPrimaryReset)},"secondary":{"usedPercent":34,"windowDurationMins":10080,"resetsAt":\(appServerSparkSecondaryReset)}},"codex":{"limitId":"codex","limitName":null,"primary":{"usedPercent":17,"windowDurationMins":300,"resetsAt":\(appServerPrimaryReset)},"secondary":{"usedPercent":22,"windowDurationMins":10080,"resetsAt":\(appServerSecondaryReset)}}}}}
 """
 let appServerSnapshot = runner.require(
     CodexUsageStore().parseAppServerRateLimits(
@@ -341,6 +341,7 @@ runner.check(appServerSnapshot.secondaryPercent == 78, "app-server codex seconda
 runner.check(appServerSnapshot.primaryResetsAt == appServerPrimaryReset, "app-server codex primary reset time should decode")
 runner.check(appServerSnapshot.secondaryResetsAt == appServerSecondaryReset, "app-server codex secondary reset time should decode")
 runner.check(appServerSnapshot.sparkQuotaWindows.map(\.label) == ["5h", "7d"], "app-server Spark quota windows should decode")
+runner.check(appServerSnapshot.sparkQuotaWindows.allSatisfy { !$0.id.contains("luna") }, "app-server unknown model quota windows should not appear in Spark quota windows")
 runner.check(appServerSnapshot.sparkQuotaWindows.first?.remainingPercent == 22, "app-server Spark 5h remaining percent should decode")
 runner.check(appServerSnapshot.sparkQuotaWindows.last?.remainingPercent == 58, "app-server Spark 7d remaining percent should decode")
 
@@ -2388,6 +2389,7 @@ let staleDBTokenSessionID = "019e073a-c032-74e2-966e-b85ede0c9cd2"
 let activeToolCallSessionID = "019e073a-c032-74e2-966e-b85ede0c9cd3"
 let codexQuotaSessionID = "019e073a-c032-74e2-966e-b85ede0c9cdb"
 let sparkQuotaSessionID = "019e073a-c032-74e2-966e-b85ede0c9cda"
+let lunaQuotaSessionID = "019e073a-c032-74e2-966e-b85ede0c9cab"
 let archivedUsageSessionID = "019e073a-c032-74e2-966e-b85ede0c9cdc"
 let archivedOnlyUsageSessionID = "019e073a-c032-74e2-966e-b85ede0c9cdd"
 let sessionDirectory = tempRoot
@@ -2636,6 +2638,22 @@ _ = try Shell.run("/usr/bin/sqlite3", [
     """
 ])
 
+let lunaQuotaPath = sessionDirectory
+    .appendingPathComponent("rollout-2026-06-14T02-20-16-\(lunaQuotaSessionID).jsonl")
+let lunaQuotaBody = """
+{"timestamp":"\(timestamp)","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Luna 额度测试"}]}}
+{"timestamp":"\(timestamp)","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":0}},"rate_limits":{"limit_id":"codex_luna","limit_name":"GPT-5.6-Codex-Luna","primary":{"used_percent":12,"resets_at":\(codexPrimaryReset)},"secondary":{"used_percent":"34","resets_at":\(codexSecondaryReset)}}}}
+"""
+try lunaQuotaBody.write(to: lunaQuotaPath, atomically: true, encoding: .utf8)
+try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: lunaQuotaPath.path)
+_ = try Shell.run("/usr/bin/sqlite3", [
+    stateDatabase,
+    """
+    insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, updated_at, archived)
+    values('\(lunaQuotaSessionID)', 'Luna 额度测试', 0, 'gpt-5.6-luna', 'high', '\(lunaQuotaPath.path)', \(Int(now.timeIntervalSince1970)), 0);
+    """
+])
+
 let archivedUsagePath = sessionDirectory
     .appendingPathComponent("rollout-2026-06-14T02-20-19-\(archivedUsageSessionID).jsonl")
 let archivedUsageBody = """
@@ -2754,6 +2772,7 @@ runner.check(localSnapshot.primaryResetsAt == codexPrimaryReset, "local JSONL Co
 runner.check(localSnapshot.secondaryResetsAt == codexSecondaryReset, "local JSONL Codex quota should expose secondary reset time")
 runner.check(localSnapshot.primaryPercent != 92, "subagent Codex quota should not override the main 5h quota")
 runner.check(localSnapshot.sparkQuotaWindows.map(\.remainingPercent) == [60, 90], "local JSONL Spark quota windows should decode")
+runner.check(localSnapshot.sparkQuotaWindows.allSatisfy { !$0.id.contains("luna") }, "unknown local model quota windows should not appear in Spark quota windows")
 let localContextSnapshot = localStore.loadSnapshot(
     includePeriodUsage: false,
     bypassFastCache: true,
@@ -2779,6 +2798,7 @@ let localSnapshotRecent = localSnapshotJSON?["recent_usage"] as? [String: Any]
 runner.check(localSnapshotJSON?["primary_percent"] as? Int == 67, "compact JSON should expose main Codex 5h quota")
 runner.check(localSnapshotJSON?["secondary_percent"] as? Int == 45, "compact JSON should expose main Codex 7d quota")
 runner.check(localSnapshotSparkWindows?.compactMap { $0["remaining_percent"] as? Int } == [60, 90], "compact JSON should keep Spark quota separate")
+runner.check(localSnapshotSparkWindows?.allSatisfy { !(($0["id"] as? String) ?? "").contains("luna") } == true, "compact JSON should not expose unknown model quota as Spark")
 let staleSparkNow = Date(timeIntervalSince1970: 1_790_000_000)
 let staleSparkRoot = URL(fileURLWithPath: NSTemporaryDirectory())
     .appendingPathComponent("CodexNotchStaleSpark-\(UUID().uuidString)")
