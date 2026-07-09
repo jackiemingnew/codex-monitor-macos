@@ -66,6 +66,28 @@ runner.check(QuotaDisplayLevel.level(for: 40) == .warning, "40 percent quota sho
 runner.check(QuotaDisplayLevel.level(for: 41) == .healthy, "41 percent quota should use healthy display level")
 runner.check(QuotaDisplayLevel.level(for: 100) == .healthy, "full quota should use healthy display level")
 
+let quotaBoundaryNow = Date(timeIntervalSince1970: 1_783_000_000)
+let preciseQuotaSnapshot = RateLimitSnapshot(
+    primaryPercent: 99,
+    secondaryPercent: 100,
+    primaryResetsAt: 1_783_003_600,
+    secondaryResetsAt: 1_783_003_600,
+    capturedAt: quotaBoundaryNow,
+    isPrimaryCodexLimit: true
+)
+runner.check(
+    preciseQuotaSnapshot.primaryDisplayPercent(now: quotaBoundaryNow) == 99,
+    "future quota windows should preserve an exact 99 percent remaining value"
+)
+runner.check(
+    preciseQuotaSnapshot.secondaryDisplayPercent(now: quotaBoundaryNow) == 100,
+    "future quota windows should preserve an exact 100 percent remaining value"
+)
+runner.check(
+    preciseQuotaSnapshot.primaryDisplayPercent(now: Date(timeIntervalSince1970: 1_783_003_600)) == 100,
+    "expired quota windows should display as reset to 100 percent"
+)
+
 let snapshotFormatterTask = CodexTask(
     id: "snapshot-task",
     title: "父任务",

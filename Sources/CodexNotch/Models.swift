@@ -741,18 +741,15 @@ struct RateLimitSnapshot: Equatable {
     }
 
     func primaryDisplayPercent(now: Date = Date()) -> Int? {
-        displayPercent(primaryPercent, resetsAt: primaryResetsAt, now: now)
+        Self.effectiveRemainingPercent(primaryPercent, resetsAt: primaryResetsAt, now: now)
     }
 
     func secondaryDisplayPercent(now: Date = Date()) -> Int? {
-        displayPercent(secondaryPercent, resetsAt: secondaryResetsAt, now: now)
+        Self.effectiveRemainingPercent(secondaryPercent, resetsAt: secondaryResetsAt, now: now)
     }
 
-    private func displayPercent(_ percent: Int?, resetsAt: Int?, now: Date) -> Int? {
+    static func effectiveRemainingPercent(_ percent: Int?, resetsAt: Int?, now: Date) -> Int? {
         if let resetsAt, Int(now.timeIntervalSince1970) >= resetsAt {
-            return 100
-        }
-        if let percent, percent >= 99 {
             return 100
         }
         return percent

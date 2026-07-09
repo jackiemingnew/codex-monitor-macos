@@ -2714,8 +2714,16 @@ final class CodexUsageStore: @unchecked Sendable {
         fallback: (percent: Int?, resetsAt: Int?),
         now: Date
     ) -> (percent: Int?, resetsAt: Int?) {
-        let preferredDisplay = displayPercent(preferred.percent, resetsAt: preferred.resetsAt, now: now)
-        let fallbackDisplay = displayPercent(fallback.percent, resetsAt: fallback.resetsAt, now: now)
+        let preferredDisplay = RateLimitSnapshot.effectiveRemainingPercent(
+            preferred.percent,
+            resetsAt: preferred.resetsAt,
+            now: now
+        )
+        let fallbackDisplay = RateLimitSnapshot.effectiveRemainingPercent(
+            fallback.percent,
+            resetsAt: fallback.resetsAt,
+            now: now
+        )
 
         guard let preferredDisplay else {
             return fallback
@@ -2725,16 +2733,6 @@ final class CodexUsageStore: @unchecked Sendable {
         }
 
         return fallbackDisplay < preferredDisplay ? fallback : preferred
-    }
-
-    private func displayPercent(_ percent: Int?, resetsAt: Int?, now: Date) -> Int? {
-        if let resetsAt, Int(now.timeIntervalSince1970) >= resetsAt {
-            return 100
-        }
-        if let percent, percent >= 99 {
-            return 100
-        }
-        return percent
     }
 
     private func hasMainRateLimitData(_ snapshot: RateLimitSnapshot) -> Bool {
