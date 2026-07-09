@@ -2508,7 +2508,7 @@ let codexSecondaryReset = Int(now.timeIntervalSince1970) + 7 * 24 * 60 * 60
 let subagentPrimaryReset = codexPrimaryReset + 600
 let subagentSecondaryReset = codexSecondaryReset + 600
 let rolloutBody = """
-{"timestamp":"\(timestamp)","type":"turn_context","payload":{"model":"gpt-5.5","effort":"xhigh","collaboration_mode":{"settings":{"reasoning_effort":"xhigh"}}}}
+{"timestamp":"\(timestamp)","type":"turn_context","payload":{"model":"gpt-5.6-sol","effort":"ultra","collaboration_mode":{"settings":{"reasoning_effort":"ultra"}}}}
 {"timestamp":"\(timestamp)","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"正在运行的 Codex 任务"}]}}
 {"timestamp":"\(timestamp)","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":90000}}}}
 {"timestamp":"\(timestamp)","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":60000,"total_tokens":12345},"model_context_window":240000}}}
@@ -2721,7 +2721,7 @@ _ = try Shell.run("/usr/bin/sqlite3", [
     stateDatabase,
     """
     insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, updated_at, archived)
-    values('\(codexQuotaSessionID)', 'Codex 额度恢复时间测试', 0, 'gpt-5.5', 'high', '\(codexQuotaPath.path)', \(Int(now.timeIntervalSince1970)), 0);
+    values('\(codexQuotaSessionID)', 'Codex 额度恢复时间测试', 0, 'gpt-5.6-sol', 'ultra', '\(codexQuotaPath.path)', \(Int(now.timeIntervalSince1970)), 0);
     """
 ])
 
@@ -2869,8 +2869,8 @@ runner.check(pollutedDeltaTask.tokenCount == 162000000, "parent task total shoul
 runner.check(pollutedDeltaTask.delta1hTokens == 0, "parent 1 hour delta should not include subagent token totals")
 runner.check(pollutedDeltaTask.todayTokens == 0, "parent Today delta should not include subagent token totals")
 runner.check(pollutedDeltaTask.todaySharePercent == 0, "zero Today delta should not clamp to a false 100 percent share")
-runner.check(localSnapshot.primaryPercent == 67, "local JSONL Codex quota should expose main 5h quota")
-runner.check(localSnapshot.secondaryPercent == 45, "local JSONL Codex quota should expose main 7d quota")
+runner.check(localSnapshot.primaryPercent == 67, "GPT-5.6 Sol local JSONL should expose the main Codex 5h quota")
+runner.check(localSnapshot.secondaryPercent == 45, "GPT-5.6 Sol local JSONL should expose the main Codex 7d quota")
 runner.check(localSnapshot.primaryResetsAt == codexPrimaryReset, "local JSONL Codex quota should expose primary reset time")
 runner.check(localSnapshot.secondaryResetsAt == codexSecondaryReset, "local JSONL Codex quota should expose secondary reset time")
 runner.check(localSnapshot.primaryPercent != 92, "subagent Codex quota should not override the main 5h quota")
@@ -3258,7 +3258,7 @@ runner.check(expiredLocalQuotaSnapshot.secondaryPercent == 100, "expired local 7
 runner.check(expiredLocalQuotaSnapshot.secondaryResetsAt == appServerSecondaryReset, "expired local 7d reset time should not replace the app-server reset time")
 runner.check(localSnapshot.tasks.contains { $0.id == sessionID && $0.status == .running }, "recent session rollout should appear in running task list")
 runner.check(localSnapshot.tasks.first { $0.id == sessionID }?.title == "正在运行的 Codex 任务", "session rollout should use the user message as task title")
-runner.check(localSnapshot.tasks.first { $0.id == sessionID }?.detail.contains("gpt-5.5 · 超高推理") == true, "session rollout should use turn context model and effort")
+runner.check(localSnapshot.tasks.first { $0.id == sessionID }?.detail.contains("gpt-5.6-sol · 极致推理") == true, "GPT-5.6 Sol session rollout should localize the ultra effort")
 runner.check(!localSnapshot.tasks.contains { $0.id == subagentSessionID }, "subagent rollout should not appear as a separate local task")
 runner.check(!localSnapshot.tasks.contains { $0.id == parentOnlySubagentID }, "subagent-only activity should still hide the child task")
 runner.check(!localSnapshot.tasks.contains { $0.id == longMetaSubagentID }, "subagent rollout with long session metadata should still hide the child task")
