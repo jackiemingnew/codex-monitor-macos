@@ -566,10 +566,10 @@ struct DetailPanelView: View {
         }
         .padding(3)
         .frame(height: IslandMetrics.detailPageSwitcherHeight)
-        .background(MonitorTheme.controlFill, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .background(MonitorTheme.controlFill, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.control, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .stroke(MonitorTheme.hairline, lineWidth: 0.6)
+            RoundedRectangle(cornerRadius: MonitorTheme.Radius.control, style: .continuous)
+                .stroke(MonitorTheme.hairline, lineWidth: MonitorTheme.Stroke.hairline)
         )
     }
 
@@ -666,10 +666,10 @@ struct DetailPanelView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .background(MonitorTheme.sectionFill, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(MonitorTheme.sectionFill, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.section, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(MonitorTheme.hairline, lineWidth: 0.6)
+            RoundedRectangle(cornerRadius: MonitorTheme.Radius.section, style: .continuous)
+                .stroke(MonitorTheme.hairline, lineWidth: MonitorTheme.Stroke.hairline)
         )
     }
 
@@ -697,10 +697,10 @@ struct DetailPanelView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
-        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.control, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .stroke(MonitorTheme.hairline, lineWidth: 0.6)
+            RoundedRectangle(cornerRadius: MonitorTheme.Radius.control, style: .continuous)
+                .stroke(MonitorTheme.hairline, lineWidth: MonitorTheme.Stroke.hairline)
         )
     }
 
@@ -724,10 +724,10 @@ struct DetailPanelView: View {
                 }
             }
         }
-        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.section, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(MonitorTheme.hairline, lineWidth: 0.6)
+            RoundedRectangle(cornerRadius: MonitorTheme.Radius.section, style: .continuous)
+                .stroke(MonitorTheme.hairline, lineWidth: MonitorTheme.Stroke.hairline)
         )
     }
 
@@ -903,10 +903,10 @@ struct DetailPanelView: View {
                 }
             }
         }
-        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.section, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(MonitorTheme.hairline, lineWidth: 0.6)
+            RoundedRectangle(cornerRadius: MonitorTheme.Radius.section, style: .continuous)
+                .stroke(MonitorTheme.hairline, lineWidth: MonitorTheme.Stroke.hairline)
         )
     }
 
@@ -1039,10 +1039,10 @@ struct DetailPanelView: View {
         }
         .padding(.horizontal, 10)
         .frame(minHeight: 50)
-        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(MonitorTheme.hairline, lineWidth: 0.6)
+            RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous)
+                .stroke(MonitorTheme.hairline, lineWidth: MonitorTheme.Stroke.hairline)
         )
     }
 
@@ -1089,10 +1089,10 @@ struct DetailPanelView: View {
         }
         .padding(.horizontal, 10)
         .frame(minHeight: 50)
-        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(MonitorTheme.hairline, lineWidth: 0.6)
+            RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous)
+                .stroke(MonitorTheme.hairline, lineWidth: MonitorTheme.Stroke.hairline)
         )
     }
 
@@ -1106,10 +1106,10 @@ struct DetailPanelView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
-        .background(MonitorTheme.warning.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background(MonitorTheme.warning.opacity(0.08), in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(MonitorTheme.warning.opacity(0.16), lineWidth: 0.6)
+            RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous)
+                .stroke(MonitorTheme.warning.opacity(0.16), lineWidth: MonitorTheme.Stroke.hairline)
         )
     }
 
@@ -1151,10 +1151,10 @@ struct DetailPanelView: View {
         }
         .padding(.horizontal, 10)
         .frame(height: 36)
-        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(MonitorTheme.hairline, lineWidth: 0.6)
+            RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous)
+                .stroke(MonitorTheme.hairline, lineWidth: MonitorTheme.Stroke.hairline)
         )
     }
 
@@ -1177,7 +1177,7 @@ private struct PageSwitcherButton: View {
     var body: some View {
         Button(action: action) {
             ZStack {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                RoundedRectangle(cornerRadius: MonitorTheme.Radius.segment, style: .continuous)
                     .fill(isSelected ? MonitorTheme.controlSelectedFill : Color.clear)
 
                 Text(title)
@@ -1375,7 +1375,7 @@ private struct SparkQuotaChip: View {
         .background(MonitorTheme.controlFill, in: Capsule())
         .overlay(
             Capsule()
-                .stroke(MonitorTheme.hairline, lineWidth: 0.6)
+                .stroke(MonitorTheme.hairline, lineWidth: MonitorTheme.Stroke.hairline)
         )
         .help(helpText)
     }
@@ -1417,7 +1417,7 @@ private struct SparkMetricChip: View {
         .background(MonitorTheme.controlFill, in: Capsule())
         .overlay(
             Capsule()
-                .stroke(MonitorTheme.hairline, lineWidth: 0.6)
+                .stroke(MonitorTheme.hairline, lineWidth: MonitorTheme.Stroke.hairline)
         )
     }
 }
@@ -1660,10 +1660,10 @@ private struct TaskRow: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
-        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(MonitorTheme.hairline, lineWidth: 0.6)
+            RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous)
+                .stroke(MonitorTheme.hairline, lineWidth: MonitorTheme.Stroke.hairline)
         )
     }
 
@@ -1698,10 +1698,14 @@ private struct RemoteAccountRow: View {
                     if let planLabel = account.planLabel {
                         Text(planLabel)
                             .font(.system(size: 8.5, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.black.opacity(0.84))
+                            .foregroundStyle(MonitorTheme.textSecondary)
                             .padding(.horizontal, 5)
                             .padding(.vertical, 2)
-                            .background(Color(red: 0.98, green: 0.86, blue: 0.36), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                            .background(MonitorTheme.controlFill, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.chip, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: MonitorTheme.Radius.chip, style: .continuous)
+                                    .stroke(MonitorTheme.hairline, lineWidth: MonitorTheme.Stroke.hairline)
+                            )
                     }
 
                     Text(account.detailText)
@@ -1728,10 +1732,10 @@ private struct RemoteAccountRow: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .frame(minHeight: quotaWindows.count > 2 ? 74 : 62)
-        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(MonitorTheme.hairline, lineWidth: 0.6)
+            RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous)
+                .stroke(MonitorTheme.hairline, lineWidth: MonitorTheme.Stroke.hairline)
         )
     }
 
@@ -1824,10 +1828,10 @@ private struct BalanceAccountRow: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .frame(height: 62)
-        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(MonitorTheme.hairline, lineWidth: 0.6)
+            RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous)
+                .stroke(MonitorTheme.hairline, lineWidth: MonitorTheme.Stroke.hairline)
         )
     }
 }
@@ -1847,10 +1851,10 @@ private struct RemoteSummaryCell: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 7)
-        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(MonitorTheme.hairline, lineWidth: 0.6)
+            RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous)
+                .stroke(MonitorTheme.hairline, lineWidth: MonitorTheme.Stroke.hairline)
         )
     }
 }
@@ -1871,10 +1875,10 @@ private struct PeriodUsageCell: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 7)
-        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(MonitorTheme.hairline, lineWidth: 0.6)
+            RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous)
+                .stroke(MonitorTheme.hairline, lineWidth: MonitorTheme.Stroke.hairline)
         )
     }
 }
@@ -1898,10 +1902,10 @@ private struct RadarSummaryCell: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 8)
-        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(MonitorTheme.hairline, lineWidth: 0.6)
+            RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous)
+                .stroke(MonitorTheme.hairline, lineWidth: MonitorTheme.Stroke.hairline)
         )
     }
 }

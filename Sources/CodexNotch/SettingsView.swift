@@ -484,8 +484,8 @@ struct SettingsView: View {
             .disabled(!draft.remoteMonitorEnabled)
 
             Text("地址、认证信息和刷新配置仅在点击保存后生效。")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.secondary)
+                .font(MonitorTheme.Typography.settingsHelper)
+                .foregroundStyle(MonitorTheme.settingsTextSecondary)
 
             intervalStepper("账号刷新", value: $draft.cliproxyRefreshInterval, range: 60...3_600, help: "远程账号状态的读取间隔。CPA Manager Plus 的巡检结果由服务端产生，这里只是读取频率。")
                 .disabled(!draft.remoteMonitorEnabled)
@@ -501,8 +501,8 @@ struct SettingsView: View {
 
             if draft.remoteMonitorEnabled, let error = settings.cliproxyKeychainError {
                 Text("管理密钥保存失败：\(error)")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.red.opacity(0.85))
+                    .font(MonitorTheme.Typography.settingsHelper)
+                    .foregroundStyle(MonitorTheme.settingsError)
             }
         }
     }
@@ -515,8 +515,8 @@ struct SettingsView: View {
             }
 
             Text("默认使用 CodexRadar API；没有本机 token 时会自动降级到 public summary。每天最多两次自动刷新：北京时间 08:20 和 14:20。")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.secondary)
+                .font(MonitorTheme.Typography.settingsHelper)
+                .foregroundStyle(MonitorTheme.settingsTextSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             labeledSecureField(
@@ -529,15 +529,15 @@ struct SettingsView: View {
 
             if let codexRadarTokenError {
                 Text("Radar token 保存失败：\(codexRadarTokenError)")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.red.opacity(0.85))
+                    .font(MonitorTheme.Typography.settingsHelper)
+                    .foregroundStyle(MonitorTheme.settingsError)
             }
 
             HStack {
                 HelpLabel(title: "数据源", help: "有 token 时读取 https://codexradar.com/api/v1/current；没有 token 时读取 https://codexradar.com/current.json。不会缓存 Authorization header。")
                 Spacer()
                 Text(codexRadarStatusText)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(MonitorTheme.Typography.settingsStatus)
                     .foregroundStyle(codexRadarStatusColor)
                     .lineLimit(1)
                 Button("刷新 Radar") {
@@ -549,7 +549,7 @@ struct SettingsView: View {
 
         Section("归属") {
             Text(CodexRadarSnapshot.defaultAttributionText)
-                .font(.system(size: 12, weight: .semibold))
+                .font(MonitorTheme.Typography.settingsControl)
             Link("打开 codexradar.com", destination: CodexRadarSnapshot.siteURL)
         }
     }
@@ -578,8 +578,8 @@ struct SettingsView: View {
             .pickerStyle(.segmented)
 
             Text("本机数据库会把密钥保存到当前用户的 Application Support 目录，仅当前 macOS 用户可读写。")
-                .font(.system(size: 10.5, weight: .medium))
-                .foregroundStyle(.secondary)
+                .font(MonitorTheme.Typography.settingsCaption)
+                .foregroundStyle(MonitorTheme.settingsTextSecondary)
 
             Toggle(isOn: $draft.launchAtLoginEnabled) {
                 HelpLabel(title: "开机自启", help: "登录 macOS 后自动启动 codex监测。保存时才会调用系统启动项接口。")
@@ -590,14 +590,14 @@ struct SettingsView: View {
 
             if let error = settings.launchAtLoginError {
                 Text("开机自启设置失败：\(error)")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.red.opacity(0.85))
+                    .font(MonitorTheme.Typography.settingsHelper)
+                    .foregroundStyle(MonitorTheme.settingsError)
             }
 
             if let error = settings.secretStorageError {
                 Text("密钥存储切换失败：\(error)")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.red.opacity(0.85))
+                    .font(MonitorTheme.Typography.settingsHelper)
+                    .foregroundStyle(MonitorTheme.settingsError)
             }
         }
     }
@@ -610,10 +610,10 @@ struct SettingsView: View {
 
                     VStack(alignment: .leading, spacing: 4) {
                         Text("codex监测")
-                            .font(.system(size: 18, weight: .bold))
+                            .font(MonitorTheme.Typography.settingsTitle)
                         Text("Mac 刘海屏上的 Codex 与远程账号监测工具")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(.secondary)
+                            .font(MonitorTheme.Typography.settingsSubtitle)
+                            .foregroundStyle(MonitorTheme.settingsTextSecondary)
                     }
 
                     Spacer()
@@ -626,8 +626,8 @@ struct SettingsView: View {
                 infoRow(title: "远程监测", value: "CLIProxyAPI、CPA Manager Plus、NewAPI、Sub2API")
 
                 Text("codex监测用于在 Mac 刘海屏区域展示 Codex 本机状态、额度用量和远程账号监测信息。")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .font(MonitorTheme.Typography.settingsHelper)
+                    .foregroundStyle(MonitorTheme.settingsTextSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.top, 2)
             }
@@ -638,12 +638,12 @@ struct SettingsView: View {
     private func infoRow(title: String, value: String) -> some View {
         HStack(alignment: .firstTextBaseline) {
             Text(title)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.secondary)
+                .font(MonitorTheme.Typography.settingsControl)
+                .foregroundStyle(MonitorTheme.settingsTextSecondary)
                 .frame(width: 72, alignment: .leading)
             Text(value)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.primary)
+                .font(MonitorTheme.Typography.settingsControl)
+                .foregroundStyle(MonitorTheme.settingsTextPrimary)
                 .textSelection(.enabled)
             Spacer()
         }
@@ -657,7 +657,7 @@ struct SettingsView: View {
                     draft.applyPreset(preset)
                 } label: {
                     Text(preset.title)
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(MonitorTheme.Typography.settingsControl)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 8)
                         .background(
@@ -680,9 +680,9 @@ struct SettingsView: View {
             HelpLabel(title: title, help: help)
             Spacer()
             Text(intervalText(value.wrappedValue))
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .font(MonitorTheme.Typography.settingsControl.monospacedDigit())
                 .monospacedDigit()
-                .foregroundStyle(.secondary)
+                .foregroundStyle(MonitorTheme.settingsTextSecondary)
                 .frame(width: 58, alignment: .trailing)
             Stepper("", value: value, in: range, step: 1)
                 .labelsHidden()
@@ -738,8 +738,8 @@ struct SettingsView: View {
             }
 
             Text("地址、认证信息和刷新配置仅在点击保存后生效。")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.secondary)
+                .font(MonitorTheme.Typography.settingsHelper)
+                .foregroundStyle(MonitorTheme.settingsTextSecondary)
 
             intervalStepper("余额刷新", value: refreshInterval, range: 60...3_600, help: "\(title) 所有账号余额的刷新间隔。")
                 .disabled(!enabled.wrappedValue)
@@ -765,8 +765,8 @@ struct SettingsView: View {
 
             if enabled.wrappedValue, let keychainError {
                 Text("认证信息保存失败：\(keychainError)")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.red.opacity(0.85))
+                    .font(MonitorTheme.Typography.settingsHelper)
+                    .foregroundStyle(MonitorTheme.settingsError)
             }
         }
 
@@ -789,7 +789,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text("账号列表")
-                    .font(.system(size: 12, weight: .bold))
+                    .font(MonitorTheme.Typography.settingsSectionTitle)
                 Spacer()
                 Button {
                     startAddingAccount(source: source)
@@ -809,12 +809,12 @@ struct SettingsView: View {
                 VStack(spacing: 8) {
                     Image(systemName: "person.crop.circle.badge.plus")
                         .font(.system(size: 24, weight: .semibold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(MonitorTheme.settingsTextSecondary)
                     Text("还没有配置账号")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(MonitorTheme.Typography.settingsControl)
                     Text("点击右上角“添加账号”配置面板地址和认证信息。")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
+                        .font(MonitorTheme.Typography.settingsHelper)
+                        .foregroundStyle(MonitorTheme.settingsTextSecondary)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 30)
@@ -846,7 +846,7 @@ struct SettingsView: View {
         .background(MonitorTheme.settingsSurfaceFill, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous)
-                .stroke(MonitorTheme.settingsHairline, lineWidth: 1)
+                .stroke(MonitorTheme.settingsHairline, lineWidth: MonitorTheme.Stroke.settingsHairline)
         )
         .disabled(!enabled)
     }
@@ -882,31 +882,31 @@ struct SettingsView: View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(account.displayLabel)
-                    .font(.system(size: 11.5, weight: .semibold))
+                    .font(MonitorTheme.Typography.settingsAccountTitle)
                     .lineLimit(1)
                 Text(account.enabled ? "已启用" : "已停用")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(account.enabled ? Color.green : .secondary)
+                    .font(MonitorTheme.Typography.settingsCaption)
+                    .foregroundStyle(account.enabled ? MonitorTheme.settingsSuccess : MonitorTheme.settingsTextSecondary)
             }
             .frame(width: 92, alignment: .leading)
 
             Text(account.panelURL.isEmpty ? "未填写" : account.panelURL)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(account.panelURL.isEmpty ? .secondary : .primary)
+                .font(MonitorTheme.Typography.settingsAccountMeta)
+                .foregroundStyle(account.panelURL.isEmpty ? MonitorTheme.settingsTextSecondary : MonitorTheme.settingsTextPrimary)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             Text(account.username.isEmpty ? "未填写" : account.username)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(account.username.isEmpty ? .secondary : .primary)
+                .font(MonitorTheme.Typography.settingsAccountMeta)
+                .foregroundStyle(account.username.isEmpty ? MonitorTheme.settingsTextSecondary : MonitorTheme.settingsTextPrimary)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(width: 104, alignment: .leading)
 
             Text(account.thresholdSummary(defaults: defaults))
-                .font(.system(size: 10.5, weight: .medium))
-                .foregroundStyle(.secondary)
+                .font(MonitorTheme.Typography.settingsCaption)
+                .foregroundStyle(MonitorTheme.settingsTextSecondary)
                 .lineLimit(2)
                 .frame(width: 132, alignment: .leading)
 
@@ -916,7 +916,7 @@ struct SettingsView: View {
                 Button("删除", role: .destructive, action: onDelete)
             }
             .buttonStyle(.borderless)
-            .font(.system(size: 10.5, weight: .semibold))
+            .font(MonitorTheme.Typography.settingsCaption.weight(.semibold))
             .frame(width: 118, alignment: .trailing)
         }
         .padding(.horizontal, 12)
@@ -929,10 +929,10 @@ struct SettingsView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(accountEditorID == nil ? "添加 \(source.title) 账号" : "修改 \(source.title) 账号")
-                        .font(.system(size: 17, weight: .bold))
+                        .font(MonitorTheme.Typography.settingsTitle)
                     Text("账号配置只会在点击“保存账号”后写入当前设置草稿。")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
+                        .font(MonitorTheme.Typography.settingsHelper)
+                        .foregroundStyle(MonitorTheme.settingsTextSecondary)
                 }
                 Spacer()
             }
@@ -1004,8 +1004,8 @@ struct SettingsView: View {
 
             if let accountEditorValidationMessage {
                 Text(accountEditorValidationMessage)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.red)
+                    .font(MonitorTheme.Typography.settingsStatus)
+                    .foregroundStyle(MonitorTheme.settingsError)
             }
 
             HStack {
@@ -1052,8 +1052,8 @@ struct SettingsView: View {
             thresholdFieldRow("提醒阈值", value: warning, help: "余额低于这个值时显示黄灯提醒。")
             thresholdFieldRow("告警阈值", value: alert, help: "余额低于这个值时显示红灯告警。必须小于提醒阈值。")
             Text(validationMessage ?? footnote)
-                .font(.system(size: 10.5, weight: .medium))
-                .foregroundStyle(validationMessage == nil ? Color.secondary : Color.red)
+                .font(MonitorTheme.Typography.settingsCaption)
+                .foregroundStyle(validationMessage == nil ? MonitorTheme.settingsTextSecondary : MonitorTheme.settingsError)
         }
     }
 
@@ -1289,12 +1289,12 @@ struct SettingsView: View {
             if hasChanges {
                 if let thresholdValidationMessage {
                     Text(thresholdValidationMessage)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.red)
+                        .font(MonitorTheme.Typography.settingsStatus)
+                        .foregroundStyle(MonitorTheme.settingsError)
                 } else {
                     Text("有未保存更改")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.orange)
+                        .font(MonitorTheme.Typography.settingsStatus)
+                        .foregroundStyle(MonitorTheme.settingsWarning)
                 }
             }
 
@@ -1323,8 +1323,8 @@ struct SettingsView: View {
             HelpLabel(title: "CLIProxyAPI 状态", help: "显示当前保存配置下的 CLIProxyAPI 读取状态。修改地址、认证信息或数据源后需要先保存再刷新。")
             Spacer()
             Text(hasRemoteChanges ? "保存后生效" : remoteStatusText)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(hasRemoteChanges ? .orange : remoteStatusColor)
+                .font(MonitorTheme.Typography.settingsStatus)
+                .foregroundStyle(hasRemoteChanges ? MonitorTheme.settingsWarning : remoteStatusColor)
                 .lineLimit(1)
             Button("刷新 CLIProxyAPI") {
                 remoteViewModel.refreshNow()
@@ -1343,8 +1343,8 @@ struct SettingsView: View {
             HelpLabel(title: "\(source.title) 状态", help: "显示当前保存配置下的 \(source.title) 余额读取状态。修改地址或认证信息后需要先保存再刷新。")
             Spacer()
             Text(hasChanges ? "保存后生效" : balanceStatusText(viewModel.snapshot))
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(hasChanges ? .orange : balanceStatusColor(viewModel.snapshot))
+                .font(MonitorTheme.Typography.settingsStatus)
+                .foregroundStyle(hasChanges ? MonitorTheme.settingsWarning : balanceStatusColor(viewModel.snapshot))
                 .lineLimit(1)
             Button("刷新") {
                 viewModel.refreshNow()
@@ -1783,14 +1783,14 @@ private struct HelpLabel: View {
                 showsHelp.toggle()
             } label: {
                 Image(systemName: "questionmark.circle.fill")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
+                    .font(MonitorTheme.Typography.settingsStatus)
+                    .foregroundStyle(MonitorTheme.settingsTextSecondary)
             }
             .buttonStyle(.plain)
             .popover(isPresented: $showsHelp, arrowEdge: .trailing) {
                 Text(help)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.primary)
+                    .font(MonitorTheme.Typography.settingsSubtitle)
+                    .foregroundStyle(MonitorTheme.settingsTextPrimary)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(12)
                     .frame(width: 260, alignment: .leading)

@@ -3,6 +3,7 @@ import SwiftUI
 enum MonitorTheme {
     enum Radius {
         static let chip: CGFloat = 4
+        static let segment: CGFloat = 6
         static let row: CGFloat = 8
         static let control: CGFloat = 9
         static let section: CGFloat = 10
@@ -13,13 +14,20 @@ enum MonitorTheme {
     enum Stroke {
         static let hairline: CGFloat = 0.6
         static let panel: CGFloat = 0.8
+        static let settingsHairline: CGFloat = 0.6
     }
 
     enum Typography {
         static let settingsTitle = Font.system(size: 18, weight: .bold)
+        static let settingsSubtitle = Font.system(size: 12, weight: .medium)
         static let settingsSidebarLabel = Font.system(size: 12, weight: .bold)
         static let settingsSidebarItem = Font.system(size: 12, weight: .semibold)
         static let settingsCaption = Font.system(size: 10.5, weight: .medium)
+        static let settingsHelper = Font.system(size: 11, weight: .medium)
+        static let settingsStatus = Font.system(size: 11, weight: .semibold)
+        static let settingsControl = Font.system(size: 12, weight: .semibold)
+        static let settingsAccountTitle = Font.system(size: 11.5, weight: .semibold)
+        static let settingsAccountMeta = Font.system(size: 11, weight: .medium)
         static let settingsSectionTitle = Font.system(size: 12, weight: .bold)
     }
 
@@ -53,6 +61,8 @@ enum MonitorTheme {
     static let settingsTextPrimary = Color.primary
     static let settingsTextSecondary = Color.secondary
     static let settingsError = Color.red.opacity(0.85)
+    static let settingsWarning = Color.orange.opacity(0.88)
+    static let settingsSuccess = Color.green.opacity(0.82)
 
     static func quotaColor(for percent: Int?) -> Color {
         guard let percent else {
