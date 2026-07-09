@@ -20,6 +20,11 @@ enum Formatters {
         return "\(value)"
     }
 
+    static func compactTokens(_ value: Int, isPartial: Bool) -> String {
+        let formatted = compactTokens(value)
+        return isPartial ? "≥\(formatted)" : formatted
+    }
+
     static func compactTokensEnglish(_ value: Int) -> String {
         let absolute = abs(value)
         if absolute >= 1_000_000_000 {
@@ -32,6 +37,25 @@ enum Formatters {
             return String(format: "%.1fK", Double(value) / 1_000)
         }
         return "\(value)"
+    }
+
+    static func compactTokensEnglish(_ value: Int, isPartial: Bool) -> String {
+        let formatted = compactTokensEnglish(value)
+        return isPartial ? "≥\(formatted)" : formatted
+    }
+
+    static func partialUsageHelp(
+        label: String,
+        isPartial: Bool,
+        missingBaselineSessions: Int
+    ) -> String? {
+        guard isPartial else {
+            return nil
+        }
+        guard missingBaselineSessions > 0 else {
+            return "\(label)缺少完整历史基线，当前数值为已确认最低值。"
+        }
+        return "\(label)有 \(missingBaselineSessions) 个会话缺少历史基线，当前数值为已确认最低值。"
     }
 
     static func percent(_ value: Int?) -> String {

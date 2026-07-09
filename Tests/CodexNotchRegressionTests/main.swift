@@ -135,6 +135,27 @@ runner.check(
     ) == nil,
     "runtime locator should return nil when no executable exists"
 )
+runner.check(
+    Formatters.compactTokens(15_000, isPartial: false) == "2万",
+    "complete usage values should keep their existing compact token format"
+)
+runner.check(
+    Formatters.compactTokens(15_000, isPartial: true) == "≥2万",
+    "partial usage values should display as a confirmed lower bound"
+)
+runner.check(
+    Formatters.compactTokensEnglish(1_500_000, isPartial: true) == "≥1.5M",
+    "collapsed partial usage should display an English lower-bound marker"
+)
+runner.check(
+    Formatters.partialUsageHelp(label: "7天", isPartial: true, missingBaselineSessions: 7)
+        == "7天有 7 个会话缺少历史基线，当前数值为已确认最低值。",
+    "partial usage help should explain the missing baseline count"
+)
+runner.check(
+    Formatters.partialUsageHelp(label: "30天", isPartial: false, missingBaselineSessions: 0) == nil,
+    "complete usage should not expose a partial-data help message"
+)
 
 let snapshotFormatterTask = CodexTask(
     id: "snapshot-task",

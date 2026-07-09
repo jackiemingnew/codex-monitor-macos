@@ -33,6 +33,7 @@ private struct CollapsedMetric: Identifiable {
     let color: Color
     var labelWidth: CGFloat? = nil
     var valueWidth: CGFloat? = nil
+    var helpText: String? = nil
 }
 
 private struct HUDVisualEffectView: NSViewRepresentable {
@@ -241,6 +242,7 @@ struct NotchIslandView: View {
         switch effectiveDisplaySource {
         case .automatic, .codex:
             let todayTokens = snapshot.dailyUsage.usageTodayTokens
+            let todayIsPartial = snapshot.dailyUsage.isPartial
             return [
                 CollapsedMetric(
                     id: "5h",
@@ -261,10 +263,17 @@ struct NotchIslandView: View {
                 CollapsedMetric(
                     id: "tok",
                     label: "Today",
-                    value: todayTokens > 0 ? Formatters.compactTokensEnglish(todayTokens) : "--",
+                    value: todayTokens > 0 || todayIsPartial
+                        ? Formatters.compactTokensEnglish(todayTokens, isPartial: todayIsPartial)
+                        : "--",
                     color: MonitorTheme.textPrimary,
                     labelWidth: 28,
-                    valueWidth: 50
+                    valueWidth: 50,
+                    helpText: Formatters.partialUsageHelp(
+                        label: "Today",
+                        isPartial: todayIsPartial,
+                        missingBaselineSessions: snapshot.dailyUsage.missingBaselineSessions
+                    )
                 )
             ]
         case .remoteCodex:
@@ -292,7 +301,18 @@ struct NotchIslandView: View {
 private struct CollapsedMetricRow: View {
     let metric: CollapsedMetric
 
+    @ViewBuilder
     var body: some View {
+        if let helpText = metric.helpText {
+            row
+                .help(helpText)
+                .accessibilityHint(helpText)
+        } else {
+            row
+        }
+    }
+
+    private var row: some View {
         HStack(spacing: MonitorTheme.Spacing.compact) {
             Text(metric.label)
                 .font(.system(size: 8.4, weight: .medium))
@@ -1160,9 +1180,42 @@ struct DetailPanelView: View {
 
     private var periodUsage: some View {
         HStack(spacing: MonitorTheme.Spacing.row) {
-            PeriodUsageCell(label: "今日", value: Formatters.compactTokens(snapshot.dailyUsage.usageTodayTokens))
-            PeriodUsageCell(label: "7天", value: Formatters.compactTokens(snapshot.usage7d))
-            PeriodUsageCell(label: "30天", value: Formatters.compactTokens(snapshot.usage30d))
+            PeriodUsageCell(
+                label: "今日",
+                value: Formatters.compactTokens(
+                    snapshot.dailyUsage.usageTodayTokens,
+                    isPartial: snapshot.dailyUsage.isPartial
+                ),
+                helpText: Formatters.partialUsageHelp(
+                    label: "今日",
+                    isPartial: snapshot.dailyUsage.isPartial,
+                    missingBaselineSessions: snapshot.dailyUsage.missingBaselineSessions
+                )
+            )
+            PeriodUsageCell(
+                label: "7天",
+                value: Formatters.compactTokens(
+                    snapshot.usage7d,
+                    isPartial: snapshot.periodUsageQuality.usage7dPartial
+                ),
+                helpText: Formatters.partialUsageHelp(
+                    label: "7天",
+                    isPartial: snapshot.periodUsageQuality.usage7dPartial,
+                    missingBaselineSessions: snapshot.periodUsageQuality.missing7dBaselines
+                )
+            )
+            PeriodUsageCell(
+                label: "30天",
+                value: Formatters.compactTokens(
+                    snapshot.usage30d,
+                    isPartial: snapshot.periodUsageQuality.usage30dPartial
+                ),
+                helpText: Formatters.partialUsageHelp(
+                    label: "30天",
+                    isPartial: snapshot.periodUsageQuality.usage30dPartial,
+                    missingBaselineSessions: snapshot.periodUsageQuality.missing30dBaselines
+                )
+            )
         }
         .padding(.horizontal, 2)
         .padding(.top, 1)
@@ -1862,8 +1915,20 @@ private struct RemoteSummaryCell: View {
 private struct PeriodUsageCell: View {
     let label: String
     let value: String
+    var helpText: String? = nil
 
+    @ViewBuilder
     var body: some View {
+        if let helpText {
+            cell
+                .help(helpText)
+                .accessibilityHint(helpText)
+        } else {
+            cell
+        }
+    }
+
+    private var cell: some View {
         VStack(spacing: MonitorTheme.Spacing.compact) {
             Text(label)
                 .font(.system(size: 9.6, weight: .semibold))
