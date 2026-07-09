@@ -20,6 +20,7 @@ swiftc \
   "${ROOT_DIR}/Sources/CodexNotch/SnapshotOutputFormatter.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/DisplayRedactor.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/Shell.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/CodexRuntimeLocator.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/KeychainStore.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/SecretStore.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/CodexRadarModels.swift" \

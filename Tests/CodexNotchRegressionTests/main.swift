@@ -88,6 +88,54 @@ runner.check(
     "expired quota windows should display as reset to 100 percent"
 )
 
+let runtimeLocatorRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("CodexNotchRuntimeLocator-\(UUID().uuidString)")
+let discoveredRuntimeApp = runtimeLocatorRoot.appendingPathComponent("ChatGPT.app", isDirectory: true)
+let legacyRuntimeApp = runtimeLocatorRoot.appendingPathComponent("Codex.app", isDirectory: true)
+let discoveredResources = discoveredRuntimeApp.appendingPathComponent("Contents/Resources", isDirectory: true)
+let legacyResources = legacyRuntimeApp.appendingPathComponent("Contents/Resources", isDirectory: true)
+try FileManager.default.createDirectory(at: discoveredResources, withIntermediateDirectories: true)
+try FileManager.default.createDirectory(at: legacyResources, withIntermediateDirectories: true)
+defer {
+    try? FileManager.default.removeItem(at: runtimeLocatorRoot)
+}
+let discoveredCodexExecutable = discoveredResources.appendingPathComponent("codex")
+let discoveredRipgrepExecutable = discoveredResources.appendingPathComponent("rg")
+let legacyCodexExecutable = legacyResources.appendingPathComponent("codex")
+for executable in [discoveredCodexExecutable, discoveredRipgrepExecutable, legacyCodexExecutable] {
+    try Data().write(to: executable)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+}
+runner.check(
+    CodexRuntimeLocator.firstExecutable(
+        named: "codex",
+        in: [discoveredRuntimeApp, legacyRuntimeApp]
+    ) == discoveredCodexExecutable.path,
+    "runtime locator should prefer the bundle-discovered ChatGPT executable"
+)
+runner.check(
+    CodexRuntimeLocator.firstExecutable(
+        named: "rg",
+        in: [discoveredRuntimeApp, legacyRuntimeApp]
+    ) == discoveredRipgrepExecutable.path,
+    "runtime locator should resolve companion tools from the same app resources"
+)
+try FileManager.default.removeItem(at: discoveredCodexExecutable)
+runner.check(
+    CodexRuntimeLocator.firstExecutable(
+        named: "codex",
+        in: [discoveredRuntimeApp, legacyRuntimeApp]
+    ) == legacyCodexExecutable.path,
+    "runtime locator should fall back to the legacy Codex app when needed"
+)
+runner.check(
+    CodexRuntimeLocator.firstExecutable(
+        named: "missing-tool",
+        in: [discoveredRuntimeApp, legacyRuntimeApp]
+    ) == nil,
+    "runtime locator should return nil when no executable exists"
+)
+
 let snapshotFormatterTask = CodexTask(
     id: "snapshot-task",
     title: "父任务",

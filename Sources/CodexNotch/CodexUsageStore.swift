@@ -2,12 +2,14 @@ import Foundation
 import Darwin
 
 private enum UsageScanPolicy {
-    static let ripgrepCandidates = [
-        "/Applications/Codex.app/Contents/Resources/rg",
-        "/opt/homebrew/bin/rg",
-        "/usr/local/bin/rg",
-        "/usr/bin/rg"
-    ]
+    static var ripgrepCandidates: [String] {
+        [
+            CodexRuntimeLocator.executable(named: "rg"),
+            "/opt/homebrew/bin/rg",
+            "/usr/local/bin/rg",
+            "/usr/bin/rg"
+        ].compactMap { $0 }
+    }
     static let runningActivityWindow = 10 * 60
     static let fastSnapshotTokenScanLimit: UInt64 = 2 * 1024 * 1024
     static let largeSessionTokenScanLimit: UInt64 = 20 * 1024 * 1024
@@ -96,7 +98,7 @@ final class CodexUsageStore: @unchecked Sendable {
     private let deltaDatabase: String
     private let legacyDeltaDatabase: String?
     private let sessionIndexPath: String
-    private let appServerExecutable = "/Applications/Codex.app/Contents/Resources/codex"
+    private let appServerExecutable: String?
     private let ripgrepCandidates: [String]
     private let tokenPattern = /tool_token_count=([0-9]+)/
     private let terminalEventTypes: Set<String> = [
@@ -125,11 +127,13 @@ final class CodexUsageStore: @unchecked Sendable {
         stateDatabase: String? = nil,
         logsDatabase: String? = nil,
         deltaDatabase: String? = nil,
-        ripgrepCandidates: [String] = UsageScanPolicy.ripgrepCandidates,
+        ripgrepCandidates: [String]? = nil,
+        appServerExecutable: String? = nil,
         initialAppServerRateLimits: RateLimitSnapshot? = nil
     ) {
         self.codexDirectory = codexDirectory
-        self.ripgrepCandidates = ripgrepCandidates
+        self.ripgrepCandidates = ripgrepCandidates ?? UsageScanPolicy.ripgrepCandidates
+        self.appServerExecutable = appServerExecutable ?? CodexRuntimeLocator.executable(named: "codex")
         let legacyDeltaPath = codexDirectory.appendingPathComponent("context-guard/usage-deltas.sqlite").path
         self.deltaDatabase = Self.expandedPath(
             deltaDatabase
@@ -2842,12 +2846,17 @@ final class CodexUsageStore: @unchecked Sendable {
             return nil
         }
 
-        guard FileManager.default.fileExists(atPath: appServerExecutable) else {
+        guard let appServerExecutable,
+              FileManager.default.isExecutableFile(atPath: appServerExecutable) else {
             cacheAppServerRateLimits(.failure, now: now)
             return nil
         }
 
-        let output = try? Shell.run("/bin/zsh", ["-lc", appServerRateLimitScript()], timeout: 8)
+        let output = try? Shell.run(
+            "/bin/zsh",
+            ["-lc", appServerRateLimitScript(executable: appServerExecutable)],
+            timeout: 8
+        )
         guard let output,
               let snapshot = parseAppServerRateLimits(output: output, now: now) else {
             cacheAppServerRateLimits(.failure, now: now)
@@ -2864,7 +2873,7 @@ final class CodexUsageStore: @unchecked Sendable {
         cacheLock.unlock()
     }
 
-    private func appServerRateLimitScript() -> String {
+    private func appServerRateLimitScript(executable: String) -> String {
         let initialize = #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"codex-notch","version":"0.1.2"},"capabilities":{"experimentalApi":true}}}"#
         let initialized = #"{"jsonrpc":"2.0","method":"initialized"}"#
         let readRateLimits = #"{"jsonrpc":"2.0","id":2,"method":"account/rateLimits/read","params":null}"#
@@ -2873,8 +2882,12 @@ final class CodexUsageStore: @unchecked Sendable {
         {
           printf '%s\\n' '\(initialize)' '\(initialized)' '\(readRateLimits)'
           sleep 5.5
-        } | '\(appServerExecutable)' app-server --stdio
+        } | \(shellQuoted(executable)) app-server --stdio
         """
+    }
+
+    private func shellQuoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     func parseAppServerRateLimits(output: String, now: Date) -> RateLimitSnapshot? {
