@@ -8,12 +8,14 @@ Scope:
 
 - Static review: `NotchIslandView.swift`, `SettingsView.swift`, `MonitorTheme.swift`.
 - Visual review: current collapsed notch capsule from the installed app.
-- Detail/settings visual coverage is based on source review in this pass because automated clicking did not reliably open the expanded panel from the current desktop state.
+- Visual review: expanded detail panel opened via low-level CGEvent, with screenshots of the `Codex Radar` and `Codex` tabs.
+- Settings visual coverage is based on source review in this pass; the settings window was not separately screenshot-reviewed.
 
 No P0 issues were found. The current UI remains usable and information-dense. The main gaps are token adoption, status-color restraint, and a few elements that are visually richer than the new system allows.
 
 | Surface | Element | Issue | DESIGN.md Rule | Severity | Recommendation | File/Line |
 |---|---|---|---|---|---|---|
+| Expanded detail panel | Panel translucency over bright/text-heavy backgrounds | In real expanded screenshots, the detail panel remains usable but the desktop/app content behind it shows through strongly. On a white text-heavy background, small table text and secondary metadata lose contrast. | HUD first: translucent near-black panels, compact tables, small status chips, and restrained depth. Values and rows must be more legible than decorative. | P1 | Increase `detailTint` opacity or add a subtle readability scrim behind the expanded panel while keeping the collapsed capsule unchanged. Verify over both bright text windows and dark desktop backgrounds. | `Sources/CodexNotch/MonitorTheme.swift:26` |
 | Codex Radar tab | Model score cards | The full card background and border are tinted with `statusColor`. This makes status color act as a broad decorative surface instead of a state marker. | Use status color only where it communicates state. Avoid broad colored backgrounds. | P1 | Use `MonitorTheme.rowFill` plus `MonitorTheme.hairline` for the card shell. Keep status color on the dot, score text, or a narrow accent rail only. | `Sources/CodexNotch/NotchIslandView.swift:1948` |
 | Codex Radar tab | Quota radar rows | `5h` values are always `running` blue and `7d` values are always `healthy` green, regardless of threshold or state. This can make ordinary numeric columns look semantically evaluated. | Status colors must express state, not column identity. Values should scan as numbers first. | P1 | Render quota numbers with primary/secondary text by default. Apply `quotaColor` only when a percent/threshold state exists. | `Sources/CodexNotch/NotchIslandView.swift:1995` |
 | About / app mark | AppLogoMark | The mark combines a dark gradient, green glow, blue waveform, and cyan underline. As a one-off decorative island, it is louder than the surrounding native utility UI. | Quiet polish should come from opacity, hairline borders, and spacing, not colorful decoration. Do not introduce decorative gradients. | P1 | Simplify to a tokenized notch/pill mark: neutral dark surface, one status dot, one hairline stroke, no glow, no multi-accent waveform. | `Sources/CodexNotch/SettingsView.swift:1745` |
@@ -25,10 +27,11 @@ No P0 issues were found. The current UI remains usable and information-dense. Th
 
 ## Recommended Fix Order
 
-1. Fix P1 status-color overuse in Codex Radar cards and quota rows.
-2. Simplify `AppLogoMark` so About does not become the only decorative island.
-3. Run a mechanical token adoption pass for HUD radii/strokes.
-4. Expand settings typography/color tokens and migrate repeated helper/error/status labels.
+1. Improve expanded detail panel readability over bright/text-heavy backgrounds.
+2. Fix P1 status-color overuse in Codex Radar cards and quota rows.
+3. Simplify `AppLogoMark` so About does not become the only decorative island.
+4. Run a mechanical token adoption pass for HUD radii/strokes.
+5. Expand settings typography/color tokens and migrate repeated helper/error/status labels.
 
 ## Verification For Follow-Up Changes
 
