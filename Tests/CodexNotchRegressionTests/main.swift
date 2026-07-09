@@ -3049,9 +3049,110 @@ let appServerFirstSnapshot = appServerFirstStore.loadSnapshot(
     taskHistoryRange: .day,
     now: now
 )
-runner.check(appServerFirstSnapshot.primaryPercent == 83, "app-server-first should use the main Codex 5h quota over local quota noise")
-runner.check(appServerFirstSnapshot.secondaryPercent == 78, "app-server-first should use the main Codex 7d quota over local quota noise")
+runner.check(appServerFirstSnapshot.primaryPercent == 67, "app-server-first should not let stale app-server cache overstate the main Codex 5h quota")
+runner.check(appServerFirstSnapshot.secondaryPercent == 45, "app-server-first should not let stale app-server cache overstate the main Codex 7d quota")
 runner.check(appServerFirstSnapshot.sparkQuotaWindows.map(\.remainingPercent) == [22, 58], "app-server-first should keep Spark quota in Spark windows")
+
+let appServerMoreConstrainedStore = CodexUsageStore(
+    codexDirectory: tempRoot,
+    initialAppServerRateLimits: RateLimitSnapshot(
+        primaryPercent: 60,
+        secondaryPercent: 44,
+        primaryResetsAt: appServerPrimaryReset,
+        secondaryResetsAt: appServerSecondaryReset,
+        capturedAt: appServerFixtureNow,
+        isPrimaryCodexLimit: true,
+        sparkQuotaWindows: appServerSnapshot.sparkQuotaWindows
+    )
+)
+let appServerMoreConstrainedSnapshot = appServerMoreConstrainedStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .appServerFirst,
+    taskHistoryRange: .day,
+    now: now
+)
+runner.check(appServerMoreConstrainedSnapshot.primaryPercent == 60, "app-server-first should keep app-server 5h quota when it is lower than local JSONL")
+runner.check(appServerMoreConstrainedSnapshot.secondaryPercent == 44, "app-server-first should keep app-server 7d quota when it is lower than local JSONL")
+
+let expiredLocalQuotaRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("CodexNotchExpiredLocalQuota-\(UUID().uuidString)")
+try FileManager.default.createDirectory(at: expiredLocalQuotaRoot, withIntermediateDirectories: true)
+defer {
+    try? FileManager.default.removeItem(at: expiredLocalQuotaRoot)
+}
+let expiredLocalQuotaStateDatabase = expiredLocalQuotaRoot.appendingPathComponent("state_5.sqlite").path
+let expiredLocalQuotaLogsDatabase = expiredLocalQuotaRoot.appendingPathComponent("logs_2.sqlite").path
+_ = try Shell.run("/usr/bin/sqlite3", [
+    expiredLocalQuotaStateDatabase,
+    """
+    create table threads(
+      id text,
+      title text,
+      tokens_used integer,
+      model text,
+      reasoning_effort text,
+      rollout_path text,
+      created_at integer,
+      updated_at integer,
+      archived integer default 0
+    );
+    """
+])
+_ = try Shell.run("/usr/bin/sqlite3", [
+    expiredLocalQuotaLogsDatabase,
+    """
+    create table logs(
+      thread_id text,
+      ts integer,
+      target text,
+      feedback_log_body text
+    );
+    """
+])
+let expiredLocalQuotaDirectory = expiredLocalQuotaRoot.appendingPathComponent("sessions/2026/06/14", isDirectory: true)
+try FileManager.default.createDirectory(at: expiredLocalQuotaDirectory, withIntermediateDirectories: true)
+let expiredLocalQuotaSessionID = "019e073a-c032-74e2-966e-b85ede0c9cd9"
+let expiredLocalQuotaPath = expiredLocalQuotaDirectory.appendingPathComponent("rollout-2026-06-14T02-20-20-\(expiredLocalQuotaSessionID).jsonl")
+let expiredPrimaryReset = Int(now.timeIntervalSince1970) - 60
+let expiredSecondaryReset = Int(now.timeIntervalSince1970) - 60
+try """
+{"timestamp":"\(timestamp)","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Expired local quota"}]}}
+{"timestamp":"\(timestamp)","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":0}},"rate_limits":{"limit_id":"codex","primary":{"used_percent":72,"resets_at":\(expiredPrimaryReset)},"secondary":{"used_percent":64,"resets_at":\(expiredSecondaryReset)}}}}
+"""
+    .write(to: expiredLocalQuotaPath, atomically: true, encoding: .utf8)
+try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: expiredLocalQuotaPath.path)
+_ = try Shell.run("/usr/bin/sqlite3", [
+    expiredLocalQuotaStateDatabase,
+    """
+    insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, created_at, updated_at, archived)
+    values('\(expiredLocalQuotaSessionID)', 'Expired local quota', 0, 'gpt-5.5', 'high', '\(expiredLocalQuotaPath.path)', \(Int(now.timeIntervalSince1970)), \(Int(now.timeIntervalSince1970)), 0);
+    """
+])
+let resetAppServerSnapshot = RateLimitSnapshot(
+    primaryPercent: 100,
+    secondaryPercent: 100,
+    primaryResetsAt: appServerPrimaryReset,
+    secondaryResetsAt: appServerSecondaryReset,
+    capturedAt: appServerFixtureNow,
+    isPrimaryCodexLimit: true
+)
+let expiredLocalQuotaStore = CodexUsageStore(
+    codexDirectory: expiredLocalQuotaRoot,
+    ripgrepCandidates: [],
+    initialAppServerRateLimits: resetAppServerSnapshot
+)
+let expiredLocalQuotaSnapshot = expiredLocalQuotaStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .appServerFirst,
+    taskHistoryRange: .day,
+    now: now
+)
+runner.check(expiredLocalQuotaSnapshot.primaryPercent == 100, "expired local 5h quota should not undercut a reset app-server quota")
+runner.check(expiredLocalQuotaSnapshot.primaryResetsAt == appServerPrimaryReset, "expired local 5h reset time should not replace the app-server reset time")
+runner.check(expiredLocalQuotaSnapshot.secondaryPercent == 100, "expired local 7d quota should not undercut a reset app-server quota")
+runner.check(expiredLocalQuotaSnapshot.secondaryResetsAt == appServerSecondaryReset, "expired local 7d reset time should not replace the app-server reset time")
 runner.check(localSnapshot.tasks.contains { $0.id == sessionID && $0.status == .running }, "recent session rollout should appear in running task list")
 runner.check(localSnapshot.tasks.first { $0.id == sessionID }?.title == "正在运行的 Codex 任务", "session rollout should use the user message as task title")
 runner.check(localSnapshot.tasks.first { $0.id == sessionID }?.detail.contains("gpt-5.5 · 超高推理") == true, "session rollout should use turn context model and effort")

@@ -2643,8 +2643,11 @@ final class CodexUsageStore: @unchecked Sendable {
         case .appServerFirst:
             let appServer = loadAppServerRateLimits(now: now, allowBlocking: false)
             if let appServer, hasMainRateLimitData(appServer) {
+                let mainSnapshot = hasMainRateLimitData(local)
+                    ? conservativeMainRateLimits(appServer: appServer, local: local, now: now)
+                    : appServer
                 return RateLimitLoadResult(
-                    snapshot: appServer.withSparkQuotaWindows(
+                    snapshot: mainSnapshot.withSparkQuotaWindows(
                         mergedSparkQuotaWindows(from: [appServer, local], now: now, preferSourceOrder: true)
                     ),
                     source: hasAnyRateLimitData(local) ? "app-server-cache+local-jsonl" : "app-server-cache"
@@ -2677,6 +2680,61 @@ final class CodexUsageStore: @unchecked Sendable {
                 source: hasAnyRateLimitData(local) ? "local-jsonl" : "none"
             )
         }
+    }
+
+    private func conservativeMainRateLimits(
+        appServer: RateLimitSnapshot,
+        local: RateLimitSnapshot,
+        now: Date
+    ) -> RateLimitSnapshot {
+        let primary = conservativeRateLimitWindow(
+            preferred: (appServer.primaryPercent, appServer.primaryResetsAt),
+            fallback: (local.primaryPercent, local.primaryResetsAt),
+            now: now
+        )
+        let secondary = conservativeRateLimitWindow(
+            preferred: (appServer.secondaryPercent, appServer.secondaryResetsAt),
+            fallback: (local.secondaryPercent, local.secondaryResetsAt),
+            now: now
+        )
+
+        return RateLimitSnapshot(
+            primaryPercent: primary.percent,
+            secondaryPercent: secondary.percent,
+            primaryResetsAt: primary.resetsAt,
+            secondaryResetsAt: secondary.resetsAt,
+            capturedAt: appServer.capturedAt ?? local.capturedAt,
+            isPrimaryCodexLimit: appServer.isPrimaryCodexLimit || local.isPrimaryCodexLimit,
+            sparkQuotaWindows: appServer.sparkQuotaWindows
+        )
+    }
+
+    private func conservativeRateLimitWindow(
+        preferred: (percent: Int?, resetsAt: Int?),
+        fallback: (percent: Int?, resetsAt: Int?),
+        now: Date
+    ) -> (percent: Int?, resetsAt: Int?) {
+        let preferredDisplay = displayPercent(preferred.percent, resetsAt: preferred.resetsAt, now: now)
+        let fallbackDisplay = displayPercent(fallback.percent, resetsAt: fallback.resetsAt, now: now)
+
+        guard let preferredDisplay else {
+            return fallback
+        }
+        guard let fallbackDisplay else {
+            return preferred
+        }
+
+        return fallbackDisplay < preferredDisplay ? fallback : preferred
+    }
+
+    private func displayPercent(_ percent: Int?, resetsAt: Int?, now: Date) -> Int? {
+        if let resetsAt, Int(now.timeIntervalSince1970) >= resetsAt {
+            return 100
+        }
+        if let percent, percent >= 99 {
+            return 100
+        }
+        return percent
     }
 
     private func hasMainRateLimitData(_ snapshot: RateLimitSnapshot) -> Bool {
