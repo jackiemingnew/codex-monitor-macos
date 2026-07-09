@@ -24,7 +24,7 @@ enum MonitorTheme {
     }
 
     static let pillTint = Color.black.opacity(0.48)
-    static let detailTint = Color.black.opacity(0.52)
+    static let detailTint = Color.black.opacity(0.68)
     static let panelStroke = Color.white.opacity(0.16)
     static let hairline = Color.white.opacity(0.075)
     static let sectionFill = Color.white.opacity(0.055)

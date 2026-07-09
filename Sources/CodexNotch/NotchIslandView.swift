@@ -113,7 +113,7 @@ struct NotchIslandView: View {
         .frame(height: IslandMetrics.collapsedHeight - 8, alignment: .center)
         .fixedSize(horizontal: true, vertical: false)
         .background(collapsedBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: MonitorTheme.Radius.collapsedPill, style: .continuous))
         .shadow(color: .black.opacity(0.18), radius: 9, x: 0, y: 4)
         .frame(width: IslandMetrics.width, height: IslandMetrics.collapsedHeight, alignment: .top)
     }
@@ -121,10 +121,10 @@ struct NotchIslandView: View {
     private var collapsedBackground: some View {
         ZStack {
             HUDVisualEffectView(material: .hudWindow)
-            RoundedRectangle(cornerRadius: 15, style: .continuous)
+            RoundedRectangle(cornerRadius: MonitorTheme.Radius.collapsedPill, style: .continuous)
                 .fill(MonitorTheme.pillTint)
-            RoundedRectangle(cornerRadius: 15, style: .continuous)
-                .stroke(MonitorTheme.panelStroke, lineWidth: 0.7)
+            RoundedRectangle(cornerRadius: MonitorTheme.Radius.collapsedPill, style: .continuous)
+                .stroke(MonitorTheme.panelStroke, lineWidth: MonitorTheme.Stroke.panel)
         }
     }
 
@@ -334,13 +334,13 @@ struct DetailPanelView: View {
     var body: some View {
         ZStack(alignment: .top) {
             HUDVisualEffectView(material: .hudWindow)
-                .clipShape(BottomRoundedRectangle(radius: 22))
+                .clipShape(BottomRoundedRectangle(radius: MonitorTheme.Radius.detailBottom))
 
-            BottomRoundedRectangle(radius: 22)
+            BottomRoundedRectangle(radius: MonitorTheme.Radius.detailBottom)
                 .fill(MonitorTheme.detailTint)
 
-            BottomRoundedRectangle(radius: 22)
-                .stroke(MonitorTheme.panelStroke, lineWidth: 0.8)
+            BottomRoundedRectangle(radius: MonitorTheme.Radius.detailBottom)
+                .stroke(MonitorTheme.panelStroke, lineWidth: MonitorTheme.Stroke.panel)
                 .shadow(color: .black.opacity(0.25), radius: 18, x: 0, y: 10)
 
             VStack(spacing: 10) {
@@ -862,10 +862,10 @@ struct DetailPanelView: View {
         }
         .padding(.horizontal, 10)
         .frame(minHeight: 50)
-        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(MonitorTheme.hairline, lineWidth: 0.6)
+            RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous)
+                .stroke(MonitorTheme.hairline, lineWidth: MonitorTheme.Stroke.hairline)
         )
     }
 
@@ -1945,11 +1945,17 @@ private struct CodexRadarModelCard: View {
         .padding(.horizontal, 9)
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, minHeight: 76, alignment: .leading)
-        .background(statusColor.opacity(0.075), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background(MonitorTheme.rowFill, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(statusColor.opacity(0.18), lineWidth: 0.7)
+            RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous)
+                .stroke(MonitorTheme.hairline, lineWidth: MonitorTheme.Stroke.hairline)
         )
+        .overlay(alignment: .leading) {
+            Capsule()
+                .fill(statusColor.opacity(0.92))
+                .frame(width: 2, height: 38)
+                .padding(.leading, 1.5)
+        }
     }
 
     private var scoreText: String {
@@ -1994,14 +2000,14 @@ private struct CodexRadarQuotaRowView: View {
 
             Text(quotaText(row.fiveH))
                 .font(.system(size: 10.4, weight: .semibold))
-                .foregroundStyle(MonitorTheme.running)
+                .foregroundStyle(quotaValueColor(row.fiveH, defaultColor: MonitorTheme.textPrimary))
                 .lineLimit(1)
                 .monospacedDigit()
                 .frame(width: 86, alignment: .trailing)
 
             Text(quotaText(row.sevenD))
                 .font(.system(size: 10.4, weight: .semibold))
-                .foregroundStyle(MonitorTheme.healthy)
+                .foregroundStyle(quotaValueColor(row.sevenD, defaultColor: MonitorTheme.textSecondary))
                 .lineLimit(1)
                 .monospacedDigit()
                 .frame(width: 86, alignment: .trailing)
@@ -2027,5 +2033,15 @@ private struct CodexRadarQuotaRowView: View {
             return "--"
         }
         return String(format: "%.1f", value)
+    }
+
+    private func quotaValueColor(_ value: Double?, defaultColor: Color) -> Color {
+        guard let value else {
+            return MonitorTheme.textTertiary
+        }
+        if value <= 40 {
+            return MonitorTheme.quotaColor(for: Int(value.rounded()))
+        }
+        return defaultColor
     }
 }

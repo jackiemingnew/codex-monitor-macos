@@ -1743,43 +1743,29 @@ private struct AppLogoMark: View {
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            Color(red: 0.01, green: 0.012, blue: 0.015),
-                            Color(red: 0.035, green: 0.045, blue: 0.055)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
+                .fill(Color.black.opacity(0.88))
+                .overlay(
+                    RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
+                        .stroke(MonitorTheme.panelStroke, lineWidth: max(0.8, size * 0.014))
                 )
 
             Capsule()
-                .fill(Color.black.opacity(0.94))
+                .fill(Color.white.opacity(0.10))
                 .frame(width: size * 0.70, height: size * 0.40)
+                .overlay(
+                    Capsule()
+                        .stroke(MonitorTheme.hairline, lineWidth: max(0.6, size * 0.010))
+                )
 
             Circle()
-                .fill(Color(red: 0.20, green: 1.0, blue: 0.45))
+                .fill(MonitorTheme.healthy)
                 .frame(width: size * 0.115, height: size * 0.115)
-                .shadow(color: Color(red: 0.20, green: 1.0, blue: 0.45).opacity(0.5), radius: size * 0.08)
                 .offset(x: -size * 0.22)
 
-            Path { path in
-                path.move(to: CGPoint(x: size * 0.46, y: size * 0.50))
-                path.addLine(to: CGPoint(x: size * 0.54, y: size * 0.50))
-                path.addLine(to: CGPoint(x: size * 0.60, y: size * 0.40))
-                path.addLine(to: CGPoint(x: size * 0.67, y: size * 0.61))
-                path.addLine(to: CGPoint(x: size * 0.76, y: size * 0.50))
-            }
-            .stroke(
-                Color(red: 0.30, green: 0.74, blue: 1.0),
-                style: StrokeStyle(lineWidth: max(1.5, size * 0.032), lineCap: .round, lineJoin: .round)
-            )
-
             Rectangle()
-                .fill(Color(red: 0.0, green: 0.55, blue: 0.78))
-                .frame(width: size * 0.64, height: max(1, size * 0.018))
-                .offset(y: size * 0.28)
+                .fill(MonitorTheme.hairline)
+                .frame(width: size * 0.42, height: max(1, size * 0.014))
+                .offset(x: size * 0.10)
         }
         .frame(width: size, height: size)
     }
