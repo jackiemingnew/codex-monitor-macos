@@ -146,7 +146,7 @@ struct NotchIslandView: View {
     }
 
     private var rateLimitBlock: some View {
-        HStack(spacing: MonitorTheme.Spacing.inline) {
+        HStack(spacing: MonitorTheme.Spacing.compact) {
             ForEach(collapsedMetrics) { metric in
                 CollapsedMetricRow(metric: metric)
             }
