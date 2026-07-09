@@ -1986,7 +1986,7 @@ final class CodexUsageStore: @unchecked Sendable {
             let updatedAt = Date(timeIntervalSince1970: TimeInterval(thread.updatedAt))
             let status: TaskStatus = activeThreadIDs.contains(thread.id) ? .running : .recent
             let model = thread.model ?? "模型未知"
-            let effort = localizedEffort(thread.reasoningEffort)
+            let effort = Formatters.reasoningEffortLabel(thread.reasoningEffort)
             let detail = "\(model) · \(effort) · \(Formatters.relativeAge(updatedAt, now: now))前"
             let delta = deltas[thread.id.lowercased()]
             let shouldLoadContext = includeContextUsage && (status == .running || index < contextTaskLimit)
@@ -2618,27 +2618,6 @@ final class CodexUsageStore: @unchecked Sendable {
             .sorted { $0.modifiedAt > $1.modifiedAt }
             .prefix(limit)
             .map(\.path)
-    }
-
-    private func localizedEffort(_ effort: String?) -> String {
-        switch effort {
-        case "none":
-            "无推理"
-        case "minimal":
-            "极低推理"
-        case "low":
-            "低推理"
-        case "medium":
-            "中等推理"
-        case "high":
-            "高推理"
-        case "xhigh":
-            "超高推理"
-        case let value? where !value.isEmpty:
-            value
-        default:
-            "推理未知"
-        }
     }
 
     private func loadRateLimits(from paths: [String], source: RateLimitSourcePreference, now: Date) -> RateLimitLoadResult {

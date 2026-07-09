@@ -47,6 +47,10 @@ adds, removes, renames, or changes the formula for a usage metric in
   before the cutoff, `period.*` and `daily.*` must mark the result partial and
   omit that thread from the delta instead of treating the full cumulative total
   as window consumption.
+- Visible partial `daily.*` and `period.*` values must use a `≥` prefix because
+  omitted sessions make the computed value a confirmed lower bound. JSON/CLI
+  numeric fields remain unchanged and expose completeness through their quality
+  metadata.
 - Threads created inside the requested window and lacking a baseline start from
   zero. This fallback requires a real `created_at` value or a session that is not
   yet present in `state_*.sqlite`; file modification time alone is not a thread
@@ -76,6 +80,13 @@ adds, removes, renames, or changes the formula for a usage metric in
   first-class metric, prefer strong-evidence log events such as `run_auto_compact` and
   report confirmed counts separately from token-sequence estimates.
 - `quota.5h` and `quota.7d` describe rate-limit windows, not token usage.
+- Active quota windows preserve the exact upstream remaining percentage,
+  including `99%`. A window becomes `100%` only after its reset time has passed.
+- The app-server executable is resolved from the current `com.openai.codex`
+  application bundle with ChatGPT/Codex application-path fallbacks. Local JSONL
+  remains the fallback source when app-server is unavailable.
+- `gpt-5.6-sol` currently reports the main `limit_id = codex` and therefore uses
+  `quota.5h` / `quota.7d`; it does not create a separate model quota strip.
 - Spark or subagent quota windows must stay separate from `quota.5h` and
   `quota.7d`.
 - `quota.spark.5h` and `quota.spark.7d` prefer app-server

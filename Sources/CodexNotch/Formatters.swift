@@ -58,6 +58,29 @@ enum Formatters {
         return "\(label)有 \(missingBaselineSessions) 个会话缺少历史基线，当前数值为已确认最低值。"
     }
 
+    static func reasoningEffortLabel(_ effort: String?) -> String {
+        switch effort {
+        case "none":
+            "无推理"
+        case "minimal":
+            "极低推理"
+        case "low":
+            "低推理"
+        case "medium":
+            "中等推理"
+        case "high":
+            "高推理"
+        case "xhigh":
+            "超高推理"
+        case "ultra":
+            "极致推理"
+        case let value? where !value.isEmpty:
+            value
+        default:
+            "推理未知"
+        }
+    }
+
     static func percent(_ value: Int?) -> String {
         guard let value else {
             return "--"

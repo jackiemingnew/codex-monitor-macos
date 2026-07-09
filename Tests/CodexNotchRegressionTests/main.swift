@@ -156,6 +156,18 @@ runner.check(
     Formatters.partialUsageHelp(label: "30天", isPartial: false, missingBaselineSessions: 0) == nil,
     "complete usage should not expose a partial-data help message"
 )
+runner.check(
+    Formatters.reasoningEffortLabel("ultra") == "极致推理",
+    "GPT-5.6 ultra reasoning effort should use the localized detail label"
+)
+runner.check(
+    Formatters.reasoningEffortLabel("xhigh") == "超高推理",
+    "existing xhigh reasoning effort localization should stay unchanged"
+)
+runner.check(
+    Formatters.reasoningEffortLabel("future-effort") == "future-effort",
+    "unknown reasoning effort values should remain visible for forward compatibility"
+)
 
 let snapshotFormatterTask = CodexTask(
     id: "snapshot-task",
