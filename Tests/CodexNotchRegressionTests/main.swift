@@ -3205,6 +3205,83 @@ _ = try Shell.run("/usr/bin/sqlite3", [
 ])
 runner.check(logCacheStore.loadUsageTotals(now: now.addingTimeInterval(1))?.day == 1000, "new-thread state totals should be stable even when logs database changes")
 
+let dbBackedActivityRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("CodexNotchDBBackedActivity-\(UUID().uuidString)")
+try FileManager.default.createDirectory(at: dbBackedActivityRoot, withIntermediateDirectories: true)
+defer {
+    try? FileManager.default.removeItem(at: dbBackedActivityRoot)
+}
+let dbBackedActivityStateDatabase = dbBackedActivityRoot.appendingPathComponent("state_5.sqlite").path
+let dbBackedActivityLogsDatabase = dbBackedActivityRoot.appendingPathComponent("logs_2.sqlite").path
+_ = try Shell.run("/usr/bin/sqlite3", [
+    dbBackedActivityStateDatabase,
+    """
+    create table threads(
+      id text,
+      title text,
+      tokens_used integer,
+      model text,
+      reasoning_effort text,
+      rollout_path text,
+      created_at integer,
+      updated_at integer,
+      archived integer default 0
+    );
+    """
+])
+_ = try Shell.run("/usr/bin/sqlite3", [
+    dbBackedActivityLogsDatabase,
+    """
+    create table logs(
+      thread_id text,
+      ts integer,
+      target text,
+      feedback_log_body text
+    );
+    """
+])
+let dbBackedActivityDirectory = dbBackedActivityRoot.appendingPathComponent("external-rollouts", isDirectory: true)
+try FileManager.default.createDirectory(at: dbBackedActivityDirectory, withIntermediateDirectories: true)
+let dbBackedActiveSessionID = "019e073a-c032-74e2-966e-b85ede0c9cd7"
+let dbBackedCompletedSessionID = "019e073a-c032-74e2-966e-b85ede0c9cd8"
+let dbBackedActivePath = dbBackedActivityDirectory.appendingPathComponent("active-\(dbBackedActiveSessionID).jsonl")
+let dbBackedCompletedPath = dbBackedActivityDirectory.appendingPathComponent("completed-\(dbBackedCompletedSessionID).jsonl")
+try #"{"timestamp":"\#(timestamp)","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"DB backed active"}]}}"#
+    .write(to: dbBackedActivePath, atomically: true, encoding: .utf8)
+try """
+{"timestamp":"\(timestamp)","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"DB backed completed"}]}}
+{"timestamp":"\(timestamp)","payload":{"phase":"final_answer","type":"task_complete"}}
+"""
+    .write(to: dbBackedCompletedPath, atomically: true, encoding: .utf8)
+try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: dbBackedActivePath.path)
+try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: dbBackedCompletedPath.path)
+_ = try Shell.run("/usr/bin/sqlite3", [
+    dbBackedActivityStateDatabase,
+    """
+    insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, created_at, updated_at, archived)
+    values
+      ('\(dbBackedActiveSessionID)', 'DB backed active fallback', 1200, 'gpt-5.5', 'high', '\(dbBackedActivePath.path)', \(Int(now.timeIntervalSince1970)), \(Int(now.timeIntervalSince1970)), 0),
+      ('\(dbBackedCompletedSessionID)', 'DB backed completed fallback', 2200, 'gpt-5.5', 'high', '\(dbBackedCompletedPath.path)', \(Int(now.timeIntervalSince1970)), \(Int(now.timeIntervalSince1970)), 0);
+    """
+])
+let dbBackedActivityStore = CodexUsageStore(codexDirectory: dbBackedActivityRoot, ripgrepCandidates: [])
+let dbBackedActivitySnapshot = dbBackedActivityStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now
+)
+runner.check(dbBackedActivitySnapshot.isRunning, "db-backed rollout activity should keep local Codex running when logs active rows are missing")
+runner.check(
+    dbBackedActivitySnapshot.tasks.first { $0.id == dbBackedActiveSessionID }?.status == .running,
+    "db-backed active rollout should appear as a running task without logs activity"
+)
+runner.check(
+    dbBackedActivitySnapshot.tasks.first { $0.id == dbBackedCompletedSessionID }?.status == .recent,
+    "db-backed completed rollout should not be treated as running without logs activity"
+)
+
 let cachedLocalSnapshot = localStore.loadSnapshot(
     includePeriodUsage: false,
     bypassFastCache: false,

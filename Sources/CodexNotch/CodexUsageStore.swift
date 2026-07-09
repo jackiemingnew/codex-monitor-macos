@@ -261,7 +261,7 @@ final class CodexUsageStore: @unchecked Sendable {
                 usageDeltaDatabaseThreads + usageDeltaSessionThreads + activeSubagentParents
             )
             let activeThreadIDs = ((try? loadActiveThreadIDs(now: now)) ?? [])
-                .union(activeSessionThreadIDs(from: sessionThreads, now: now))
+                .union(activeSessionThreadIDs(from: displayThreads, now: now))
                 .union(activeSubagentParents.map(\.id))
             let cumulativeUsage = loadCumulativeUsage()
             let recentUsage = loadRecentUsage(now: now)
