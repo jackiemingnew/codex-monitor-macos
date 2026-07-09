@@ -17,6 +17,16 @@ enum MonitorTheme {
         static let settingsHairline: CGFloat = 0.6
     }
 
+    enum Spacing {
+        static let micro: CGFloat = 3
+        static let compact: CGFloat = 4
+        static let inline: CGFloat = 6
+        static let row: CGFloat = 8
+        static let section: CGFloat = 10
+        static let panel: CGFloat = 12
+        static let wide: CGFloat = 14
+    }
+
     enum Typography {
         static let settingsTitle = Font.system(size: 18, weight: .bold)
         static let settingsSubtitle = Font.system(size: 12, weight: .medium)

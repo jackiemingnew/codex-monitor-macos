@@ -103,7 +103,7 @@ struct NotchIslandView: View {
     }
 
     private var collapsedContent: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: MonitorTheme.Spacing.inline) {
             statusBlock
 
             rateLimitBlock
@@ -146,7 +146,7 @@ struct NotchIslandView: View {
     }
 
     private var rateLimitBlock: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: MonitorTheme.Spacing.inline) {
             ForEach(collapsedMetrics) { metric in
                 CollapsedMetricRow(metric: metric)
             }
@@ -247,24 +247,24 @@ struct NotchIslandView: View {
                     label: "5h",
                     value: Formatters.percent(snapshot.primaryPercent),
                     color: MonitorTheme.quotaColor(for: snapshot.primaryPercent),
-                    labelWidth: 12,
-                    valueWidth: 32
+                    labelWidth: 13,
+                    valueWidth: 34
                 ),
                 CollapsedMetric(
                     id: "7d",
                     label: "7d",
                     value: Formatters.percent(snapshot.secondaryPercent),
                     color: MonitorTheme.quotaColor(for: snapshot.secondaryPercent),
-                    labelWidth: 12,
-                    valueWidth: 32
+                    labelWidth: 13,
+                    valueWidth: 34
                 ),
                 CollapsedMetric(
                     id: "tok",
                     label: "Today",
                     value: todayTokens > 0 ? Formatters.compactTokensEnglish(todayTokens) : "--",
                     color: MonitorTheme.textPrimary,
-                    labelWidth: 26,
-                    valueWidth: 48
+                    labelWidth: 28,
+                    valueWidth: 50
                 )
             ]
         case .remoteCodex:
@@ -293,7 +293,7 @@ private struct CollapsedMetricRow: View {
     let metric: CollapsedMetric
 
     var body: some View {
-        HStack(spacing: 3) {
+        HStack(spacing: MonitorTheme.Spacing.compact) {
             Text(metric.label)
                 .font(.system(size: 8.4, weight: .medium))
                 .foregroundStyle(MonitorTheme.textTertiary)
@@ -626,7 +626,7 @@ struct DetailPanelView: View {
     }
 
     private var localQuotaStrip: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: MonitorTheme.Spacing.wide) {
             QuotaBarCell(
                 label: "5h Quota",
                 value: Formatters.percent(snapshot.primaryPercent),
@@ -674,7 +674,7 @@ struct DetailPanelView: View {
     }
 
     private var sparkQuotaStrip: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: MonitorTheme.Spacing.row) {
             Text("Spark")
                 .font(.system(size: 10.5, weight: .semibold))
                 .foregroundStyle(MonitorTheme.textPrimary)
@@ -1159,7 +1159,7 @@ struct DetailPanelView: View {
     }
 
     private var periodUsage: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: MonitorTheme.Spacing.row) {
             PeriodUsageCell(label: "今日", value: Formatters.compactTokens(snapshot.dailyUsage.usageTodayTokens))
             PeriodUsageCell(label: "7天", value: Formatters.compactTokens(snapshot.usage7d))
             PeriodUsageCell(label: "30天", value: Formatters.compactTokens(snapshot.usage30d))
@@ -1311,8 +1311,8 @@ private struct QuotaBarCell: View {
     let color: Color
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
+        VStack(alignment: .leading, spacing: MonitorTheme.Spacing.inline) {
+            HStack(alignment: .firstTextBaseline, spacing: MonitorTheme.Spacing.inline) {
                 Text(label)
                     .font(.system(size: 10.4, weight: .semibold))
                     .foregroundStyle(MonitorTheme.textPrimary)
@@ -1320,7 +1320,7 @@ private struct QuotaBarCell: View {
                     .minimumScaleFactor(0.78)
                     .allowsTightening(true)
                     .layoutPriority(0.8)
-                Spacer(minLength: 4)
+                Spacer(minLength: MonitorTheme.Spacing.compact)
                 Text(value)
                     .font(.system(size: 10.4, weight: .semibold))
                     .foregroundStyle(color)
@@ -1331,7 +1331,7 @@ private struct QuotaBarCell: View {
                     .layoutPriority(2)
             }
 
-            HStack(alignment: .center, spacing: 6) {
+            HStack(alignment: .center, spacing: MonitorTheme.Spacing.inline) {
                 CapsuleQuotaBar(value: percent, color: color)
                     .layoutPriority(1)
 
@@ -1356,7 +1356,7 @@ private struct SparkQuotaChip: View {
     let window: SparkQuotaWindow
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: MonitorTheme.Spacing.compact) {
             Text(window.label)
                 .font(.system(size: 9.2, weight: .medium))
                 .foregroundStyle(MonitorTheme.textTertiary)
@@ -1396,7 +1396,7 @@ private struct SparkMetricChip: View {
     let value: String
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: MonitorTheme.Spacing.compact) {
             Text(label)
                 .font(.system(size: 9.2, weight: .medium))
                 .foregroundStyle(MonitorTheme.textTertiary)
@@ -1864,7 +1864,7 @@ private struct PeriodUsageCell: View {
     let value: String
 
     var body: some View {
-        VStack(spacing: 4) {
+        VStack(spacing: MonitorTheme.Spacing.compact) {
             Text(label)
                 .font(.system(size: 9.6, weight: .semibold))
                 .foregroundStyle(MonitorTheme.textSecondary)
