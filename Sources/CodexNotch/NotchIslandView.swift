@@ -299,7 +299,7 @@ private struct CollapsedMetricRow: View {
                 .foregroundStyle(MonitorTheme.textTertiary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.70)
-                .frame(width: metric.labelWidth, alignment: .leading)
+                .frame(width: metric.labelWidth, alignment: .trailing)
 
             Text(metric.value)
                 .font(.system(size: 9.5, weight: .semibold))
@@ -307,7 +307,7 @@ private struct CollapsedMetricRow: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.68)
                 .monospacedDigit()
-                .frame(width: metric.valueWidth, alignment: .trailing)
+                .frame(width: metric.valueWidth, alignment: .leading)
         }
     }
 }
