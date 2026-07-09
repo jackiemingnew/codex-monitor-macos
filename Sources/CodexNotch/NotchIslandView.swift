@@ -35,41 +35,6 @@ private struct CollapsedMetric: Identifiable {
     var valueWidth: CGFloat? = nil
 }
 
-private enum MonitorTheme {
-    static let pillTint = Color.black.opacity(0.48)
-    static let detailTint = Color.black.opacity(0.52)
-    static let panelStroke = Color.white.opacity(0.16)
-    static let hairline = Color.white.opacity(0.075)
-    static let sectionFill = Color.white.opacity(0.055)
-    static let rowFill = Color.white.opacity(0.038)
-    static let rowSelectedFill = Color.white.opacity(0.092)
-    static let controlFill = Color.white.opacity(0.052)
-    static let controlSelectedFill = Color.white.opacity(0.115)
-    static let separator = Color.white.opacity(0.070)
-    static let progressTrack = Color.white.opacity(0.115)
-    static let textPrimary = Color.white.opacity(0.92)
-    static let textSecondary = Color.white.opacity(0.62)
-    static let textTertiary = Color.white.opacity(0.44)
-    static let healthy = Color(red: 0.45, green: 0.78, blue: 0.53)
-    static let running = Color(red: 0.47, green: 0.72, blue: 0.82)
-    static let warning = Color(red: 0.92, green: 0.68, blue: 0.42)
-    static let critical = Color(red: 0.88, green: 0.45, blue: 0.45)
-    static let neutral = Color.white.opacity(0.34)
-
-    static func quotaColor(for percent: Int?) -> Color {
-        guard let percent else {
-            return textTertiary
-        }
-        if percent <= 20 {
-            return critical
-        }
-        if percent <= 40 {
-            return warning
-        }
-        return healthy
-    }
-}
-
 private struct HUDVisualEffectView: NSViewRepresentable {
     let material: NSVisualEffectView.Material
     var blendingMode: NSVisualEffectView.BlendingMode = .behindWindow

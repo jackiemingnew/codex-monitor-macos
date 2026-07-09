@@ -222,6 +222,10 @@ scripts/clean-dev-artifacts.sh   清理 .build 和 dist 开发产物
 
 本项目使用 MIT License，详见 `LICENSE`。
 
+### 视觉系统
+
+项目自带 `DESIGN.md` 作为 Codex Monitor 的视觉系统说明。它参考公开设计系统分析提炼方向，但视觉身份、token 和实现约束均为本项目自有。
+
 <a id="english"></a>
 
 ## English
@@ -438,3 +442,7 @@ scripts/clean-dev-artifacts.sh   Remove .build and dist development artifacts
 ### License
 
 This project is licensed under the MIT License. See `LICENSE` for details.
+
+### Visual System
+
+This repository includes `DESIGN.md` as the Codex Monitor visual system. It uses public design-system analyses as directional references, while keeping this project's visual identity, tokens, and implementation rules independent.

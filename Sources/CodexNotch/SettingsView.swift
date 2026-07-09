@@ -318,7 +318,8 @@ struct SettingsView: View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
                 Text("codex监测设置")
-                    .font(.system(size: 18, weight: .bold))
+                    .font(MonitorTheme.Typography.settingsTitle)
+                    .foregroundStyle(MonitorTheme.settingsTextPrimary)
             }
 
             Spacer()
@@ -328,8 +329,8 @@ struct SettingsView: View {
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("设置")
-                .font(.system(size: 12, weight: .bold))
-                .foregroundStyle(.secondary)
+                .font(MonitorTheme.Typography.settingsSidebarLabel)
+                .foregroundStyle(MonitorTheme.settingsTextSecondary)
                 .padding(.horizontal, 8)
                 .padding(.bottom, 4)
 
@@ -339,18 +340,18 @@ struct SettingsView: View {
                 } label: {
                     HStack(spacing: 8) {
                         Image(systemName: tab.iconName)
-                            .font(.system(size: 12, weight: .bold))
+                            .font(MonitorTheme.Typography.settingsSidebarLabel)
                             .frame(width: 16)
                         Text(tab.title)
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(MonitorTheme.Typography.settingsSidebarItem)
                         Spacer()
                     }
-                    .foregroundStyle(selectedTab == tab ? .primary : .secondary)
+                    .foregroundStyle(selectedTab == tab ? MonitorTheme.settingsTextPrimary : MonitorTheme.settingsTextSecondary)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 8)
                     .background(
-                        selectedTab == tab ? Color.primary.opacity(0.10) : Color.clear,
-                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        selectedTab == tab ? MonitorTheme.settingsSelectedFill : Color.clear,
+                        in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous)
                     )
                     .contentShape(Rectangle())
                 }
@@ -363,7 +364,7 @@ struct SettingsView: View {
         .padding(.vertical, 20)
         .frame(width: 190)
         .frame(maxHeight: .infinity, alignment: .top)
-        .background(Color.secondary.opacity(0.055))
+        .background(MonitorTheme.settingsSidebarFill)
     }
 
     @ViewBuilder
@@ -660,8 +661,8 @@ struct SettingsView: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 8)
                         .background(
-                            (selectedPreset == preset ? Color.primary.opacity(0.14) : Color.secondary.opacity(0.10)),
-                            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            selectedPreset == preset ? MonitorTheme.settingsControlSelectedFill : MonitorTheme.settingsControlFill,
+                            in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous)
                         )
                 }
                 .buttonStyle(.plain)
@@ -842,10 +843,10 @@ struct SettingsView: View {
                 }
             }
         }
-        .background(Color.secondary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background(MonitorTheme.settingsSurfaceFill, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(Color.secondary.opacity(0.12), lineWidth: 1)
+            RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous)
+                .stroke(MonitorTheme.settingsHairline, lineWidth: 1)
         )
         .disabled(!enabled)
     }
@@ -863,8 +864,8 @@ struct SettingsView: View {
             Text("操作")
                 .frame(width: 118, alignment: .trailing)
         }
-        .font(.system(size: 10.5, weight: .bold))
-        .foregroundStyle(.secondary)
+        .font(MonitorTheme.Typography.settingsCaption.weight(.bold))
+        .foregroundStyle(MonitorTheme.settingsTextSecondary)
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
     }
@@ -1029,13 +1030,13 @@ struct SettingsView: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(title)
-                .font(.system(size: 12, weight: .bold))
-                .foregroundStyle(.secondary)
+                .font(MonitorTheme.Typography.settingsSectionTitle)
+                .foregroundStyle(MonitorTheme.settingsTextSecondary)
             content()
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(MonitorTheme.settingsSurfaceElevatedFill, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.section, style: .continuous))
     }
 
     private func thresholdsEditor(
