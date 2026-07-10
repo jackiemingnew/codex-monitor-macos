@@ -290,7 +290,7 @@ final class BalanceAPIClient: NSObject, URLSessionTaskDelegate {
             request.setValue(value, forHTTPHeaderField: name)
         }
 
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await NetworkResponsePolicy.data(for: request, session: session)
         if let httpResponse = response as? HTTPURLResponse,
            !(200...299).contains(httpResponse.statusCode) {
             throw BalanceAPIError.httpStatus(

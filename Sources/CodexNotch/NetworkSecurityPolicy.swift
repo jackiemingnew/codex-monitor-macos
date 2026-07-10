@@ -85,3 +85,54 @@ enum NetworkSecurityPolicy {
         }
     }
 }
+
+enum NetworkResponseError: LocalizedError {
+    case tooLarge(limit: Int)
+
+    var errorDescription: String? {
+        switch self {
+        case .tooLarge(let limit):
+            "服务器响应超过安全上限（\(limit / 1_024) KiB）"
+        }
+    }
+}
+
+enum NetworkResponsePolicy {
+    static let successLimit = 5 * 1_024 * 1_024
+    static let errorLimit = 16 * 1_024
+
+    static func limit(for response: URLResponse) -> Int {
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200...299).contains(httpResponse.statusCode) else {
+            return errorLimit
+        }
+        return successLimit
+    }
+
+    static func validate(_ data: Data, response: URLResponse) throws {
+        let maximum = limit(for: response)
+        guard data.count <= maximum else {
+            throw NetworkResponseError.tooLarge(limit: maximum)
+        }
+    }
+
+    static func data(for request: URLRequest, session: URLSession) async throws -> (Data, URLResponse) {
+        let (bytes, response) = try await session.bytes(for: request)
+        let maximum = limit(for: response)
+        if response.expectedContentLength > Int64(maximum) {
+            throw NetworkResponseError.tooLarge(limit: maximum)
+        }
+
+        var data = Data()
+        if response.expectedContentLength > 0 {
+            data.reserveCapacity(min(maximum, Int(response.expectedContentLength)))
+        }
+        for try await byte in bytes {
+            guard data.count < maximum else {
+                throw NetworkResponseError.tooLarge(limit: maximum)
+            }
+            data.append(byte)
+        }
+        return (data, response)
+    }
+}

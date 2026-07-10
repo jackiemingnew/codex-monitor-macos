@@ -1742,6 +1742,28 @@ runner.check(
     NetworkSecurityPolicy.normalizedCertificateSHA256("not-a-fingerprint") == nil,
     "invalid certificate fingerprints must be rejected"
 )
+let successResponse = HTTPURLResponse(
+    url: configuredSecureOrigin,
+    statusCode: 200,
+    httpVersion: nil,
+    headerFields: nil
+)!
+let errorResponse = HTTPURLResponse(
+    url: configuredSecureOrigin,
+    statusCode: 500,
+    httpVersion: nil,
+    headerFields: nil
+)!
+runner.check(NetworkResponsePolicy.limit(for: successResponse) == 5 * 1_024 * 1_024, "successful JSON responses should use the 5 MiB cap")
+runner.check(NetworkResponsePolicy.limit(for: errorResponse) == 16 * 1_024, "error responses should use the 16 KiB cap")
+do {
+    try NetworkResponsePolicy.validate(Data(count: 16 * 1_024 + 1), response: errorResponse)
+    runner.check(false, "oversized error responses should be rejected")
+} catch NetworkResponseError.tooLarge {
+    runner.check(true, "oversized error responses should use the dedicated error")
+} catch {
+    runner.check(false, "oversized error responses should not surface an unrelated error")
+}
 let pinnedBalanceAccount = BalanceAccountConfiguration(
     source: .newAPI,
     allowInsecureTLS: true,
