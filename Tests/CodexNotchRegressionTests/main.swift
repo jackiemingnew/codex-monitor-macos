@@ -1665,6 +1665,14 @@ do {
     runner.check(Date().timeIntervalSince(resistantShellTimeoutStart) < 3.0, "shell timeout should not wait indefinitely after SIGTERM fails")
 }
 
+let largeShellOutput = try Shell.run(
+    "/bin/sh",
+    ["-c", "/usr/bin/yes x | /usr/bin/head -c 2000000"],
+    timeout: 5
+)
+runner.check(largeShellOutput.contains("[output truncated]"), "shell output should be drained and capped without deadlocking")
+runner.check(largeShellOutput.utf8.count < 1_100_000, "shell output cap should bound retained memory")
+
 runner.check(CLIProxyAPIClient.managementBaseURL(from: "http://example.com:8317/management.html") == nil, "external plain HTTP panel URL must be rejected")
 runner.check(CLIProxyAPIClient.managementBaseURL(from: "https://panel.example.com@evil.example.com/management.html") == nil, "CLIProxyAPI panel URL must reject userinfo")
 
