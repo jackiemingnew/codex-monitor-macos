@@ -131,6 +131,7 @@ struct BalanceAccountConfiguration: Identifiable, Codable, Equatable {
     var secret: String = ""
     var secretReadFailed: Bool = false
     var allowInsecureTLS: Bool
+    var tlsCertificateSHA256: String?
     var requestTimeout: TimeInterval
     var usesDefaultThresholds: Bool
     var warningThreshold: Double?
@@ -145,6 +146,7 @@ struct BalanceAccountConfiguration: Identifiable, Codable, Equatable {
         username: String = "",
         secret: String = "",
         allowInsecureTLS: Bool = false,
+        tlsCertificateSHA256: String? = nil,
         requestTimeout: TimeInterval = 6,
         usesDefaultThresholds: Bool = true,
         warningThreshold: Double? = nil,
@@ -159,6 +161,7 @@ struct BalanceAccountConfiguration: Identifiable, Codable, Equatable {
         self.secret = secret
         self.secretReadFailed = false
         self.allowInsecureTLS = allowInsecureTLS
+        self.tlsCertificateSHA256 = tlsCertificateSHA256
         self.requestTimeout = requestTimeout
         self.usesDefaultThresholds = usesDefaultThresholds
         self.warningThreshold = warningThreshold
@@ -173,6 +176,7 @@ struct BalanceAccountConfiguration: Identifiable, Codable, Equatable {
         case panelURL
         case username
         case allowInsecureTLS
+        case tlsCertificateSHA256
         case requestTimeout
         case usesDefaultThresholds
         case warningThreshold
@@ -216,6 +220,14 @@ struct BalanceAccountConfiguration: Identifiable, Codable, Equatable {
 
     var hasValidThresholdOrder: Bool {
         usesDefaultThresholds || customThresholds.hasValidOrder
+    }
+
+    var tlsCertificateValidationMessage: String? {
+        guard allowInsecureTLS,
+              NetworkSecurityPolicy.normalizedCertificateSHA256(tlsCertificateSHA256) == nil else {
+            return nil
+        }
+        return "固定自签名证书时需要填写 64 位 SHA-256 指纹"
     }
 
     var thresholdOrderValidationMessage: String? {

@@ -1718,6 +1718,30 @@ runner.check(
     ),
     "TLS exceptions must not follow a challenge to another host"
 )
+let testCertificateFingerprint = String(repeating: "ab", count: 32)
+let colonCertificateFingerprint = stride(from: 0, to: testCertificateFingerprint.count, by: 2)
+    .map { index in
+        let start = testCertificateFingerprint.index(testCertificateFingerprint.startIndex, offsetBy: index)
+        let end = testCertificateFingerprint.index(start, offsetBy: 2)
+        return String(testCertificateFingerprint[start..<end])
+    }
+    .joined(separator: ":")
+runner.check(
+    NetworkSecurityPolicy.normalizedCertificateSHA256("SHA256:\(colonCertificateFingerprint.uppercased())") == testCertificateFingerprint,
+    "certificate fingerprints should normalize common colon-delimited SHA-256 text"
+)
+runner.check(
+    NetworkSecurityPolicy.normalizedCertificateSHA256("not-a-fingerprint") == nil,
+    "invalid certificate fingerprints must be rejected"
+)
+let pinnedBalanceAccount = BalanceAccountConfiguration(
+    source: .newAPI,
+    allowInsecureTLS: true,
+    tlsCertificateSHA256: testCertificateFingerprint
+)
+runner.check(pinnedBalanceAccount.tlsCertificateValidationMessage == nil, "valid pinned account certificates should pass validation")
+let unpinnedBalanceAccount = BalanceAccountConfiguration(source: .newAPI, allowInsecureTLS: true)
+runner.check(unpinnedBalanceAccount.tlsCertificateValidationMessage != nil, "self-signed TLS mode should require a certificate fingerprint")
 
 let newAPILoginBody = try BalanceAPIClient.newAPILoginBody(
     for: BalanceAPIConfiguration(
@@ -3002,6 +3026,20 @@ runner.check(
         remoteEnabled: true
     ).isEmpty,
     "changing insecure TLS mode should clear the old management key"
+)
+runner.check(
+    CodexNotchSettings.managementKeyForSave(
+        draftKey: "old-secret",
+        oldPanelURL: "https://old.example.com/management.html",
+        newPanelURL: "https://old.example.com/management.html",
+        oldAllowsInsecureTLS: true,
+        newAllowsInsecureTLS: true,
+        oldTLSCertificateSHA256: String(repeating: "a", count: 64),
+        newTLSCertificateSHA256: String(repeating: "b", count: 64),
+        remoteEnabled: true,
+        oldSavedKey: "old-secret"
+    ).isEmpty,
+    "changing the pinned certificate should clear the old management key"
 )
 runner.check(
     CodexNotchSettings.managementKeyForSave(

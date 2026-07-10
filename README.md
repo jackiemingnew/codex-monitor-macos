@@ -238,7 +238,7 @@ GitHub Actions 中的 DMG 使用 ad-hoc 签名，未经过 Apple notarization，
 - 本机 Codex 的额度和任务状态依赖 Codex 本地数据文件。如果 Codex 改变文件结构，可能需要同步适配。
 - Codex Radar token 只用于读取 codexradar.com 授权 API。请不要把 token 文件、环境变量值或设置截图提交到公开仓库。
 - CPA Manager Plus 模式读取的是服务端巡检结果。服务端巡检频率由 CPA Manager Plus 自身配置决定，客户端刷新只是读取最新结果。
-- `允许不安全 TLS` 会信任自签名或证书不完整的面板证书。请只在你控制的测试环境中启用。
+- `固定自签名证书` 仅在配置 origin 与服务器叶证书 SHA-256 指纹同时匹配时连接；跨源或 HTTPS→HTTP 重定向会被拒绝。
 - 当前构建脚本使用 ad-hoc 签名，适合本机使用。如果要公开发布给其他用户，建议使用 Apple Developer ID 签名并进行 notarization。
 - 请不要把任何真实面板地址、管理密钥、账号密码或本机密钥数据库提交到公开仓库。
 
@@ -496,7 +496,7 @@ Run regression tests:
 - Local Codex monitoring depends on Codex's local data files. If Codex changes its file format, the app may need an update.
 - Codex Radar tokens are used only for the codexradar.com authorized API. Do not commit token files, environment variable values, or settings screenshots to a public repository.
 - CPA Manager Plus mode reads server-side inspection results. The inspection frequency is controlled by CPA Manager Plus, while this app only controls how often it reads the latest result.
-- `Allow insecure TLS` trusts self-signed or incomplete certificates for the configured panel request. Use it only for testing environments you control.
+- `Pin self-signed certificate` requires both the configured origin and the leaf-certificate SHA-256 fingerprint to match; cross-origin and HTTPS-to-HTTP redirects are rejected.
 - The current build script uses ad-hoc signing, which is suitable for local use. For public distribution, use Apple Developer ID signing and notarization.
 - Never commit real panel URLs, management keys, account passwords, or local secret database files to a public repository.
 

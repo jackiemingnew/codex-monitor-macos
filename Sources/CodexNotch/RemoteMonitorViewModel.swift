@@ -103,7 +103,8 @@ final class RemoteMonitorViewModel: ObservableObject {
             panelURL: panelURL,
             managementKey: key,
             timeout: settings.cliproxyRequestTimeout,
-            allowInsecureTLS: settings.cliproxyAllowInsecureTLS
+            allowInsecureTLS: settings.cliproxyAllowInsecureTLS,
+            tlsCertificateSHA256: settings.cliproxyTLSCertificateSHA256
         )
         let totalTimeout = max(10, configuration.timeout * 4)
 
@@ -310,7 +311,8 @@ final class RemoteMonitorViewModel: ObservableObject {
             panelURL: panelURL,
             managementKey: key,
             timeout: settings.cliproxyRequestTimeout,
-            allowInsecureTLS: settings.cliproxyAllowInsecureTLS
+            allowInsecureTLS: settings.cliproxyAllowInsecureTLS,
+            tlsCertificateSHA256: settings.cliproxyTLSCertificateSHA256
         )
     }
 
@@ -403,6 +405,7 @@ private struct RemoteMonitorSettingsSnapshot: Equatable {
     let cliproxyRefreshInterval: TimeInterval
     let cliproxyRequestTimeout: TimeInterval
     let cliproxyAllowInsecureTLS: Bool
+    let cliproxyTLSCertificateSHA256: String
 
     @MainActor
     init(settings: CodexNotchSettings) {
@@ -413,5 +416,6 @@ private struct RemoteMonitorSettingsSnapshot: Equatable {
         cliproxyRefreshInterval = settings.cliproxyRefreshInterval
         cliproxyRequestTimeout = settings.cliproxyRequestTimeout
         cliproxyAllowInsecureTLS = settings.cliproxyAllowInsecureTLS
+        cliproxyTLSCertificateSHA256 = settings.cliproxyTLSCertificateSHA256
     }
 }

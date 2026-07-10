@@ -49,6 +49,7 @@ final class CodexNotchSettings: ObservableObject {
         static let cliproxyRefreshInterval = "cliproxyRefreshInterval"
         static let cliproxyRequestTimeout = "cliproxyRequestTimeout"
         static let cliproxyAllowInsecureTLS = "cliproxyAllowInsecureTLS"
+        static let cliproxyTLSCertificateSHA256 = "cliproxyTLSCertificateSHA256"
         static let newAPIMonitorEnabled = "newAPIMonitorEnabled"
         static let newAPIPanelURL = "newAPIPanelURL"
         static let newAPIUsername = "newAPIUsername"
@@ -214,6 +215,20 @@ final class CodexNotchSettings: ObservableObject {
                 cliproxyManagementKey = ""
             }
             defaults.set(cliproxyAllowInsecureTLS, forKey: Keys.cliproxyAllowInsecureTLS)
+        }
+    }
+
+    @Published var cliproxyTLSCertificateSHA256: String {
+        didSet {
+            let trimmed = cliproxyTLSCertificateSHA256.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed != cliproxyTLSCertificateSHA256 {
+                cliproxyTLSCertificateSHA256 = trimmed
+                return
+            }
+            if oldValue != cliproxyTLSCertificateSHA256, !cliproxyManagementKey.isEmpty {
+                cliproxyManagementKey = ""
+            }
+            defaults.set(cliproxyTLSCertificateSHA256, forKey: Keys.cliproxyTLSCertificateSHA256)
         }
     }
 
@@ -421,6 +436,7 @@ final class CodexNotchSettings: ObservableObject {
         self.cliproxyRefreshInterval = Self.clamped(defaults.object(forKey: Keys.cliproxyRefreshInterval) as? TimeInterval ?? 60, min: 60, max: 3_600)
         self.cliproxyRequestTimeout = Self.clamped(defaults.object(forKey: Keys.cliproxyRequestTimeout) as? TimeInterval ?? 6, min: 3, max: 30)
         self.cliproxyAllowInsecureTLS = defaults.object(forKey: Keys.cliproxyAllowInsecureTLS) as? Bool ?? false
+        self.cliproxyTLSCertificateSHA256 = defaults.string(forKey: Keys.cliproxyTLSCertificateSHA256) ?? ""
         self.newAPIMonitorEnabled = defaults.object(forKey: Keys.newAPIMonitorEnabled) as? Bool ?? false
         self.newAPIPanelURL = defaults.string(forKey: Keys.newAPIPanelURL) ?? ""
         self.newAPIManagementKey = startupVault.value(for: .newAPIManagement)
@@ -711,6 +727,8 @@ final class CodexNotchSettings: ObservableObject {
         newPanelURL: String,
         oldAllowsInsecureTLS: Bool,
         newAllowsInsecureTLS: Bool,
+        oldTLSCertificateSHA256: String = "",
+        newTLSCertificateSHA256: String = "",
         remoteEnabled: Bool,
         oldDataSource: RemoteCodexDataSource? = nil,
         newDataSource: RemoteCodexDataSource? = nil,
@@ -729,8 +747,9 @@ final class CodexNotchSettings: ObservableObject {
             newOrigin: newOrigin
         )
         let tlsModeChanged = oldAllowsInsecureTLS != newAllowsInsecureTLS
+        let tlsCertificateChanged = oldTLSCertificateSHA256 != newTLSCertificateSHA256
         let sourceChanged = oldDataSource != nil && newDataSource != nil && oldDataSource != newDataSource
-        guard !originChanged, !tlsModeChanged, !sourceChanged else {
+        guard !originChanged, !tlsModeChanged, !tlsCertificateChanged, !sourceChanged else {
             if let oldSavedKey,
                !draftKey.isEmpty,
                draftKey != oldSavedKey {
