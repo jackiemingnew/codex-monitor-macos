@@ -295,7 +295,11 @@ final class BalanceAPIClient: NSObject, URLSessionTaskDelegate {
            !(200...299).contains(httpResponse.statusCode) {
             throw BalanceAPIError.httpStatus(
                 httpResponse.statusCode,
-                Self.httpFailureMessage(statusCode: httpResponse.statusCode, data: data)
+                Self.httpFailureMessage(
+                    statusCode: httpResponse.statusCode,
+                    data: data,
+                    sensitiveValues: [configuration.secret]
+                )
             )
         }
         guard !data.isEmpty else {
@@ -538,7 +542,11 @@ final class BalanceAPIClient: NSObject, URLSessionTaskDelegate {
         throw BalanceAPIError.unsupportedResponse("Sub2API 平台配额格式不兼容")
     }
 
-    static func httpFailureMessage(statusCode: Int, data: Data) -> String {
+    static func httpFailureMessage(
+        statusCode: Int,
+        data: Data,
+        sensitiveValues: [String] = []
+    ) -> String {
         let decoder = JSONDecoder()
         let message = (try? decoder.decode(HTTPErrorEnvelope.self, from: data).message)
             ?? (try? decoder.decode(SubAPIEnvelope<EmptyPayload>.self, from: data).message)
@@ -548,7 +556,12 @@ final class BalanceAPIClient: NSObject, URLSessionTaskDelegate {
            trimmed.contains("email") {
             return "Sub2API 登录邮箱格式不正确"
         }
-        return trimmed.isEmpty ? "面板返回 HTTP \(statusCode)" : trimmed
+        guard !trimmed.isEmpty else {
+            return "面板返回 HTTP \(statusCode)"
+        }
+        return sensitiveValues.reduce(trimmed) { message, value in
+            value.isEmpty ? message : message.replacingOccurrences(of: value, with: "[REDACTED]")
+        }
     }
 
     private static func decodePayload<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {

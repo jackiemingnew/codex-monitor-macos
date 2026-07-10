@@ -2010,6 +2010,16 @@ runner.check(
     BalanceAPIClient.httpFailureMessage(statusCode: 400, data: subAPIHTTP400).contains("邮箱格式不正确"),
     "Sub2API HTTP 400 validation payload should become an actionable email-format message"
 )
+let echoedPassword = "unusual password value"
+let echoedPasswordError = Data(#"{"unexpected":"unusual password value"}"#.utf8)
+runner.check(
+    !BalanceAPIClient.httpFailureMessage(
+        statusCode: 500,
+        data: echoedPasswordError,
+        sensitiveValues: [echoedPassword]
+    ).contains(echoedPassword),
+    "remote error bodies should redact the exact configured password even under unknown field names"
+)
 runner.check(SettingsShortcutFilter.shouldSuppressTextInputKey(
     characters: "⌃⌥⌘V",
     hasCommand: true,

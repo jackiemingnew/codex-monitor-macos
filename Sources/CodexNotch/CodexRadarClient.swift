@@ -86,7 +86,12 @@ struct CodexRadarClient: Sendable {
         configuration.timeoutIntervalForRequest = timeout
         configuration.timeoutIntervalForResource = timeout
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        let session = URLSession(configuration: configuration)
+        let redirectDelegate = SameOriginRedirectDelegate(configuredURL: request.url!)
+        let session = URLSession(
+            configuration: configuration,
+            delegate: redirectDelegate,
+            delegateQueue: nil
+        )
         defer {
             session.finishTasksAndInvalidate()
         }

@@ -136,3 +136,30 @@ enum NetworkResponsePolicy {
         return (data, response)
     }
 }
+
+final class SameOriginRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    private let configuredURL: URL
+
+    init(configuredURL: URL) {
+        self.configuredURL = configuredURL
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        guard let newURL = request.url,
+              NetworkSecurityPolicy.allowsRedirect(
+                  from: task.currentRequest?.url ?? task.originalRequest?.url,
+                  to: newURL,
+                  configuredURL: configuredURL
+              ) else {
+            completionHandler(nil)
+            return
+        }
+        completionHandler(request)
+    }
+}
