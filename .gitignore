@@ -1,6 +1,7 @@
 .build/
 .swiftpm/
 dist/
+clean-package-artifacts/
 .superpowers/
 .DS_Store
 .env

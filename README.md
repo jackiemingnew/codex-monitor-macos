@@ -1,5 +1,7 @@
 # codex监测 / Codex Monitor
 
+[![Clean macOS package](https://github.com/jackiemingnew/codex-monitor-macos/actions/workflows/clean-package.yml/badge.svg)](https://github.com/jackiemingnew/codex-monitor-macos/actions/workflows/clean-package.yml)
+
 <p>
   <a href="#中文">中文</a> |
   <a href="#english">English</a>
@@ -163,6 +165,28 @@ dist/codex-monitor-0.1.2-amd64.dmg
 ```
 
 因此本机更新通常不需要管理员密码。
+
+### 干净环境验证
+
+仓库使用 GitHub-hosted `macos-15` runner，在全新 checkout 中运行回归测试、构建 arm64 / x86_64 双架构 DMG，并验证 Info.plist、ad-hoc 签名、DMG 内二进制架构和空 Codex home JSON 快照。CI 不读取开发机上的 `.codex`、ChatGPT.app、token 或构建缓存。
+
+在任意安装了 Swift 6 和 Xcode Command Line Tools 的 Mac 上，可以用一条命令从公开仓库重新拉取并执行同一套检查：
+
+```bash
+./scripts/verify-clean-clone.sh
+```
+
+可选参数为仓库地址和分支：
+
+```bash
+./scripts/verify-clean-clone.sh \
+  https://github.com/jackiemingnew/codex-monitor-macos.git \
+  main
+```
+
+验证后的 DMG 和 `SHA256SUMS` 会复制到当前目录下的 `clean-package-artifacts/<commit>/`。设置 `KEEP_CLEAN_CLONE=1` 可以保留临时 checkout，设置 `CLEAN_PACKAGE_OUTPUT_DIR` 可以更改产物目录。
+
+GitHub Actions 中的 DMG 使用 ad-hoc 签名，未经过 Apple notarization，只作为可复现构建与测试产物，不等同于正式签名 Release。
 
 ### 调试命令
 
@@ -398,6 +422,28 @@ The install script copies the app to:
 ```
 
 Local updates usually do not require an administrator password.
+
+### Clean-Room Verification
+
+The repository uses a GitHub-hosted `macos-15` runner to run regression tests in a fresh checkout, build separate arm64 and x86_64 DMGs, and verify Info.plist metadata, ad-hoc signatures, packaged binary architectures, and an empty-Codex-home JSON snapshot. CI does not read a developer machine's `.codex` data, ChatGPT.app installation, tokens, or build caches.
+
+On any Mac with Swift 6 and Xcode Command Line Tools, run the same checks from a newly cloned public repository with one command:
+
+```bash
+./scripts/verify-clean-clone.sh
+```
+
+The optional arguments are the repository URL and ref:
+
+```bash
+./scripts/verify-clean-clone.sh \
+  https://github.com/jackiemingnew/codex-monitor-macos.git \
+  main
+```
+
+Validated DMGs and `SHA256SUMS` are copied to `clean-package-artifacts/<commit>/` under the current directory. Set `KEEP_CLEAN_CLONE=1` to retain the temporary checkout or `CLEAN_PACKAGE_OUTPUT_DIR` to choose another artifact directory.
+
+DMGs produced by GitHub Actions use ad-hoc signing and are not Apple-notarized. They are reproducible build/test artifacts, not official signed releases.
 
 ### Debug Commands
 

@@ -1,0 +1,43 @@
+name: Clean macOS package
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: clean-package-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Clean macOS package / verify
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out a fresh source tree
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          path: clean-source
+
+      - name: Run clean-room tests and packaging
+        working-directory: clean-source
+        run: ./scripts/run-clean-package-checks.sh
+
+      - name: Upload verified DMGs
+        uses: actions/upload-artifact@v5
+        with:
+          name: codex-monitor-dmg-${{ github.sha }}
+          path: |
+            clean-source/dist/codex-monitor-*.dmg
+            clean-source/dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
