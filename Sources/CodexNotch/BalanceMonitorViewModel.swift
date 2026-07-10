@@ -234,7 +234,7 @@ final class BalanceMonitorViewModel: ObservableObject {
             .map { offset, account in
                 let panelURL = account.panelURL.trimmingCharacters(in: .whitespacesAndNewlines)
                 let username = account.username.trimmingCharacters(in: .whitespacesAndNewlines)
-                let secret = account.secret.trimmingCharacters(in: .whitespacesAndNewlines)
+                let secret = account.secret
                 let missing: String?
                 if panelURL.isEmpty {
                     missing = "缺少面板地址"
@@ -252,6 +252,7 @@ final class BalanceMonitorViewModel: ObservableObject {
                         secret: secret,
                         timeout: account.requestTimeout,
                         allowInsecureTLS: account.allowInsecureTLS,
+                        tlsCertificateSHA256: account.tlsCertificateSHA256,
                         accountID: account.id,
                         accountLabel: account.configuredLabel,
                         thresholds: account.effectiveThresholds(defaults: snapshot.defaultThresholds)

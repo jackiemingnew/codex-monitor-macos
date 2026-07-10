@@ -125,6 +125,7 @@ private struct SettingsDraft: Equatable {
     var cliproxyRefreshInterval: TimeInterval = 60
     var cliproxyRequestTimeout: TimeInterval = 6
     var cliproxyAllowInsecureTLS = false
+    var cliproxyTLSCertificateSHA256 = ""
     var newAPIMonitorEnabled = false
     var newAPIPanelURL = ""
     var newAPIManagementKey = ""
@@ -169,6 +170,7 @@ private struct SettingsDraft: Equatable {
         cliproxyRefreshInterval = settings.cliproxyRefreshInterval
         cliproxyRequestTimeout = settings.cliproxyRequestTimeout
         cliproxyAllowInsecureTLS = settings.cliproxyAllowInsecureTLS
+        cliproxyTLSCertificateSHA256 = settings.cliproxyTLSCertificateSHA256
         newAPIMonitorEnabled = settings.newAPIMonitorEnabled
         newAPIPanelURL = settings.newAPIPanelURL
         newAPIManagementKey = settings.newAPIManagementKey
@@ -287,16 +289,21 @@ struct SettingsView: View {
         draft != currentDraft
     }
 
-    private var thresholdValidationMessage: String? {
-        thresholdValidationMessage(for: draft)
+    private var settingsValidationMessage: String? {
+        if draft.cliproxyAllowInsecureTLS,
+           NetworkSecurityPolicy.normalizedCertificateSHA256(draft.cliproxyTLSCertificateSHA256) == nil {
+            return "CLIProxyAPI：固定自签名证书时需要填写 64 位 SHA-256 指纹"
+        }
+        return thresholdValidationMessage(for: draft)
     }
 
     private var canSaveDraft: Bool {
-        hasChanges && thresholdValidationMessage == nil
+        hasChanges && settingsValidationMessage == nil
     }
 
     private var accountEditorValidationMessage: String? {
-        accountEditorDraft.thresholdOrderValidationMessage
+        accountEditorDraft.tlsCertificateValidationMessage
+            ?? accountEditorDraft.thresholdOrderValidationMessage
     }
 
     private var canSaveAccountEditor: Bool {
@@ -312,6 +319,7 @@ struct SettingsView: View {
             || draft.cliproxyRefreshInterval != current.cliproxyRefreshInterval
             || draft.cliproxyRequestTimeout != current.cliproxyRequestTimeout
             || draft.cliproxyAllowInsecureTLS != current.cliproxyAllowInsecureTLS
+            || draft.cliproxyTLSCertificateSHA256 != current.cliproxyTLSCertificateSHA256
     }
 
     private var header: some View {
@@ -493,9 +501,19 @@ struct SettingsView: View {
                 .disabled(!draft.remoteMonitorEnabled)
 
             Toggle(isOn: $draft.cliproxyAllowInsecureTLS) {
-                HelpLabel(title: "允许不安全 TLS", help: "允许连接自签名或证书不完整的测试面板。开启后会信任该请求中的服务器证书，请只在你控制的面板上使用。")
+                HelpLabel(title: "固定自签名证书", help: "仅在证书 SHA-256 指纹与下方配置完全一致时连接测试面板。证书变化后请求会被拒绝。")
             }
             .disabled(!draft.remoteMonitorEnabled)
+
+            if draft.cliproxyAllowInsecureTLS {
+                labeledTextField(
+                    "证书 SHA-256",
+                    text: $draft.cliproxyTLSCertificateSHA256,
+                    placeholder: "64 位十六进制指纹",
+                    help: "填写服务器叶证书的 SHA-256 指纹，可包含冒号。该值不是密钥。"
+                )
+                .disabled(!draft.remoteMonitorEnabled)
+            }
 
             remoteStatusRow
 
@@ -982,7 +1000,19 @@ struct SettingsView: View {
                         )
 
                         Toggle(isOn: $accountEditorDraft.allowInsecureTLS) {
-                            HelpLabel(title: "允许不安全 TLS", help: "允许连接自签名或证书不完整的测试面板。请只在你控制的面板上使用。")
+                            HelpLabel(title: "固定自签名证书", help: "只有服务器叶证书的 SHA-256 指纹完全匹配时才允许连接。")
+                        }
+
+                        if accountEditorDraft.allowInsecureTLS {
+                            labeledTextField(
+                                "证书 SHA-256",
+                                text: Binding(
+                                    get: { accountEditorDraft.tlsCertificateSHA256 ?? "" },
+                                    set: { accountEditorDraft.tlsCertificateSHA256 = $0 }
+                                ),
+                                placeholder: "64 位十六进制指纹",
+                                help: "填写服务器叶证书的 SHA-256 指纹，可包含冒号。"
+                            )
                         }
 
                         Toggle(isOn: $accountEditorDraft.usesDefaultThresholds) {
@@ -1090,6 +1120,9 @@ struct SettingsView: View {
         var copy = account
         copy.source = source
         copy.requestTimeout = min(30, max(3, copy.requestTimeout.rounded()))
+        copy.tlsCertificateSHA256 = copy.allowInsecureTLS
+            ? NetworkSecurityPolicy.normalizedCertificateSHA256(copy.tlsCertificateSHA256)
+            : nil
         if !copy.secret.isEmpty {
             copy.secretReadFailed = false
         }
@@ -1203,6 +1236,7 @@ struct SettingsView: View {
         new: BalanceAccountConfiguration
     ) -> Bool {
         old.allowInsecureTLS != new.allowInsecureTLS
+            || old.tlsCertificateSHA256 != new.tlsCertificateSHA256
             || apiOrigin(from: old.panelURL) != apiOrigin(from: new.panelURL)
     }
 
@@ -1287,8 +1321,8 @@ struct SettingsView: View {
             }
 
             if hasChanges {
-                if let thresholdValidationMessage {
-                    Text(thresholdValidationMessage)
+                if let settingsValidationMessage {
+                    Text(settingsValidationMessage)
                         .font(MonitorTheme.Typography.settingsStatus)
                         .foregroundStyle(MonitorTheme.settingsError)
                 } else {
@@ -1528,6 +1562,7 @@ struct SettingsView: View {
             || next.cliproxyRefreshInterval != current.cliproxyRefreshInterval
             || next.cliproxyRequestTimeout != current.cliproxyRequestTimeout
             || next.cliproxyAllowInsecureTLS != current.cliproxyAllowInsecureTLS
+            || next.cliproxyTLSCertificateSHA256 != current.cliproxyTLSCertificateSHA256
     }
 
     private func balanceSettingsChanged(
@@ -1550,7 +1585,7 @@ struct SettingsView: View {
     }
 
     private func saveDraft() {
-        guard thresholdValidationMessage == nil else {
+        guard settingsValidationMessage == nil else {
             return
         }
         let next = draft
@@ -1568,6 +1603,8 @@ struct SettingsView: View {
             newPanelURL: next.cliproxyPanelURL,
             oldAllowsInsecureTLS: current.cliproxyAllowInsecureTLS,
             newAllowsInsecureTLS: next.cliproxyAllowInsecureTLS,
+            oldTLSCertificateSHA256: current.cliproxyTLSCertificateSHA256,
+            newTLSCertificateSHA256: next.cliproxyTLSCertificateSHA256,
             remoteEnabled: next.remoteMonitorEnabled,
             oldDataSource: current.remoteCodexDataSource,
             newDataSource: next.remoteCodexDataSource,
@@ -1625,6 +1662,9 @@ struct SettingsView: View {
             settings.cliproxyRefreshInterval = next.cliproxyRefreshInterval
             settings.cliproxyRequestTimeout = next.cliproxyRequestTimeout
             settings.cliproxyAllowInsecureTLS = next.cliproxyAllowInsecureTLS
+            settings.cliproxyTLSCertificateSHA256 = next.cliproxyAllowInsecureTLS
+                ? (NetworkSecurityPolicy.normalizedCertificateSHA256(next.cliproxyTLSCertificateSHA256) ?? "")
+                : ""
             if settings.secretsAreLoaded {
                 settings.cliproxyManagementKey = managementKeyForSave
             }

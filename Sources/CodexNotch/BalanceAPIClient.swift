@@ -6,6 +6,7 @@ struct BalanceAPIConfiguration: Equatable {
     let secret: String
     let timeout: TimeInterval
     let allowInsecureTLS: Bool
+    let tlsCertificateSHA256: String?
     let accountID: String
     let accountLabel: String?
     let thresholds: BalanceThresholdConfiguration
@@ -16,6 +17,7 @@ struct BalanceAPIConfiguration: Equatable {
         secret: String,
         timeout: TimeInterval,
         allowInsecureTLS: Bool,
+        tlsCertificateSHA256: String? = nil,
         accountID: String = "default",
         accountLabel: String? = nil,
         thresholds: BalanceThresholdConfiguration = BalanceThresholdConfiguration()
@@ -25,6 +27,7 @@ struct BalanceAPIConfiguration: Equatable {
         self.secret = secret
         self.timeout = timeout
         self.allowInsecureTLS = allowInsecureTLS
+        self.tlsCertificateSHA256 = tlsCertificateSHA256
         self.accountID = accountID
         self.accountLabel = accountLabel
         self.thresholds = thresholds.normalized
@@ -331,7 +334,15 @@ final class BalanceAPIClient: NSObject, URLSessionTaskDelegate {
                   protocolName: challenge.protectionSpace.protocol,
                   configuredURL: configuredURL
               ),
-              let trust = challenge.protectionSpace.serverTrust else {
+              let trust = challenge.protectionSpace.serverTrust,
+              NetworkSecurityPolicy.matchesPinnedCertificate(
+                  trust,
+                  expectedSHA256: configuration.tlsCertificateSHA256
+              ) else {
+            if configuration.allowInsecureTLS,
+               challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust {
+                return (.cancelAuthenticationChallenge, nil)
+            }
             return (.performDefaultHandling, nil)
         }
         return (.useCredential, URLCredential(trust: trust))
