@@ -2,7 +2,9 @@ import AppKit
 import Foundation
 
 let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-let resourcesDirectory = root.appendingPathComponent("Resources", isDirectory: true)
+let resourcesDirectory = CommandLine.arguments.dropFirst().first.map {
+    URL(fileURLWithPath: $0, isDirectory: true)
+} ?? root.appendingPathComponent("Resources", isDirectory: true)
 let iconsetDirectory = resourcesDirectory.appendingPathComponent("AppIcon.iconset", isDirectory: true)
 let icnsURL = resourcesDirectory.appendingPathComponent("AppIcon.icns")
 
