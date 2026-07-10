@@ -902,6 +902,10 @@ final class CodexNotchSettings: ObservableObject {
             defaults.removeObject(forKey: Keys.secretStorageMigrationState)
             return "密钥迁移状态损坏，已保留当前存储。"
         }
+        guard state.sourceMode != state.targetMode else {
+            defaults.removeObject(forKey: Keys.secretStorageMigrationState)
+            return "密钥迁移状态无效，已保留当前存储。"
+        }
 
         do {
             let targetStore = secretStores.store(for: state.targetMode)
