@@ -67,7 +67,7 @@ enum BalanceAPIError: LocalizedError {
     }
 }
 
-final class BalanceAPIClient: NSObject, URLSessionDelegate {
+final class BalanceAPIClient: NSObject, URLSessionTaskDelegate {
     private let configuration: BalanceAPIConfiguration
 
     init(configuration: BalanceAPIConfiguration) {
@@ -210,7 +210,7 @@ final class BalanceAPIClient: NSObject, URLSessionDelegate {
         guard !username.isEmpty else {
             throw BalanceAPIError.missingUsername
         }
-        guard !configuration.secret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        guard !configuration.secret.isEmpty else {
             throw BalanceAPIError.missingKey
         }
         let loginEndpoint = baseURL
@@ -236,7 +236,7 @@ final class BalanceAPIClient: NSObject, URLSessionDelegate {
         guard !username.isEmpty else {
             throw BalanceAPIError.missingUsername
         }
-        guard !configuration.secret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        guard !configuration.secret.isEmpty else {
             throw BalanceAPIError.missingKey
         }
         let loginEndpoint = baseURL
@@ -266,7 +266,7 @@ final class BalanceAPIClient: NSObject, URLSessionDelegate {
         sessionConfig.httpShouldSetCookies = true
         return URLSession(
             configuration: sessionConfig,
-            delegate: configuration.allowInsecureTLS ? self : nil,
+            delegate: self,
             delegateQueue: nil
         )
     }
@@ -324,10 +324,37 @@ final class BalanceAPIClient: NSObject, URLSessionDelegate {
     ) async -> (URLSession.AuthChallengeDisposition, URLCredential?) {
         guard configuration.allowInsecureTLS,
               challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              let configuredURL = Self.apiBaseURL(from: configuration.panelURL),
+              NetworkSecurityPolicy.matchesProtectionSpace(
+                  host: challenge.protectionSpace.host,
+                  port: challenge.protectionSpace.port,
+                  protocolName: challenge.protectionSpace.protocol,
+                  configuredURL: configuredURL
+              ),
               let trust = challenge.protectionSpace.serverTrust else {
             return (.performDefaultHandling, nil)
         }
         return (.useCredential, URLCredential(trust: trust))
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        guard let configuredURL = Self.apiBaseURL(from: configuration.panelURL),
+              let newURL = request.url,
+              NetworkSecurityPolicy.allowsRedirect(
+                  from: task.currentRequest?.url ?? task.originalRequest?.url,
+                  to: newURL,
+                  configuredURL: configuredURL
+              ) else {
+            completionHandler(nil)
+            return
+        }
+        completionHandler(request)
     }
 
     static func apiBaseURL(from input: String) -> URL? {
@@ -399,7 +426,7 @@ final class BalanceAPIClient: NSObject, URLSessionDelegate {
 
     static func newAPILoginBody(for configuration: BalanceAPIConfiguration) throws -> Data {
         let username = configuration.username.trimmingCharacters(in: .whitespacesAndNewlines)
-        let password = configuration.secret.trimmingCharacters(in: .whitespacesAndNewlines)
+        let password = configuration.secret
         guard !username.isEmpty else {
             throw BalanceAPIError.missingUsername
         }
@@ -432,7 +459,7 @@ final class BalanceAPIClient: NSObject, URLSessionDelegate {
 
     static func subAPILoginBody(for configuration: BalanceAPIConfiguration) throws -> Data {
         let username = configuration.username.trimmingCharacters(in: .whitespacesAndNewlines)
-        let password = configuration.secret.trimmingCharacters(in: .whitespacesAndNewlines)
+        let password = configuration.secret
         guard !username.isEmpty else {
             throw BalanceAPIError.missingUsername
         }
