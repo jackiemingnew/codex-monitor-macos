@@ -69,6 +69,8 @@ final class CodexNotchSettings: ObservableObject {
         static let subAPIWarningThreshold = "subAPIWarningThreshold"
         static let subAPIAlertThreshold = "subAPIAlertThreshold"
         static let secretStorageMode = "secretStorageMode"
+        static let secretStorageMigrationState = "secretStorageMigrationState"
+        static let legacySecretCleanupState = "legacySecretCleanupState"
     }
 
     private let defaults: UserDefaults
@@ -515,13 +517,17 @@ final class CodexNotchSettings: ObservableObject {
         }
 
         do {
+            let migrationRecoveryError = recoverPendingSecretStorageMigration()
+            let legacyRecoveryError = recoverPendingLegacySecretCleanup()
             var loadedVault = try secretStores.store(for: secretStorageMode).loadVault()
             var migratedSecretVault = false
+            var migratedLegacyLocations: [LegacySecretLocation] = []
             migratedSecretVault = Self.applyInitialOrLegacySecret(
                 initialValue: initialManagementKey,
                 key: .cliproxyManagement,
                 legacyLocations: [(Self.cliproxyKeychainService, Self.cliproxyKeychainAccount)],
-                vault: &loadedVault
+                vault: &loadedVault,
+                migratedLocations: &migratedLegacyLocations
             ) || migratedSecretVault
             migratedSecretVault = Self.applyInitialOrLegacySecret(
                 initialValue: initialNewAPIKey,
@@ -530,13 +536,15 @@ final class CodexNotchSettings: ObservableObject {
                     (Self.newAPIKeychainService, Self.cliproxyKeychainAccount),
                     ("com.alight.codexnotch.newapi.management-key", Self.cliproxyKeychainAccount)
                 ],
-                vault: &loadedVault
+                vault: &loadedVault,
+                migratedLocations: &migratedLegacyLocations
             ) || migratedSecretVault
             migratedSecretVault = Self.applyInitialOrLegacySecret(
                 initialValue: initialSubAPIKey,
                 key: .subAPIManagement,
                 legacyLocations: [(Self.subAPIKeychainService, Self.cliproxyKeychainAccount)],
-                vault: &loadedVault
+                vault: &loadedVault,
+                migratedLocations: &migratedLegacyLocations
             ) || migratedSecretVault
 
             secretVault = loadedVault
@@ -562,6 +570,7 @@ final class CodexNotchSettings: ObservableObject {
                 )
             )
             migratedSecretVault = loadedNewAPIAccounts.migratedSecrets || migratedSecretVault
+            migratedLegacyLocations.append(contentsOf: loadedNewAPIAccounts.migratedLegacyLocations)
             newAPIAccounts = loadedNewAPIAccounts.accounts
             newAPIKeychainError = loadedNewAPIAccounts.keychainError
 
@@ -583,16 +592,34 @@ final class CodexNotchSettings: ObservableObject {
                 )
             )
             migratedSecretVault = loadedSubAPIAccounts.migratedSecrets || migratedSecretVault
+            migratedLegacyLocations.append(contentsOf: loadedSubAPIAccounts.migratedLegacyLocations)
             subAPIAccounts = loadedSubAPIAccounts.accounts
             subAPIKeychainError = loadedSubAPIAccounts.keychainError
             secretVault = loadedVault
 
             if migratedSecretVault {
-                try secretStores.store(for: secretStorageMode).saveVault(loadedVault)
+                let activeStore = secretStores.store(for: secretStorageMode)
+                if !migratedLegacyLocations.isEmpty {
+                    let cleanupState = LegacySecretCleanupState(
+                        locations: Array(Set(migratedLegacyLocations)),
+                        targetMode: secretStorageMode,
+                        expectedDigest: try loadedVault.migrationDigest()
+                    )
+                    defaults.set(try JSONEncoder().encode(cleanupState), forKey: Keys.legacySecretCleanupState)
+                }
+                try activeStore.saveVault(loadedVault)
+                guard try activeStore.loadVault() == loadedVault else {
+                    throw SecretStorageMigrationError.verificationFailed
+                }
             }
 
+            let migratedLegacyCleanupError = recoverPendingLegacySecretCleanup()
             secretsLoaded = true
-            secretStorageError = nil
+            secretStorageError = Self.joinedErrors([
+                migrationRecoveryError,
+                legacyRecoveryError,
+                migratedLegacyCleanupError
+            ])
             return true
         } catch {
             secretStorageError = error.localizedDescription
@@ -610,11 +637,23 @@ final class CodexNotchSettings: ObservableObject {
         guard loadSecretsIfNeeded() else {
             return
         }
+        let sourceMode = secretStorageMode
         do {
-            try secretStores.store(for: mode).saveVault(secretVault)
+            let migrationState = SecretStorageMigrationState(
+                sourceMode: sourceMode,
+                targetMode: mode,
+                expectedDigest: try secretVault.migrationDigest()
+            )
+            defaults.set(try JSONEncoder().encode(migrationState), forKey: Keys.secretStorageMigrationState)
+
+            let targetStore = secretStores.store(for: mode)
+            try targetStore.saveVault(secretVault)
+            guard try targetStore.loadVault() == secretVault else {
+                throw SecretStorageMigrationError.verificationFailed
+            }
             secretStorageMode = mode
             defaults.set(mode.rawValue, forKey: Keys.secretStorageMode)
-            secretStorageError = nil
+            secretStorageError = cleanupSourceStore(for: migrationState)
         } catch {
             secretStorageError = error.localizedDescription
         }
@@ -752,7 +791,8 @@ final class CodexNotchSettings: ObservableObject {
         initialValue: String?,
         key: SecretKey,
         legacyLocations: [(service: String, account: String)],
-        vault: inout SecretVault
+        vault: inout SecretVault,
+        migratedLocations: inout [LegacySecretLocation]
     ) -> Bool {
         if let initialValue {
             vault.set(initialValue, for: key)
@@ -767,6 +807,7 @@ final class CodexNotchSettings: ObservableObject {
                 continue
             }
             vault.set(legacyValue, for: key)
+            migratedLocations.append(LegacySecretLocation(service: location.service, account: location.account))
             return true
         }
         return false
@@ -789,6 +830,7 @@ final class CodexNotchSettings: ObservableObject {
            let decoded = try? JSONDecoder().decode([BalanceAccountConfiguration].self, from: data) {
             var keychainErrors: [String] = []
             var migratedSecrets = false
+            var migratedLegacyLocations: [LegacySecretLocation] = []
             let accounts = decoded.map { account in
                 var copy = account
                 copy.source = source
@@ -808,6 +850,7 @@ final class CodexNotchSettings: ObservableObject {
                     if !legacySecret.isEmpty {
                         vault.set(legacySecret, for: secretKey)
                         migratedSecrets = true
+                        migratedLegacyLocations.append(LegacySecretLocation(service: service, account: copy.id))
                     }
                 } catch {
                     copy.secret = ""
@@ -819,15 +862,116 @@ final class CodexNotchSettings: ObservableObject {
             return BalanceAccountsLoadResult(
                 accounts: accounts,
                 keychainError: keychainErrors.isEmpty ? nil : keychainErrors.joined(separator: "；"),
-                migratedSecrets: migratedSecrets
+                migratedSecrets: migratedSecrets,
+                migratedLegacyLocations: migratedLegacyLocations
             )
         }
 
         return BalanceAccountsLoadResult(
             accounts: hasLegacyConfiguration ? [legacy] : [],
             keychainError: nil,
-            migratedSecrets: false
+            migratedSecrets: false,
+            migratedLegacyLocations: []
         )
+    }
+
+    private func recoverPendingSecretStorageMigration() -> String? {
+        guard let data = defaults.data(forKey: Keys.secretStorageMigrationState) else {
+            return nil
+        }
+        guard let state = try? JSONDecoder().decode(SecretStorageMigrationState.self, from: data) else {
+            defaults.removeObject(forKey: Keys.secretStorageMigrationState)
+            return "密钥迁移状态损坏，已保留当前存储。"
+        }
+
+        do {
+            let targetStore = secretStores.store(for: state.targetMode)
+            var targetVault = try targetStore.loadVault()
+            if try targetVault.migrationDigest() != state.expectedDigest {
+                let sourceVault = try secretStores.store(for: state.sourceMode).loadVault()
+                guard try sourceVault.migrationDigest() == state.expectedDigest else {
+                    secretStorageMode = state.sourceMode
+                    defaults.set(state.sourceMode.rawValue, forKey: Keys.secretStorageMode)
+                    return "密钥迁移两端均未通过校验，已保留源存储且未删除任何数据。"
+                }
+                try targetStore.saveVault(sourceVault)
+                targetVault = try targetStore.loadVault()
+                guard targetVault == sourceVault else {
+                    throw SecretStorageMigrationError.verificationFailed
+                }
+            }
+            secretStorageMode = state.targetMode
+            defaults.set(state.targetMode.rawValue, forKey: Keys.secretStorageMode)
+            return cleanupSourceStore(for: state)
+        } catch {
+            return "密钥迁移恢复失败：\(error.localizedDescription)"
+        }
+    }
+
+    private func cleanupSourceStore(for state: SecretStorageMigrationState) -> String? {
+        do {
+            let sourceStore = secretStores.store(for: state.sourceMode)
+            try sourceStore.deleteVault()
+            guard try sourceStore.loadVault().isEmpty else {
+                throw SecretStorageMigrationError.sourceCleanupFailed
+            }
+            defaults.removeObject(forKey: Keys.secretStorageMigrationState)
+            return nil
+        } catch {
+            return "已切换密钥存储，但旧副本清理失败，将在下次启动重试：\(error.localizedDescription)"
+        }
+    }
+
+    private func recoverPendingLegacySecretCleanup() -> String? {
+        guard let data = defaults.data(forKey: Keys.legacySecretCleanupState) else {
+            return nil
+        }
+        guard let state = try? JSONDecoder().decode(LegacySecretCleanupState.self, from: data) else {
+            defaults.removeObject(forKey: Keys.legacySecretCleanupState)
+            return "旧版密钥清理状态损坏，未删除任何凭证。"
+        }
+
+        do {
+            let targetVault = try secretStores.store(for: state.targetMode).loadVault()
+            guard try targetVault.migrationDigest() == state.expectedDigest else {
+                return "新版凭证库尚未通过校验，旧版 Keychain 凭证暂未删除。"
+            }
+        } catch {
+            return "新版凭证库校验失败，旧版 Keychain 凭证暂未删除：\(error.localizedDescription)"
+        }
+
+        var remaining: [LegacySecretLocation] = []
+        var errors: [String] = []
+        for location in state.locations {
+            do {
+                try KeychainStore.delete(service: location.service, account: location.account)
+            } catch {
+                remaining.append(location)
+                errors.append(error.localizedDescription)
+            }
+        }
+
+        if remaining.isEmpty {
+            defaults.removeObject(forKey: Keys.legacySecretCleanupState)
+            return nil
+        }
+        let pending = LegacySecretCleanupState(
+            locations: remaining,
+            targetMode: state.targetMode,
+            expectedDigest: state.expectedDigest
+        )
+        if let encoded = try? JSONEncoder().encode(pending) {
+            defaults.set(encoded, forKey: Keys.legacySecretCleanupState)
+        }
+        return "部分旧版 Keychain 凭证清理失败，将在下次启动重试：\(errors.joined(separator: "；"))"
+    }
+
+    private static func joinedErrors(_ errors: [String?]) -> String? {
+        let values = errors.compactMap { value -> String? in
+            guard let value, !value.isEmpty else { return nil }
+            return value
+        }
+        return values.isEmpty ? nil : values.joined(separator: "；")
     }
 
     private static func balanceAccountKeychainService(for source: BalanceMonitorSource) -> String {
@@ -1275,4 +1419,36 @@ private struct BalanceAccountsLoadResult {
     let accounts: [BalanceAccountConfiguration]
     let keychainError: String?
     let migratedSecrets: Bool
+    let migratedLegacyLocations: [LegacySecretLocation]
+}
+
+private struct LegacySecretLocation: Codable, Hashable {
+    let service: String
+    let account: String
+}
+
+private struct SecretStorageMigrationState: Codable {
+    let sourceMode: SecretStorageMode
+    let targetMode: SecretStorageMode
+    let expectedDigest: String
+}
+
+private struct LegacySecretCleanupState: Codable {
+    let locations: [LegacySecretLocation]
+    let targetMode: SecretStorageMode
+    let expectedDigest: String
+}
+
+private enum SecretStorageMigrationError: LocalizedError {
+    case verificationFailed
+    case sourceCleanupFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .verificationFailed:
+            "目标凭证库回读校验失败，未切换存储模式。"
+        case .sourceCleanupFailed:
+            "旧凭证库删除后仍能读到数据。"
+        }
+    }
 }
