@@ -64,6 +64,7 @@ struct CodexRadarClient: Sendable {
         }
 
         let (data, response) = try await execute(request)
+        try NetworkResponsePolicy.validate(data, response: response)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw CodexRadarClientError.invalidResponse
         }
@@ -89,7 +90,7 @@ struct CodexRadarClient: Sendable {
         defer {
             session.finishTasksAndInvalidate()
         }
-        return try await session.data(for: request)
+        return try await NetworkResponsePolicy.data(for: request, session: session)
     }
 
     static func fallbackReason(for error: Error) -> CodexRadarFallbackReason? {
