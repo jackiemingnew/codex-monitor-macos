@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import CryptoKit
 import SQLite3
 
 enum SecretStorageMode: String, CaseIterable, Identifiable, Codable {
@@ -51,6 +52,13 @@ struct SecretVault: Codable, Equatable {
 
     mutating func removeValue(for key: SecretKey) {
         values.removeValue(forKey: key.rawValue)
+    }
+
+    func migrationDigest() throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let digest = SHA256.hash(data: try encoder.encode(self))
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 }
 

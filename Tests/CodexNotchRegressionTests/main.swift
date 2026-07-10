@@ -1156,20 +1156,28 @@ final class FakeLaunchAtLoginManager: LaunchAtLoginManaging {
 enum CountingSecretStoreError: Error {
     case load
     case save
+    case delete
 }
 
 final class CountingSecretStore: SecretStore {
     private var vault: SecretVault
     private let failOnLoad: Bool
-    private let failOnSave: Bool
+    var failOnSave: Bool
+    var failOnDelete: Bool
     private(set) var loadCount = 0
     private(set) var saveCount = 0
     private(set) var deleteCount = 0
 
-    init(vault: SecretVault = SecretVault(), failOnLoad: Bool = false, failOnSave: Bool = false) {
+    init(
+        vault: SecretVault = SecretVault(),
+        failOnLoad: Bool = false,
+        failOnSave: Bool = false,
+        failOnDelete: Bool = false
+    ) {
         self.vault = vault
         self.failOnLoad = failOnLoad
         self.failOnSave = failOnSave
+        self.failOnDelete = failOnDelete
     }
 
     func loadVault() throws -> SecretVault {
@@ -1190,6 +1198,9 @@ final class CountingSecretStore: SecretStore {
 
     func deleteVault() throws {
         deleteCount += 1
+        if failOnDelete {
+            throw CountingSecretStoreError.delete
+        }
         vault = SecretVault()
     }
 }
@@ -1506,8 +1517,8 @@ let databaseModeDefaults = runner.require(
     "database secret mode defaults should be available"
 )
 databaseModeDefaults.removePersistentDomain(forName: databaseModeSuiteName)
-let keychainStoreForDatabaseMode = MemorySecretStore()
-let databaseStoreForDatabaseMode = MemorySecretStore()
+let keychainStoreForDatabaseMode = CountingSecretStore()
+let databaseStoreForDatabaseMode = CountingSecretStore()
 let databaseModeSettings = CodexNotchSettings(
     defaults: databaseModeDefaults,
     initialManagementKey: "clip-secret",
@@ -1517,6 +1528,10 @@ let databaseModeSettings = CodexNotchSettings(
     launchAtLoginManager: FakeLaunchAtLoginManager()
 )
 databaseModeSettings.setSecretStorageMode(.database)
+runner.check(databaseModeSettings.secretStorageMode == .database, "verified secret migration should switch storage mode")
+runner.check(keychainStoreForDatabaseMode.deleteCount == 1, "secret migration should delete the source vault")
+let migratedSourceVault = try keychainStoreForDatabaseMode.loadVault()
+runner.check(migratedSourceVault.isEmpty, "secret migration should leave the source vault empty")
 databaseModeSettings.setBalanceAccounts([
     BalanceAccountConfiguration(
         id: "db-account",
@@ -1544,6 +1559,65 @@ runner.check(
     "database mode should reload account secret"
 )
 databaseModeDefaults.removePersistentDomain(forName: databaseModeSuiteName)
+
+let retryCleanupSuiteName = "CodexNotchSecretCleanupRetry-\(UUID().uuidString)"
+let retryCleanupDefaults = runner.require(
+    UserDefaults(suiteName: retryCleanupSuiteName),
+    "secret cleanup retry defaults should be available"
+)
+retryCleanupDefaults.removePersistentDomain(forName: retryCleanupSuiteName)
+
+let retryWriteSuiteName = "CodexNotchSecretWriteRetry-\(UUID().uuidString)"
+let retryWriteDefaults = runner.require(
+    UserDefaults(suiteName: retryWriteSuiteName),
+    "secret write retry defaults should be available"
+)
+retryWriteDefaults.removePersistentDomain(forName: retryWriteSuiteName)
+let retryWriteSource = CountingSecretStore()
+let retryWriteTarget = CountingSecretStore(failOnSave: true)
+let retryWriteSettings = CodexNotchSettings(
+    defaults: retryWriteDefaults,
+    initialManagementKey: "write-retry-secret",
+    secretStores: SecretStoreFactory(keychain: retryWriteSource, database: retryWriteTarget),
+    launchAtLoginManager: FakeLaunchAtLoginManager()
+)
+retryWriteSettings.setSecretStorageMode(.database)
+runner.check(retryWriteSettings.secretStorageMode == .keychain, "failed target write should keep the source mode")
+runner.check(retryWriteSource.deleteCount == 0, "failed target write must not delete the source vault")
+retryWriteTarget.failOnSave = false
+let recoveredWriteSettings = CodexNotchSettings(
+    defaults: retryWriteDefaults,
+    secretStores: SecretStoreFactory(keychain: retryWriteSource, database: retryWriteTarget),
+    launchAtLoginManager: FakeLaunchAtLoginManager()
+)
+runner.check(recoveredWriteSettings.loadSecretsIfNeeded(), "pending target write should recover on the next launch")
+runner.check(recoveredWriteSettings.secretStorageMode == .database, "write recovery should complete the target switch")
+runner.check(retryWriteSource.deleteCount == 1, "write recovery should delete the verified source vault")
+runner.check(recoveredWriteSettings.cliproxyManagementKey == "write-retry-secret", "write recovery should preserve migrated secrets")
+retryWriteDefaults.removePersistentDomain(forName: retryWriteSuiteName)
+let retryCleanupSource = CountingSecretStore(failOnDelete: true)
+let retryCleanupTarget = CountingSecretStore()
+let retryCleanupSettings = CodexNotchSettings(
+    defaults: retryCleanupDefaults,
+    initialManagementKey: "retry-secret",
+    secretStores: SecretStoreFactory(keychain: retryCleanupSource, database: retryCleanupTarget),
+    launchAtLoginManager: FakeLaunchAtLoginManager()
+)
+retryCleanupSettings.setSecretStorageMode(.database)
+runner.check(retryCleanupSettings.secretStorageMode == .database, "verified migration should stay on target when source cleanup fails")
+runner.check(retryCleanupSettings.secretStorageError?.contains("下次启动重试") == true, "failed source cleanup should remain visible and retryable")
+retryCleanupSource.failOnDelete = false
+let recoveredCleanupSettings = CodexNotchSettings(
+    defaults: retryCleanupDefaults,
+    secretStores: SecretStoreFactory(keychain: retryCleanupSource, database: retryCleanupTarget),
+    launchAtLoginManager: FakeLaunchAtLoginManager()
+)
+runner.check(recoveredCleanupSettings.loadSecretsIfNeeded(), "pending secret cleanup should recover on the next launch")
+runner.check(recoveredCleanupSettings.secretStorageMode == .database, "cleanup recovery should keep the verified target mode")
+let recoveredSourceVault = try retryCleanupSource.loadVault()
+runner.check(recoveredSourceVault.isEmpty, "cleanup recovery should remove the old source vault")
+runner.check(recoveredCleanupSettings.secretStorageError == nil, "successful cleanup recovery should clear the migration error")
+retryCleanupDefaults.removePersistentDomain(forName: retryCleanupSuiteName)
 
 let oldBalanceAccount = BalanceAccountConfiguration(
     id: "account-1",
