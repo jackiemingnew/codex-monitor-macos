@@ -11,6 +11,17 @@ final class TestRunner {
         FileHandle.standardError.write(Data("FAILED: \(message)\n".utf8))
     }
 
+    func checkEqual<T: Equatable>(_ actual: @autoclosure () -> T, _ expected: T, _ message: String) {
+        let actualValue = actual()
+        guard actualValue == expected else {
+            failures += 1
+            FileHandle.standardError.write(
+                Data("FAILED: \(message) (actual: \(actualValue), expected: \(expected))\n".utf8)
+            )
+            return
+        }
+    }
+
     func require<T>(_ value: T?, _ message: String) -> T {
         guard let value else {
             failures += 1
@@ -3251,7 +3262,11 @@ _ = try Shell.run("/usr/bin/sqlite3", [
     """
 ])
 
-let localStore = CodexUsageStore(codexDirectory: tempRoot)
+let localStore = CodexUsageStore(
+    codexDirectory: tempRoot,
+    deltaDatabase: deltaDatabase,
+    ripgrepCandidates: []
+)
 let localSnapshot = localStore.loadSnapshot(
     includePeriodUsage: false,
     bypassFastCache: true,
@@ -4465,10 +4480,10 @@ let cachedLocalSnapshot = localStore.loadSnapshot(
 )
 runner.check(cachedLocalSnapshot.tasks.contains { $0.id == parentOnlySessionID && $0.status == .running }, "fast snapshot cache should preserve active parent task ids")
 runner.check(cachedLocalSnapshot.tasks.first { $0.id == parentOnlySessionID }?.activeSubagentCount == 1, "fast snapshot cache should preserve active subagent counts")
-runner.check(localStore.loadUsageTotals(now: now)?.day == expectedPeriodUsage24h, "24h local usage should use parent rolling delta baselines")
-runner.check(localStore.loadUsageTotals(now: now)?.week == expectedPeriodUsage7d, "7d local usage should not inflate missing-baseline threads")
-runner.check(localStore.loadUsageTotals(now: now)?.month == expectedPeriodUsage30d, "30d local usage should not inflate missing-baseline threads")
-runner.check(localStore.loadUsageTotals(now: now.addingTimeInterval(1))?.day == expectedPeriodUsage24h, "unchanged local rolling usage totals should remain stable across refreshes")
+runner.checkEqual(localStore.loadUsageTotals(now: now)?.day, expectedPeriodUsage24h, "24h local usage should use parent rolling delta baselines")
+runner.checkEqual(localStore.loadUsageTotals(now: now)?.week, expectedPeriodUsage7d, "7d local usage should not inflate missing-baseline threads")
+runner.checkEqual(localStore.loadUsageTotals(now: now)?.month, expectedPeriodUsage30d, "30d local usage should not inflate missing-baseline threads")
+runner.checkEqual(localStore.loadUsageTotals(now: now.addingTimeInterval(1))?.day, expectedPeriodUsage24h, "unchanged local rolling usage totals should remain stable across refreshes")
 let localExportSnapshot = localStore.loadSnapshot(
     includePeriodUsage: true,
     bypassFastCache: true,
@@ -4476,15 +4491,15 @@ let localExportSnapshot = localStore.loadSnapshot(
     taskHistoryRange: .day,
     now: now
 )
-runner.check(localExportSnapshot.usage24h == expectedPeriodUsage24h, "export snapshots should expose 24h rolling delta usage")
-runner.check(localExportSnapshot.usage7d == expectedPeriodUsage7d, "export snapshots should expose 7d rolling delta usage")
-runner.check(localExportSnapshot.usage30d == expectedPeriodUsage30d, "export snapshots should expose 30d rolling delta usage")
+runner.checkEqual(localExportSnapshot.usage24h, expectedPeriodUsage24h, "export snapshots should expose 24h rolling delta usage")
+runner.checkEqual(localExportSnapshot.usage7d, expectedPeriodUsage7d, "export snapshots should expose 7d rolling delta usage")
+runner.checkEqual(localExportSnapshot.usage30d, expectedPeriodUsage30d, "export snapshots should expose 30d rolling delta usage")
 let localExportSnapshotJSON = try JSONSerialization.jsonObject(
     with: SnapshotOutputFormatter.jsonData(for: localExportSnapshot)
 ) as? [String: Any]
-runner.check(localExportSnapshotJSON?["usage_24h"] as? Int == expectedPeriodUsage24h, "compact JSON should expose rolling delta usage_24h")
-runner.check(localExportSnapshotJSON?["usage_7d"] as? Int == expectedPeriodUsage7d, "compact JSON should expose rolling delta usage_7d")
-runner.check(localExportSnapshotJSON?["usage_30d"] as? Int == expectedPeriodUsage30d, "compact JSON should expose rolling delta usage_30d")
+runner.checkEqual(localExportSnapshotJSON?["usage_24h"] as? Int, expectedPeriodUsage24h, "compact JSON should expose rolling delta usage_24h")
+runner.checkEqual(localExportSnapshotJSON?["usage_7d"] as? Int, expectedPeriodUsage7d, "compact JSON should expose rolling delta usage_7d")
+runner.checkEqual(localExportSnapshotJSON?["usage_30d"] as? Int, expectedPeriodUsage30d, "compact JSON should expose rolling delta usage_30d")
 
 let defaultDeltaPath = CodexUsageStore.defaultDeltaDatabasePath(
     for: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
@@ -4551,9 +4566,9 @@ runner.check(nodeCompatibleRecent?["usage20dAllTokens"] as? Int == expectedRecen
 runner.check(nodeCompatibleRecent?["metricId"] as? String == "recent.usage_20d_all_tokens", "node-compatible JSON should identify recent 20d all metric")
 runner.check(nodeCompatibleDaily?["usageTodayTokens"] as? Int == localExportSnapshot.dailyUsage.usageTodayTokens, "node-compatible JSON should expose natural-day usage")
 runner.check(nodeCompatibleDaily?["metricId"] as? String == "daily.usage_today_tokens", "node-compatible JSON should identify natural-day usage metric")
-runner.check((nodeCompatiblePeriod?["usage24h"] as? Int) == expectedPeriodUsage24h, "node-compatible JSON should expose rolling delta periodUsage usage24h")
-runner.check((nodeCompatiblePeriod?["usage7d"] as? Int) == expectedPeriodUsage7d, "node-compatible JSON should expose rolling delta periodUsage usage7d")
-runner.check((nodeCompatiblePeriod?["usage30d"] as? Int) == expectedPeriodUsage30d, "node-compatible JSON should expose rolling delta periodUsage usage30d")
+runner.checkEqual(nodeCompatiblePeriod?["usage24h"] as? Int, expectedPeriodUsage24h, "node-compatible JSON should expose rolling delta periodUsage usage24h")
+runner.checkEqual(nodeCompatiblePeriod?["usage7d"] as? Int, expectedPeriodUsage7d, "node-compatible JSON should expose rolling delta periodUsage usage7d")
+runner.checkEqual(nodeCompatiblePeriod?["usage30d"] as? Int, expectedPeriodUsage30d, "node-compatible JSON should expose rolling delta periodUsage usage30d")
 runner.check(nodeCompatiblePeriod?["usage30d"] as? Int != nil && nodeCompatibleRecent?["usage20dAllTokens"] as? Int != nil, "periodUsage should remain available alongside recent 20d usage")
 runner.check(nodeCompatibleRateLimits?["limitId"] as? String == "codex", "node-compatible JSON should identify the main quota as codex")
 runner.check(nodeCompatibleRateLimits?["ok"] as? Bool == true, "node-compatible JSON should mark main quota as available")

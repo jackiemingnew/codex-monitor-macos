@@ -7,6 +7,7 @@ MOUNT_POINTS=()
 
 cleanup() {
   local mount_point
+  set +u
   for mount_point in "${MOUNT_POINTS[@]}"; do
     hdiutil detach "$mount_point" >/dev/null 2>&1 || true
   done
