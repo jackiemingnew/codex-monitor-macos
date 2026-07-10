@@ -2711,17 +2711,23 @@ final class CodexUsageStore: @unchecked Sendable {
         cacheLock.unlock()
 
         if let cachedPaths,
+           cachedPaths.collectedLimit >= limit,
            Date().timeIntervalSince(cachedPaths.createdAt) < 5 {
             return Array(cachedPaths.paths.prefix(limit))
         }
 
+        let collectedLimit = max(limit, cachedPaths?.collectedLimit ?? 0)
         let paths = collectRecentSessionPaths(
             roots: [codexDirectory.appendingPathComponent("sessions")],
-            limit: limit
+            limit: collectedLimit
         )
 
         cacheLock.lock()
-        recentTaskPathsCache = RecentPathsCache(createdAt: Date(), paths: paths)
+        recentTaskPathsCache = RecentPathsCache(
+            createdAt: Date(),
+            paths: paths,
+            collectedLimit: collectedLimit
+        )
         cacheLock.unlock()
 
         return Array(paths.prefix(limit))
@@ -2733,6 +2739,7 @@ final class CodexUsageStore: @unchecked Sendable {
         cacheLock.unlock()
 
         if let cachedPaths,
+           cachedPaths.collectedLimit >= limit,
            Date().timeIntervalSince(cachedPaths.createdAt) < 5 {
             return Array(cachedPaths.paths.prefix(limit))
         }
@@ -2742,10 +2749,15 @@ final class CodexUsageStore: @unchecked Sendable {
             codexDirectory.appendingPathComponent("archived_sessions")
         ]
 
-        let paths = collectRecentSessionPaths(roots: roots, limit: max(limit, 8))
+        let collectedLimit = max(limit, 8, cachedPaths?.collectedLimit ?? 0)
+        let paths = collectRecentSessionPaths(roots: roots, limit: collectedLimit)
 
         cacheLock.lock()
-        recentPathsCache = RecentPathsCache(createdAt: Date(), paths: paths)
+        recentPathsCache = RecentPathsCache(
+            createdAt: Date(),
+            paths: paths,
+            collectedLimit: collectedLimit
+        )
         cacheLock.unlock()
 
         return Array(paths.prefix(limit))
@@ -4017,6 +4029,7 @@ private struct RollingDeltaRecord: Decodable {
 private struct RecentPathsCache {
     let createdAt: Date
     let paths: [String]
+    let collectedLimit: Int
 }
 
 private struct SessionTokenTotalCache {

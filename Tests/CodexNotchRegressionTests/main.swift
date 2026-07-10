@@ -3417,9 +3417,9 @@ let expectedRecentArchivedTokens = try Shell.sqliteJSON(
     as: [CountRecord].self,
     readOnly: true
 ).first?.count ?? 0
-let expectedPeriodUsage24h = 12_945
-let expectedPeriodUsage7d = 102_945
-let expectedPeriodUsage30d = 102_945
+let expectedPeriodUsage24h = 55_734
+let expectedPeriodUsage7d = 282_734
+let expectedPeriodUsage30d = 282_734
 runner.check(localSnapshot.cumulativeUsage.activeTokens == expectedActiveCumulativeTokens, "snapshot cumulative active tokens should match readonly state DB")
 runner.check(localSnapshot.cumulativeUsage.archivedTokens == expectedArchivedCumulativeTokens, "snapshot cumulative archived tokens should match readonly state DB")
 runner.check(localSnapshot.cumulativeUsage.allTokens == expectedActiveCumulativeTokens + expectedArchivedCumulativeTokens, "snapshot cumulative all tokens should equal active plus archived")
@@ -4481,8 +4481,8 @@ let cachedLocalSnapshot = localStore.loadSnapshot(
 runner.check(cachedLocalSnapshot.tasks.contains { $0.id == parentOnlySessionID && $0.status == .running }, "fast snapshot cache should preserve active parent task ids")
 runner.check(cachedLocalSnapshot.tasks.first { $0.id == parentOnlySessionID }?.activeSubagentCount == 1, "fast snapshot cache should preserve active subagent counts")
 runner.checkEqual(localStore.loadUsageTotals(now: now)?.day, expectedPeriodUsage24h, "24h local usage should use parent rolling delta baselines")
-runner.checkEqual(localStore.loadUsageTotals(now: now)?.week, expectedPeriodUsage7d, "7d local usage should not inflate missing-baseline threads")
-runner.checkEqual(localStore.loadUsageTotals(now: now)?.month, expectedPeriodUsage30d, "30d local usage should not inflate missing-baseline threads")
+runner.checkEqual(localStore.loadUsageTotals(now: now)?.week, expectedPeriodUsage7d, "7d local usage should include new parent sessions without inflating unknown baselines")
+runner.checkEqual(localStore.loadUsageTotals(now: now)?.month, expectedPeriodUsage30d, "30d local usage should include new parent sessions without inflating unknown baselines")
 runner.checkEqual(localStore.loadUsageTotals(now: now.addingTimeInterval(1))?.day, expectedPeriodUsage24h, "unchanged local rolling usage totals should remain stable across refreshes")
 let localExportSnapshot = localStore.loadSnapshot(
     includePeriodUsage: true,
