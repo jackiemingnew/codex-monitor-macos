@@ -25,6 +25,96 @@ private struct CountRecord: Decodable {
     let count: Int
 }
 
+private final class AsyncResultBox<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Result<Value, Error>?
+
+    func store(_ value: Result<Value, Error>) {
+        lock.lock()
+        self.value = value
+        lock.unlock()
+    }
+
+    func load() -> Result<Value, Error>? {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
+private func waitForAsync<Value: Sendable>(
+    _ operation: @escaping @Sendable () async throws -> Value
+) throws -> Value {
+    let semaphore = DispatchSemaphore(value: 0)
+    let box = AsyncResultBox<Value>()
+    Task.detached {
+        do {
+            box.store(.success(try await operation()))
+        } catch {
+            box.store(.failure(error))
+        }
+        semaphore.signal()
+    }
+    semaphore.wait()
+    return try box.load()!.get()
+}
+
+final class RequestPathRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String] = []
+
+    func append(_ path: String) {
+        lock.lock()
+        storage.append(path)
+        lock.unlock()
+    }
+
+    var paths: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+}
+
+enum AppServerLoaderTestError: Error {
+    case unavailable
+}
+
+final class AppServerLoaderSequence: @unchecked Sendable {
+    enum Step {
+        case success(RateLimitSnapshot)
+        case failure
+    }
+
+    private let lock = NSLock()
+    private var steps: [Step]
+    private var attemptsStorage: [Date] = []
+
+    init(_ steps: [Step]) {
+        self.steps = steps
+    }
+
+    func load(now: Date) throws -> RateLimitSnapshot {
+        lock.lock()
+        attemptsStorage.append(now)
+        let step = steps.isEmpty ? .failure : steps.removeFirst()
+        lock.unlock()
+
+        switch step {
+        case .success(let snapshot):
+            return snapshot
+        case .failure:
+            throw AppServerLoaderTestError.unavailable
+        }
+    }
+
+    var attempts: [Date] {
+        lock.lock()
+        defer { lock.unlock() }
+        return attemptsStorage
+    }
+}
+
 let runner = TestRunner()
 let repositoryRoot = URL(fileURLWithPath: #filePath)
     .deletingLastPathComponent()
@@ -84,8 +174,8 @@ runner.check(
     "future quota windows should preserve an exact 100 percent remaining value"
 )
 runner.check(
-    preciseQuotaSnapshot.primaryDisplayPercent(now: Date(timeIntervalSince1970: 1_783_003_600)) == 100,
-    "expired quota windows should display as reset to 100 percent"
+    preciseQuotaSnapshot.primaryDisplayPercent(now: Date(timeIntervalSince1970: 1_783_003_600)) == 99,
+    "a reset timestamp alone should not synthesize a 100 percent quota"
 )
 
 let runtimeLocatorRoot = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -3152,8 +3242,8 @@ let appServerFirstSnapshot = appServerFirstStore.loadSnapshot(
     taskHistoryRange: .day,
     now: now
 )
-runner.check(appServerFirstSnapshot.primaryPercent == 67, "app-server-first should not let stale app-server cache overstate the main Codex 5h quota")
-runner.check(appServerFirstSnapshot.secondaryPercent == 45, "app-server-first should not let stale app-server cache overstate the main Codex 7d quota")
+runner.check(appServerFirstSnapshot.primaryPercent == 83, "fresh app-server 5h quota should remain authoritative")
+runner.check(appServerFirstSnapshot.secondaryPercent == 78, "fresh app-server 7d quota should remain authoritative")
 runner.check(appServerFirstSnapshot.sparkQuotaWindows.map(\.remainingPercent) == [22, 58], "app-server-first should keep Spark quota in Spark windows")
 
 let appServerMoreConstrainedStore = CodexUsageStore(
@@ -3177,6 +3267,566 @@ let appServerMoreConstrainedSnapshot = appServerMoreConstrainedStore.loadSnapsho
 )
 runner.check(appServerMoreConstrainedSnapshot.primaryPercent == 60, "app-server-first should keep app-server 5h quota when it is lower than local JSONL")
 runner.check(appServerMoreConstrainedSnapshot.secondaryPercent == 44, "app-server-first should keep app-server 7d quota when it is lower than local JSONL")
+
+let mixedQuotaGenerationRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("CodexNotchMixedQuotaGeneration-\(UUID().uuidString)")
+try FileManager.default.createDirectory(at: mixedQuotaGenerationRoot, withIntermediateDirectories: true)
+defer {
+    try? FileManager.default.removeItem(at: mixedQuotaGenerationRoot)
+}
+let mixedQuotaStateDatabase = mixedQuotaGenerationRoot.appendingPathComponent("state_5.sqlite").path
+let mixedQuotaLogsDatabase = mixedQuotaGenerationRoot.appendingPathComponent("logs_2.sqlite").path
+_ = try Shell.run("/usr/bin/sqlite3", [
+    mixedQuotaStateDatabase,
+    """
+    create table threads(
+      id text,
+      title text,
+      tokens_used integer,
+      model text,
+      reasoning_effort text,
+      rollout_path text,
+      created_at integer,
+      updated_at integer,
+      archived integer default 0
+    );
+    """
+])
+_ = try Shell.run("/usr/bin/sqlite3", [
+    mixedQuotaLogsDatabase,
+    """
+    create table logs(
+      thread_id text,
+      ts integer,
+      target text,
+      feedback_log_body text
+    );
+    """
+])
+let mixedQuotaSessionDirectory = mixedQuotaGenerationRoot
+    .appendingPathComponent("sessions/2026/07/10", isDirectory: true)
+try FileManager.default.createDirectory(at: mixedQuotaSessionDirectory, withIntermediateDirectories: true)
+
+let staleGenerationSessionID = "019f48cd-4e2c-7ce2-a31e-d7da44b4fbce"
+let currentGenerationSessionID = "019f48df-1f66-7011-8d08-2bc819d84ec7"
+let staleGenerationPath = mixedQuotaSessionDirectory
+    .appendingPathComponent("rollout-stale-\(staleGenerationSessionID).jsonl")
+let currentGenerationPath = mixedQuotaSessionDirectory
+    .appendingPathComponent("rollout-current-\(currentGenerationSessionID).jsonl")
+let staleGenerationTimestamp = ISO8601DateFormatter().string(from: now)
+let currentGenerationTimestamp = ISO8601DateFormatter().string(from: now.addingTimeInterval(-2))
+let staleGenerationPrimaryReset = Int(now.timeIntervalSince1970) + 3 * 60 * 60
+let staleGenerationSecondaryReset = Int(now.timeIntervalSince1970) + 5 * 24 * 60 * 60
+let currentGenerationPrimaryReset = Int(now.timeIntervalSince1970) + 5 * 60 * 60
+let currentGenerationSecondaryReset = Int(now.timeIntervalSince1970) + 7 * 24 * 60 * 60
+
+try """
+{"timestamp":"\(staleGenerationTimestamp)","type":"turn_context","payload":{"model":"gpt-5.6-sol","effort":"ultra"}}
+{"timestamp":"\(staleGenerationTimestamp)","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":21,"resets_at":\(staleGenerationPrimaryReset)},"secondary":{"used_percent":15,"resets_at":\(staleGenerationSecondaryReset)}}}}
+"""
+    .write(to: staleGenerationPath, atomically: true, encoding: .utf8)
+try """
+{"timestamp":"\(currentGenerationTimestamp)","type":"turn_context","payload":{"model":"gpt-5.6-sol","effort":"ultra"}}
+{"timestamp":"\(currentGenerationTimestamp)","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":6,"resets_at":\(currentGenerationPrimaryReset)},"secondary":{"used_percent":1,"resets_at":\(currentGenerationSecondaryReset)}}}}
+"""
+    .write(to: currentGenerationPath, atomically: true, encoding: .utf8)
+_ = try Shell.run("/usr/bin/sqlite3", [
+    mixedQuotaStateDatabase,
+    """
+    insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, created_at, updated_at, archived)
+    values
+      ('\(staleGenerationSessionID)', 'Stale quota generation', 0, 'gpt-5.6-sol', 'ultra', '\(staleGenerationPath.path)', \(Int(now.timeIntervalSince1970)), \(Int(now.timeIntervalSince1970)), 0),
+      ('\(currentGenerationSessionID)', 'Current quota generation', 0, 'gpt-5.6-sol', 'ultra', '\(currentGenerationPath.path)', \(Int(now.timeIntervalSince1970)), \(Int(now.timeIntervalSince1970)), 0);
+    """
+])
+
+let mixedQuotaLocalStore = CodexUsageStore(
+    codexDirectory: mixedQuotaGenerationRoot,
+    stateDatabase: mixedQuotaStateDatabase,
+    logsDatabase: mixedQuotaLogsDatabase,
+    ripgrepCandidates: []
+)
+let mixedQuotaLocalSnapshot = mixedQuotaLocalStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now
+)
+runner.check(mixedQuotaLocalSnapshot.primaryPercent == 79, "tied local 5h cohorts should keep the earlier stable generation")
+runner.check(mixedQuotaLocalSnapshot.secondaryPercent == 85, "tied local 7d cohorts should keep the earlier stable generation")
+runner.check(mixedQuotaLocalSnapshot.primaryResetsAt == staleGenerationPrimaryReset, "tied local 5h cohorts should not jump to a later reset")
+runner.check(mixedQuotaLocalSnapshot.secondaryResetsAt == staleGenerationSecondaryReset, "tied local 7d cohorts should not jump to a later reset")
+
+let futureCohortSessionID = "019f48d7-c4fe-7da0-8e71-762f34b2a133"
+let futureCohortPath = mixedQuotaSessionDirectory
+    .appendingPathComponent("rollout-future-cohort-\(futureCohortSessionID).jsonl")
+let futureCohortPrimaryReset = currentGenerationPrimaryReset + 8 * 60
+let futureCohortSecondaryReset = currentGenerationSecondaryReset + 8 * 60
+try """
+{"timestamp":"\(staleGenerationTimestamp)","type":"turn_context","payload":{"model":"gpt-5.6-sol","effort":"ultra"}}
+{"timestamp":"\(staleGenerationTimestamp)","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":1,"resets_at":\(futureCohortPrimaryReset)},"secondary":{"used_percent":0,"resets_at":\(futureCohortSecondaryReset)}}}}
+"""
+    .write(to: futureCohortPath, atomically: true, encoding: .utf8)
+_ = try Shell.run("/usr/bin/sqlite3", [
+    mixedQuotaStateDatabase,
+    """
+    insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, created_at, updated_at, archived)
+    values ('\(futureCohortSessionID)', 'Alternative quota cohort', 0, 'gpt-5.6-sol', 'ultra', '\(futureCohortPath.path)', \(Int(now.timeIntervalSince1970)), \(Int(now.timeIntervalSince1970)), 0);
+    """
+])
+
+let futureConflictDiagnostics = MonitorDiagnostics(
+    logURL: mixedQuotaGenerationRoot.appendingPathComponent("future-conflict-diagnostics.jsonl")
+)
+let futureConflictAppServerStore = CodexUsageStore(
+    codexDirectory: mixedQuotaGenerationRoot,
+    stateDatabase: mixedQuotaStateDatabase,
+    logsDatabase: mixedQuotaLogsDatabase,
+    ripgrepCandidates: [],
+    initialAppServerRateLimits: RateLimitSnapshot(
+        primaryPercent: 54,
+        secondaryPercent: 93,
+        primaryResetsAt: currentGenerationPrimaryReset,
+        secondaryResetsAt: currentGenerationSecondaryReset,
+        capturedAt: now,
+        isPrimaryCodexLimit: true
+    ),
+    diagnostics: futureConflictDiagnostics
+)
+let futureConflictAppServerSnapshot = futureConflictAppServerStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .appServerFirst,
+    taskHistoryRange: .day,
+    now: now
+)
+runner.check(futureConflictAppServerSnapshot.primaryPercent == 54, "a future local cohort must not replace the official active 5h window")
+runner.check(futureConflictAppServerSnapshot.secondaryPercent == 93, "a future local cohort must not replace the official active 7d window")
+runner.check(futureConflictAppServerSnapshot.primaryResetsAt == currentGenerationPrimaryReset, "future 5h conflicts should retain the official reset")
+runner.check(futureConflictAppServerSnapshot.secondaryResetsAt == currentGenerationSecondaryReset, "future 7d conflicts should retain the official reset")
+let futureConflictDiagnostic = futureConflictDiagnostics.recentData(limit: 20)
+    .split(separator: 0x0A, omittingEmptySubsequences: true)
+    .compactMap { line in
+        try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any]
+    }
+    .last
+runner.check(futureConflictDiagnostic?["primary_decision"] as? String == "app_server_fresh", "diagnostics should explain authoritative future 5h data")
+runner.check(futureConflictDiagnostic?["secondary_decision"] as? String == "app_server_fresh", "diagnostics should explain authoritative future 7d data")
+
+let supportingCurrentSessionIDs = [
+    "019f48f4-5db6-7a31-b8ce-d05673d1af15",
+    "019f48f9-8381-7d12-81dc-0a83a19935f7"
+]
+for (index, sessionID) in supportingCurrentSessionIDs.enumerated() {
+    let path = mixedQuotaSessionDirectory
+        .appendingPathComponent("rollout-current-support-\(sessionID).jsonl")
+    let timestamp = ISO8601DateFormatter().string(from: now.addingTimeInterval(TimeInterval(-3 - index)))
+    try """
+    {"timestamp":"\(timestamp)","type":"turn_context","payload":{"model":"gpt-5.6-sol","effort":"ultra"}}
+    {"timestamp":"\(timestamp)","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":6,"resets_at":\(currentGenerationPrimaryReset)},"secondary":{"used_percent":1,"resets_at":\(currentGenerationSecondaryReset)}}}}
+    """
+        .write(to: path, atomically: true, encoding: .utf8)
+    _ = try Shell.run("/usr/bin/sqlite3", [
+        mixedQuotaStateDatabase,
+        """
+        insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, created_at, updated_at, archived)
+        values ('\(sessionID)', 'Current cohort support', 0, 'gpt-5.6-sol', 'ultra', '\(path.path)', \(Int(now.timeIntervalSince1970)), \(Int(now.timeIntervalSince1970)), 0);
+        """
+    ])
+}
+
+let majorityLocalDiagnostics = MonitorDiagnostics(
+    logURL: mixedQuotaGenerationRoot.appendingPathComponent("majority-local-diagnostics.jsonl")
+)
+let majorityLocalStore = CodexUsageStore(
+    codexDirectory: mixedQuotaGenerationRoot,
+    stateDatabase: mixedQuotaStateDatabase,
+    logsDatabase: mixedQuotaLogsDatabase,
+    ripgrepCandidates: [],
+    diagnostics: majorityLocalDiagnostics
+)
+let majorityLocalSnapshot = majorityLocalStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now
+)
+runner.check(majorityLocalSnapshot.primaryPercent == 94, "the majority local cohort should retain the official 5h generation")
+runner.check(majorityLocalSnapshot.secondaryPercent == 99, "the majority local cohort should retain the official 7d generation")
+let majorityLocalDiagnostic = majorityLocalDiagnostics.recentData(limit: 20)
+    .split(separator: 0x0A, omittingEmptySubsequences: true)
+    .compactMap { line in
+        try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any]
+    }
+    .last
+runner.check(majorityLocalDiagnostic?["local_selection_reason"] as? String == "majority_future_generation", "diagnostics should explain majority local cohort selection")
+runner.check(majorityLocalDiagnostic?["local_selected_generation_support"] as? Int == 3, "diagnostics should report selected local cohort support")
+
+let sameGenerationAppServerStore = CodexUsageStore(
+    codexDirectory: mixedQuotaGenerationRoot,
+    stateDatabase: mixedQuotaStateDatabase,
+    logsDatabase: mixedQuotaLogsDatabase,
+    ripgrepCandidates: [],
+    initialAppServerRateLimits: RateLimitSnapshot(
+        primaryPercent: 100,
+        secondaryPercent: 100,
+        primaryResetsAt: currentGenerationPrimaryReset,
+        secondaryResetsAt: currentGenerationSecondaryReset,
+        capturedAt: now,
+        isPrimaryCodexLimit: true
+    )
+)
+let sameGenerationAppServerSnapshot = sameGenerationAppServerStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .appServerFirst,
+    taskHistoryRange: .day,
+    now: now
+)
+runner.check(sameGenerationAppServerSnapshot.primaryPercent == 100, "fresh app-server 5h quota should not be lowered by local JSONL")
+runner.check(sameGenerationAppServerSnapshot.secondaryPercent == 100, "fresh app-server 7d quota should not be lowered by local JSONL")
+
+let expiredAppServerPrimaryReset = Int(now.timeIntervalSince1970) - 60
+let expiredAppServerSecondaryReset = Int(now.timeIntervalSince1970) - 60
+let expiredGenerationAppServerStore = CodexUsageStore(
+    codexDirectory: mixedQuotaGenerationRoot,
+    stateDatabase: mixedQuotaStateDatabase,
+    logsDatabase: mixedQuotaLogsDatabase,
+    ripgrepCandidates: [],
+    initialAppServerRateLimits: RateLimitSnapshot(
+        primaryPercent: 0,
+        secondaryPercent: 66,
+        primaryResetsAt: expiredAppServerPrimaryReset,
+        secondaryResetsAt: expiredAppServerSecondaryReset,
+        capturedAt: now,
+        isPrimaryCodexLimit: true
+    )
+)
+let expiredGenerationAppServerSnapshot = expiredGenerationAppServerStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .appServerFirst,
+    taskHistoryRange: .day,
+    now: now
+)
+runner.check(expiredGenerationAppServerSnapshot.primaryPercent == 0, "a protected official 5h value should survive its reset boundary")
+runner.check(expiredGenerationAppServerSnapshot.secondaryPercent == 66, "a protected official 7d value should remain authoritative")
+runner.check(expiredGenerationAppServerSnapshot.primaryResetsAt == expiredAppServerPrimaryReset, "protected official 5h data should retain its confirmed reset")
+runner.check(expiredGenerationAppServerSnapshot.secondaryResetsAt == expiredAppServerSecondaryReset, "protected official 7d data should retain its confirmed reset")
+
+let partiallyExpiredAppServerStore = CodexUsageStore(
+    codexDirectory: mixedQuotaGenerationRoot,
+    stateDatabase: mixedQuotaStateDatabase,
+    logsDatabase: mixedQuotaLogsDatabase,
+    ripgrepCandidates: [],
+    initialAppServerRateLimits: RateLimitSnapshot(
+        primaryPercent: 0,
+        secondaryPercent: 75,
+        primaryResetsAt: expiredAppServerPrimaryReset,
+        secondaryResetsAt: currentGenerationSecondaryReset,
+        capturedAt: now,
+        isPrimaryCodexLimit: true
+    )
+)
+let partiallyExpiredAppServerSnapshot = partiallyExpiredAppServerStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .appServerFirst,
+    taskHistoryRange: .day,
+    now: now
+)
+runner.check(partiallyExpiredAppServerSnapshot.primaryPercent == 0, "an expired official 5h value should remain protected until a new official response")
+runner.check(partiallyExpiredAppServerSnapshot.secondaryPercent == 75, "active official 7d data should remain authoritative")
+runner.check(partiallyExpiredAppServerSnapshot.primaryResetsAt == expiredAppServerPrimaryReset, "protected 5h should retain the official reset")
+runner.check(partiallyExpiredAppServerSnapshot.secondaryResetsAt == currentGenerationSecondaryReset, "official 7d should retain its reset")
+
+let newerAppServerPrimaryReset = currentGenerationPrimaryReset + 10 * 60
+let newerAppServerSecondaryReset = currentGenerationSecondaryReset + 10 * 60
+let mixedQuotaDiagnostics = MonitorDiagnostics(
+    logURL: mixedQuotaGenerationRoot.appendingPathComponent("quota-diagnostics.jsonl")
+)
+let newerGenerationAppServerStore = CodexUsageStore(
+    codexDirectory: mixedQuotaGenerationRoot,
+    stateDatabase: mixedQuotaStateDatabase,
+    logsDatabase: mixedQuotaLogsDatabase,
+    ripgrepCandidates: [],
+    initialAppServerRateLimits: RateLimitSnapshot(
+        primaryPercent: 100,
+        secondaryPercent: 100,
+        primaryResetsAt: newerAppServerPrimaryReset,
+        secondaryResetsAt: newerAppServerSecondaryReset,
+        capturedAt: now,
+        isPrimaryCodexLimit: true
+    ),
+    diagnostics: mixedQuotaDiagnostics
+)
+let newerGenerationAppServerSnapshot = newerGenerationAppServerStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .appServerFirst,
+    taskHistoryRange: .day,
+    now: now
+)
+runner.check(newerGenerationAppServerSnapshot.primaryPercent == 100, "fresh app-server 5h quota should override conflicting local consensus")
+runner.check(newerGenerationAppServerSnapshot.secondaryPercent == 100, "fresh app-server 7d quota should override conflicting local consensus")
+runner.check(newerGenerationAppServerSnapshot.primaryResetsAt == newerAppServerPrimaryReset, "fresh app-server 5h reset should remain authoritative")
+runner.check(newerGenerationAppServerSnapshot.secondaryResetsAt == newerAppServerSecondaryReset, "fresh app-server 7d reset should remain authoritative")
+let mixedQuotaDiagnosticObjects = mixedQuotaDiagnostics.recentData(limit: 20)
+    .split(separator: 0x0A, omittingEmptySubsequences: true)
+    .compactMap { line in
+        try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any]
+    }
+let mixedQuotaDiagnostic = mixedQuotaDiagnosticObjects.last
+runner.check(mixedQuotaDiagnostic?["primary_decision"] as? String == "app_server_fresh", "quota diagnostics should explain the authoritative 5h decision")
+runner.check(mixedQuotaDiagnostic?["secondary_decision"] as? String == "app_server_fresh", "quota diagnostics should explain the authoritative 7d decision")
+runner.check(mixedQuotaDiagnostic?["local_generation_count"] as? Int == 3, "quota diagnostics should report conflicting local generations")
+runner.check(mixedQuotaDiagnostic?["local_recent_generation_count"] as? Int == 3, "quota diagnostics should report recent conflicting local generations")
+runner.check(mixedQuotaDiagnostic?["local_selected_generation_support"] as? Int == 3, "quota diagnostics should report selected local generation support")
+runner.check(mixedQuotaDiagnostic?["local_consensus_minimum_support"] as? Int == 2, "quota diagnostics should report the local consensus threshold")
+runner.check(mixedQuotaDiagnostic?["result_primary_percent"] as? Int == 100, "quota diagnostics should report the published 5h value")
+let mixedQuotaDiagnosticText = String(data: mixedQuotaDiagnostics.recentData(limit: 20), encoding: .utf8) ?? ""
+runner.check(!mixedQuotaDiagnosticText.contains(staleGenerationPath.path), "quota diagnostics must not include rollout paths")
+runner.check(!mixedQuotaDiagnosticText.contains("Stale quota generation"), "quota diagnostics must not include task titles")
+
+let appServerCacheRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("CodexNotchAppServerCache-\(UUID().uuidString)")
+try FileManager.default.createDirectory(at: appServerCacheRoot, withIntermediateDirectories: true)
+defer {
+    try? FileManager.default.removeItem(at: appServerCacheRoot)
+}
+let persistedAppServerCacheURL = appServerCacheRoot.appendingPathComponent("app-server-rate-limits.json")
+let authoritativeSnapshot = RateLimitSnapshot(
+    primaryPercent: 47,
+    secondaryPercent: 75,
+    primaryResetsAt: Int(now.timeIntervalSince1970) + 4 * 60 * 60,
+    secondaryResetsAt: Int(now.timeIntervalSince1970) + 6 * 24 * 60 * 60,
+    capturedAt: now,
+    isPrimaryCodexLimit: true
+)
+let recoveredSnapshot = RateLimitSnapshot(
+    primaryPercent: 39,
+    secondaryPercent: 73,
+    primaryResetsAt: authoritativeSnapshot.primaryResetsAt,
+    secondaryResetsAt: authoritativeSnapshot.secondaryResetsAt,
+    capturedAt: now.addingTimeInterval(815),
+    isPrimaryCodexLimit: true
+)
+let exhaustedSnapshot = RateLimitSnapshot(
+    primaryPercent: 0,
+    secondaryPercent: 66,
+    primaryResetsAt: Int(now.timeIntervalSince1970) + 4 * 60 * 60,
+    secondaryResetsAt: Int(now.timeIntervalSince1970) + 6 * 24 * 60 * 60,
+    capturedAt: now,
+    isPrimaryCodexLimit: true
+)
+let anomalousReboundSnapshot = RateLimitSnapshot(
+    primaryPercent: 99,
+    secondaryPercent: 100,
+    primaryResetsAt: exhaustedSnapshot.primaryResetsAt.map { $0 + 217 },
+    secondaryResetsAt: exhaustedSnapshot.secondaryResetsAt.map { $0 + 480 },
+    capturedAt: now.addingTimeInterval(301),
+    isPrimaryCodexLimit: true
+)
+let reboundLoader = AppServerLoaderSequence([
+    .success(anomalousReboundSnapshot),
+    .success(exhaustedSnapshot)
+])
+let reboundDiagnostics = MonitorDiagnostics(
+    logURL: appServerCacheRoot.appendingPathComponent("rebound-diagnostics.jsonl")
+)
+let reboundStore = CodexUsageStore(
+    codexDirectory: tempRoot,
+    appServerRateLimitLoader: reboundLoader.load,
+    appServerCacheURL: nil,
+    initialAppServerRateLimits: exhaustedSnapshot,
+    diagnostics: reboundDiagnostics
+)
+let reboundAt = now.addingTimeInterval(301)
+runner.check(
+    !reboundStore.refreshAppServerRateLimits(now: reboundAt),
+    "a single large app-server rebound should be staged instead of published"
+)
+let stagedReboundSnapshot = reboundStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .appServerFirst,
+    taskHistoryRange: .day,
+    now: reboundAt
+)
+runner.check(stagedReboundSnapshot.primaryPercent == 0, "a staged app-server rebound must not replace the confirmed 5h value")
+runner.check(stagedReboundSnapshot.secondaryPercent == 66, "a staged app-server rebound must not replace the confirmed 7d value")
+runner.check(reboundStore.appServerRefreshDelay(now: reboundAt) == 30, "a staged rebound should be rechecked after 30 seconds")
+let reboundRecoveryAt = reboundAt.addingTimeInterval(31)
+runner.check(
+    reboundStore.refreshAppServerRateLimits(now: reboundRecoveryAt),
+    "a normal app-server response should clear a staged rebound"
+)
+let recoveredFromReboundSnapshot = reboundStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .appServerFirst,
+    taskHistoryRange: .day,
+    now: reboundRecoveryAt
+)
+runner.check(recoveredFromReboundSnapshot.primaryPercent == 0, "rebound recovery should preserve the real 5h value")
+runner.check(recoveredFromReboundSnapshot.secondaryPercent == 66, "rebound recovery should preserve the real 7d value")
+let reboundDiagnosticText = String(data: reboundDiagnostics.recentData(limit: 20), encoding: .utf8) ?? ""
+runner.check(reboundDiagnosticText.contains(#""outcome":"staged_rebound""#), "diagnostics should identify a staged app-server rebound")
+
+let confirmedResetSnapshot = RateLimitSnapshot(
+    primaryPercent: 98,
+    secondaryPercent: 66,
+    primaryResetsAt: exhaustedSnapshot.primaryResetsAt.map { $0 + 5 * 60 * 60 },
+    secondaryResetsAt: exhaustedSnapshot.secondaryResetsAt,
+    capturedAt: reboundAt,
+    isPrimaryCodexLimit: true
+)
+let confirmedResetFollowUp = RateLimitSnapshot(
+    primaryPercent: 97,
+    secondaryPercent: 66,
+    primaryResetsAt: confirmedResetSnapshot.primaryResetsAt.map { $0 + 1 },
+    secondaryResetsAt: confirmedResetSnapshot.secondaryResetsAt.map { $0 - 1 },
+    capturedAt: reboundRecoveryAt,
+    isPrimaryCodexLimit: true
+)
+let confirmedResetLoader = AppServerLoaderSequence([
+    .success(confirmedResetSnapshot),
+    .success(confirmedResetFollowUp)
+])
+let confirmedResetStore = CodexUsageStore(
+    codexDirectory: tempRoot,
+    appServerRateLimitLoader: confirmedResetLoader.load,
+    appServerCacheURL: nil,
+    initialAppServerRateLimits: exhaustedSnapshot
+)
+runner.check(
+    !confirmedResetStore.refreshAppServerRateLimits(now: reboundAt),
+    "the first response for a real reset should wait for confirmation"
+)
+runner.check(
+    confirmedResetStore.refreshAppServerRateLimits(now: reboundRecoveryAt),
+    "a second response from the same reset generation should confirm the rebound"
+)
+let acceptedResetSnapshot = confirmedResetStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .appServerFirst,
+    taskHistoryRange: .day,
+    now: reboundRecoveryAt
+)
+runner.check(acceptedResetSnapshot.primaryPercent == 97, "a confirmed reset should publish the latest official 5h value")
+runner.check(acceptedResetSnapshot.secondaryPercent == 66, "a confirmed reset should preserve the unaffected 7d value")
+runner.check(acceptedResetSnapshot.primaryResetsAt == confirmedResetFollowUp.primaryResetsAt, "a confirmed reset should publish the latest reset timestamp")
+
+let persistenceLoader = AppServerLoaderSequence([.success(authoritativeSnapshot)])
+let persistenceDiagnostics = MonitorDiagnostics(
+    logURL: appServerCacheRoot.appendingPathComponent("persistence-diagnostics.jsonl")
+)
+let persistenceStore = CodexUsageStore(
+    codexDirectory: tempRoot,
+    appServerRateLimitLoader: persistenceLoader.load,
+    appServerCacheURL: persistedAppServerCacheURL,
+    diagnostics: persistenceDiagnostics
+)
+runner.check(
+    persistenceStore.refreshAppServerRateLimits(now: now, force: true),
+    "successful app-server refresh should report success"
+)
+runner.check(FileManager.default.fileExists(atPath: persistedAppServerCacheURL.path), "successful app-server refresh should persist last-known-good quota")
+runner.check(
+    !persistenceStore.refreshAppServerRateLimits(now: now.addingTimeInterval(10)),
+    "presentation refresh should reuse a fresh app-server cache"
+)
+runner.check(persistenceLoader.attempts.count == 1, "presentation refresh should not start a second app-server process")
+let appServerCachePermissions = (try? FileManager.default.attributesOfItem(atPath: persistedAppServerCacheURL.path)[.posixPermissions] as? NSNumber)?.intValue
+let appServerCacheDirectoryPermissions = (try? FileManager.default.attributesOfItem(atPath: appServerCacheRoot.path)[.posixPermissions] as? NSNumber)?.intValue
+runner.check(appServerCachePermissions == 0o600, "persisted app-server quota should be current-user-only")
+runner.check(appServerCacheDirectoryPermissions == 0o700, "app-server quota cache directory should be current-user-only")
+
+let retryLoader = AppServerLoaderSequence([
+    .failure,
+    .failure,
+    .failure,
+    .failure,
+    .success(recoveredSnapshot)
+])
+let retryDiagnostics = MonitorDiagnostics(
+    logURL: appServerCacheRoot.appendingPathComponent("retry-diagnostics.jsonl")
+)
+let restoredStore = CodexUsageStore(
+    codexDirectory: tempRoot,
+    appServerRateLimitLoader: retryLoader.load,
+    appServerCacheURL: persistedAppServerCacheURL,
+    diagnostics: retryDiagnostics
+)
+let firstFailureAt = now.addingTimeInterval(301)
+runner.check(
+    !restoredStore.refreshAppServerRateLimits(now: firstFailureAt),
+    "failed app-server refresh should report failure"
+)
+runner.check(restoredStore.appServerRefreshDelay(now: firstFailureAt) == 30, "first app-server failure should retry after 30 seconds")
+let staleOfficialSnapshot = restoredStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .appServerFirst,
+    taskHistoryRange: .day,
+    now: firstFailureAt
+)
+runner.check(staleOfficialSnapshot.primaryPercent == 47, "last-known-good 5h quota should survive a transient refresh failure")
+runner.check(staleOfficialSnapshot.secondaryPercent == 75, "last-known-good 7d quota should survive a transient refresh failure")
+runner.check(staleOfficialSnapshot.monitorStats.lastRateLimitSource == "app-server-stale", "stale official quota should expose a distinct source")
+
+let deferredRetryAt = firstFailureAt.addingTimeInterval(10)
+runner.check(
+    !restoredStore.refreshAppServerRateLimits(now: deferredRetryAt),
+    "refresh inside the retry backoff should be deferred"
+)
+runner.check(retryLoader.attempts.count == 1, "retry backoff should not start another app-server process")
+
+let secondFailureAt = firstFailureAt.addingTimeInterval(31)
+runner.check(!restoredStore.refreshAppServerRateLimits(now: secondFailureAt), "second app-server refresh should fail deterministically")
+runner.check(restoredStore.appServerRefreshDelay(now: secondFailureAt) == 60, "second app-server failure should retry after 60 seconds")
+let thirdFailureAt = secondFailureAt.addingTimeInterval(61)
+runner.check(!restoredStore.refreshAppServerRateLimits(now: thirdFailureAt), "third app-server refresh should fail deterministically")
+runner.check(restoredStore.appServerRefreshDelay(now: thirdFailureAt) == 120, "third app-server failure should retry after 120 seconds")
+let fourthFailureAt = thirdFailureAt.addingTimeInterval(121)
+runner.check(!restoredStore.refreshAppServerRateLimits(now: fourthFailureAt), "fourth app-server refresh should fail deterministically")
+runner.check(restoredStore.appServerRefreshDelay(now: fourthFailureAt) == 300, "fourth app-server failure should cap retry delay at 300 seconds")
+let recoveryAt = fourthFailureAt.addingTimeInterval(301)
+runner.check(restoredStore.refreshAppServerRateLimits(now: recoveryAt), "app-server refresh should recover after backoff")
+let recoveredOfficialSnapshot = restoredStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .appServerFirst,
+    taskHistoryRange: .day,
+    now: recoveryAt
+)
+runner.check(recoveredOfficialSnapshot.primaryPercent == 39, "recovered app-server 5h quota should replace last-known-good")
+runner.check(recoveredOfficialSnapshot.secondaryPercent == 73, "recovered app-server 7d quota should replace last-known-good")
+runner.check(recoveredOfficialSnapshot.monitorStats.lastRateLimitSource == "app-server-fresh", "recovered official quota should expose a fresh source")
+
+let expiredGraceStore = CodexUsageStore(
+    codexDirectory: tempRoot,
+    appServerRateLimitLoader: AppServerLoaderSequence([.failure]).load,
+    appServerCacheURL: persistedAppServerCacheURL
+)
+let afterGraceSnapshot = expiredGraceStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .appServerFirst,
+    taskHistoryRange: .day,
+    now: recoveryAt.addingTimeInterval(16 * 60)
+)
+runner.check(afterGraceSnapshot.primaryPercent == 67, "local 5h quota should take over after the official grace window")
+runner.check(afterGraceSnapshot.secondaryPercent == 45, "local 7d quota should take over after the official grace window")
+runner.check(afterGraceSnapshot.monitorStats.lastRateLimitSource == "local-jsonl", "expired official grace should expose local fallback source")
+
+let retryDiagnosticText = String(data: retryDiagnostics.recentData(limit: 50), encoding: .utf8) ?? ""
+runner.check(retryDiagnosticText.contains(#""event":"app_server_refresh""#), "diagnostics should record app-server refresh attempts")
+runner.check(retryDiagnosticText.contains(#""outcome":"failure""#), "diagnostics should record app-server refresh failures")
+runner.check(!retryDiagnosticText.contains(tempRoot.path), "app-server diagnostics must not include local paths")
 
 let expiredLocalQuotaRoot = URL(fileURLWithPath: NSTemporaryDirectory())
     .appendingPathComponent("CodexNotchExpiredLocalQuota-\(UUID().uuidString)")
@@ -3217,11 +3867,11 @@ let expiredLocalQuotaDirectory = expiredLocalQuotaRoot.appendingPathComponent("s
 try FileManager.default.createDirectory(at: expiredLocalQuotaDirectory, withIntermediateDirectories: true)
 let expiredLocalQuotaSessionID = "019e073a-c032-74e2-966e-b85ede0c9cd9"
 let expiredLocalQuotaPath = expiredLocalQuotaDirectory.appendingPathComponent("rollout-2026-06-14T02-20-20-\(expiredLocalQuotaSessionID).jsonl")
-let expiredPrimaryReset = Int(now.timeIntervalSince1970) - 60
-let expiredSecondaryReset = Int(now.timeIntervalSince1970) - 60
+let expiredPrimaryReset = Int(now.timeIntervalSince1970) + 4 * 60 * 60
+let expiredSecondaryReset = Int(now.timeIntervalSince1970) + 6 * 24 * 60 * 60
 try """
 {"timestamp":"\(timestamp)","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Expired local quota"}]}}
-{"timestamp":"\(timestamp)","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":0}},"rate_limits":{"limit_id":"codex","primary":{"used_percent":72,"resets_at":\(expiredPrimaryReset)},"secondary":{"used_percent":64,"resets_at":\(expiredSecondaryReset)}}}}
+{"timestamp":"\(timestamp)","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":0}},"rate_limits":{"limit_id":"codex","primary":{"used_percent":0,"resets_at":\(expiredPrimaryReset)},"secondary":{"used_percent":34,"resets_at":\(expiredSecondaryReset)}}}}
 """
     .write(to: expiredLocalQuotaPath, atomically: true, encoding: .utf8)
 try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: expiredLocalQuotaPath.path)
@@ -3233,11 +3883,11 @@ _ = try Shell.run("/usr/bin/sqlite3", [
     """
 ])
 let resetAppServerSnapshot = RateLimitSnapshot(
-    primaryPercent: 100,
-    secondaryPercent: 100,
-    primaryResetsAt: appServerPrimaryReset,
-    secondaryResetsAt: appServerSecondaryReset,
-    capturedAt: appServerFixtureNow,
+    primaryPercent: 0,
+    secondaryPercent: 66,
+    primaryResetsAt: Int(now.timeIntervalSince1970) - 60,
+    secondaryResetsAt: expiredSecondaryReset,
+    capturedAt: now,
     isPrimaryCodexLimit: true
 )
 let expiredLocalQuotaStore = CodexUsageStore(
@@ -3252,10 +3902,10 @@ let expiredLocalQuotaSnapshot = expiredLocalQuotaStore.loadSnapshot(
     taskHistoryRange: .day,
     now: now
 )
-runner.check(expiredLocalQuotaSnapshot.primaryPercent == 100, "expired local 5h quota should not undercut a reset app-server quota")
-runner.check(expiredLocalQuotaSnapshot.primaryResetsAt == appServerPrimaryReset, "expired local 5h reset time should not replace the app-server reset time")
-runner.check(expiredLocalQuotaSnapshot.secondaryPercent == 100, "expired local 7d quota should not undercut a reset app-server quota")
-runner.check(expiredLocalQuotaSnapshot.secondaryResetsAt == appServerSecondaryReset, "expired local 7d reset time should not replace the app-server reset time")
+runner.check(expiredLocalQuotaSnapshot.primaryPercent == 0, "a local 100 percent sample must not replace a protected official 0 percent value")
+runner.check(expiredLocalQuotaSnapshot.primaryResetsAt == resetAppServerSnapshot.primaryResetsAt, "a local future reset must not replace the protected official 5h reset")
+runner.check(expiredLocalQuotaSnapshot.secondaryPercent == 66, "the protected official 7d value should remain unchanged")
+runner.check(expiredLocalQuotaSnapshot.secondaryResetsAt == resetAppServerSnapshot.secondaryResetsAt, "the official 7d reset should remain unchanged")
 runner.check(localSnapshot.tasks.contains { $0.id == sessionID && $0.status == .running }, "recent session rollout should appear in running task list")
 runner.check(localSnapshot.tasks.first { $0.id == sessionID }?.title == "正在运行的 Codex 任务", "session rollout should use the user message as task title")
 runner.check(localSnapshot.tasks.first { $0.id == sessionID }?.detail.contains("gpt-5.6-sol · 极致推理") == true, "GPT-5.6 Sol session rollout should localize the ultra effort")

@@ -21,10 +21,18 @@ private enum UsageScanPolicy {
     static let estimatedTokenLineBytes: UInt64 = 1_300
     static let periodUsageCacheTTL: TimeInterval = 120
     static let ripgrepTimeout: DispatchTimeInterval = .seconds(12)
-    static let appServerSuccessCacheTTL: TimeInterval = 5 * 60
-    static let appServerFailureCacheTTL: TimeInterval = 5 * 60
+    static let appServerFreshCacheTTL: TimeInterval = 5 * 60
+    static let appServerStaleGraceTTL: TimeInterval = 15 * 60
+    static let appServerRetryDelays: [TimeInterval] = [30, 60, 120, 300]
+    static let appServerReboundConfirmationDelay: TimeInterval = 30
+    static let appServerReboundThreshold = 10
+    static let rateLimitCandidateRecencyWindow: TimeInterval = 10 * 60
+    static let rateLimitResetTolerance = 60
+    static let rateLimitConsensusMinimumSupport = 2
     static let deltaHistoryRetentionDays = 31
 }
+
+typealias AppServerRateLimitLoader = @Sendable (Date) throws -> RateLimitSnapshot
 
 final class CodexUsageStore: @unchecked Sendable {
     private struct SessionLineEvent {
@@ -99,7 +107,10 @@ final class CodexUsageStore: @unchecked Sendable {
     private let legacyDeltaDatabase: String?
     private let sessionIndexPath: String
     private let appServerExecutable: String?
+    private let appServerRateLimitLoader: AppServerRateLimitLoader?
+    private let appServerCacheURL: URL?
     private let ripgrepCandidates: [String]
+    private let diagnostics: MonitorDiagnostics?
     private let tokenPattern = /tool_token_count=([0-9]+)/
     private let terminalEventTypes: Set<String> = [
         "task_complete",
@@ -117,7 +128,7 @@ final class CodexUsageStore: @unchecked Sendable {
     private var fastCache: FastSnapshotCache?
     private var recentPathsCache: RecentPathsCache?
     private var recentTaskPathsCache: RecentPathsCache?
-    private var appServerRateLimitCache: AppServerRateLimitCache?
+    private var appServerRateLimitCache = AppServerRateLimitCache()
     private var periodUsageCache: PeriodUsageCache?
     private var sessionTokenTotalCache: [String: SessionTokenTotalCache] = [:]
     private var sessionContextUsageCache: [String: SessionContextUsageCache] = [:]
@@ -129,11 +140,24 @@ final class CodexUsageStore: @unchecked Sendable {
         deltaDatabase: String? = nil,
         ripgrepCandidates: [String]? = nil,
         appServerExecutable: String? = nil,
-        initialAppServerRateLimits: RateLimitSnapshot? = nil
+        appServerRateLimitLoader: AppServerRateLimitLoader? = nil,
+        appServerCacheURL: URL? = nil,
+        initialAppServerRateLimits: RateLimitSnapshot? = nil,
+        diagnostics: MonitorDiagnostics? = nil
     ) {
         self.codexDirectory = codexDirectory
         self.ripgrepCandidates = ripgrepCandidates ?? UsageScanPolicy.ripgrepCandidates
         self.appServerExecutable = appServerExecutable ?? CodexRuntimeLocator.executable(named: "codex")
+        self.appServerRateLimitLoader = appServerRateLimitLoader
+        let defaultCodexDirectory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex")
+            .standardizedFileURL
+        self.diagnostics = diagnostics
+            ?? (codexDirectory.standardizedFileURL == defaultCodexDirectory ? MonitorDiagnostics.shared : nil)
+        self.appServerCacheURL = appServerCacheURL
+            ?? (codexDirectory.standardizedFileURL == defaultCodexDirectory
+                ? Self.defaultAppServerCacheURL()
+                : nil)
         let legacyDeltaPath = codexDirectory.appendingPathComponent("context-guard/usage-deltas.sqlite").path
         self.deltaDatabase = Self.expandedPath(
             deltaDatabase
@@ -155,10 +179,11 @@ final class CodexUsageStore: @unchecked Sendable {
             )
         self.sessionIndexPath = codexDirectory.appendingPathComponent("session_index.jsonl").path
         if let initialAppServerRateLimits {
-            self.appServerRateLimitCache = AppServerRateLimitCache(
-                createdAt: Date(),
-                state: .success(initialAppServerRateLimits)
-            )
+            self.appServerRateLimitCache.lastSuccess = initialAppServerRateLimits
+            self.appServerRateLimitCache.lastSuccessAt = initialAppServerRateLimits.capturedAt ?? Date()
+        } else if let persisted = loadPersistedAppServerRateLimits() {
+            self.appServerRateLimitCache.lastSuccess = persisted.snapshot
+            self.appServerRateLimitCache.lastSuccessAt = persisted.savedAt
         }
     }
 
@@ -181,6 +206,17 @@ final class CodexUsageStore: @unchecked Sendable {
             .appendingPathComponent("CodexNotch", isDirectory: true)
             .appendingPathComponent("usage-deltas.sqlite")
             .path
+    }
+
+    private static func defaultAppServerCacheURL() -> URL {
+        let applicationSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support", isDirectory: true)
+        return applicationSupport
+            .appendingPathComponent("CodexNotch", isDirectory: true)
+            .appendingPathComponent("app-server-rate-limits.json")
     }
 
     private static func expandedPath(_ path: String) -> String {
@@ -270,7 +306,12 @@ final class CodexUsageStore: @unchecked Sendable {
             let cumulativeUsage = loadCumulativeUsage()
             let recentUsage = loadRecentUsage(now: now)
             let rateLimitPaths = candidateRateLimitPaths(from: displayThreads)
-            let rateLimitResult = loadRateLimits(from: rateLimitPaths, source: rateLimitSource, now: now)
+            let rateLimitResult = loadRateLimits(
+                from: rateLimitPaths,
+                source: rateLimitSource,
+                now: now,
+                diagnosticID: UUID().uuidString
+            )
             let deltaStartedAt = Date()
             recordDeltaSnapshot(for: usageDeltaThreads, now: now)
             let usageResult = includePeriodUsage
@@ -381,8 +422,136 @@ final class CodexUsageStore: @unchecked Sendable {
     }
 
     @discardableResult
-    func refreshAppServerRateLimits(now: Date = Date()) -> RateLimitSnapshot? {
-        loadAppServerRateLimits(now: now, allowBlocking: true)
+    func refreshAppServerRateLimits(now: Date = Date(), force: Bool = false) -> Bool {
+        cacheLock.lock()
+        if appServerRateLimitCache.isRefreshing {
+            cacheLock.unlock()
+            return false
+        }
+        if !force {
+            if let retryNotBefore = appServerRateLimitCache.retryNotBefore,
+               now < retryNotBefore {
+                cacheLock.unlock()
+                return false
+            }
+            if let lastSuccessAt = appServerRateLimitCache.lastSuccessAt,
+               now.timeIntervalSince(lastSuccessAt) < UsageScanPolicy.appServerFreshCacheTTL,
+               appServerRateLimitCache.consecutiveFailures == 0,
+               !hasReachedMainRateLimitReset(appServerRateLimitCache.lastSuccess, now: now) {
+                cacheLock.unlock()
+                return false
+            }
+        }
+        appServerRateLimitCache.isRefreshing = true
+        appServerRateLimitCache.lastAttemptAt = now
+        cacheLock.unlock()
+
+        let startedAt = Date()
+        do {
+            let snapshot = try fetchAppServerRateLimits(now: now)
+            cacheLock.lock()
+            if let previous = appServerRateLimitCache.lastSuccess,
+               isSuspiciousAppServerRebound(snapshot, comparedTo: previous) {
+                if let pending = appServerRateLimitCache.pendingRebound,
+                   sameMainRateLimitGeneration(snapshot, pending) {
+                    appServerRateLimitCache.pendingRebound = nil
+                } else {
+                    let retryNotBefore = now.addingTimeInterval(UsageScanPolicy.appServerReboundConfirmationDelay)
+                    appServerRateLimitCache.pendingRebound = snapshot
+                    appServerRateLimitCache.retryNotBefore = retryNotBefore
+                    appServerRateLimitCache.isRefreshing = false
+                    let failureCount = appServerRateLimitCache.consecutiveFailures
+                    cacheLock.unlock()
+                    diagnostics?.record(
+                        event: "app_server_refresh",
+                        correlationID: UUID().uuidString,
+                        fields: [
+                            "outcome": "staged_rebound",
+                            "failure_kind": NSNull(),
+                            "duration_ms": elapsedMilliseconds(since: startedAt),
+                            "consecutive_failures": failureCount,
+                            "candidate_primary_percent": diagnosticValue(snapshot.primaryPercent),
+                            "candidate_secondary_percent": diagnosticValue(snapshot.secondaryPercent),
+                            "candidate_primary_reset_at": diagnosticValue(snapshot.primaryResetsAt),
+                            "candidate_secondary_reset_at": diagnosticValue(snapshot.secondaryResetsAt),
+                            "next_retry_at": Int(retryNotBefore.timeIntervalSince1970)
+                        ],
+                        deduplicate: false
+                    )
+                    return false
+                }
+            } else {
+                appServerRateLimitCache.pendingRebound = nil
+            }
+            appServerRateLimitCache.lastSuccess = snapshot
+            appServerRateLimitCache.lastSuccessAt = now
+            appServerRateLimitCache.consecutiveFailures = 0
+            appServerRateLimitCache.retryNotBefore = nil
+            appServerRateLimitCache.isRefreshing = false
+            cacheLock.unlock()
+            persistAppServerRateLimits(snapshot, savedAt: now)
+            diagnostics?.record(
+                event: "app_server_refresh",
+                correlationID: UUID().uuidString,
+                fields: [
+                    "outcome": "success",
+                    "failure_kind": NSNull(),
+                    "duration_ms": elapsedMilliseconds(since: startedAt),
+                    "consecutive_failures": 0,
+                    "next_retry_at": NSNull()
+                ],
+                deduplicate: false
+            )
+            return true
+        } catch {
+            cacheLock.lock()
+            appServerRateLimitCache.consecutiveFailures += 1
+            let failureCount = appServerRateLimitCache.consecutiveFailures
+            let delayIndex = min(failureCount - 1, UsageScanPolicy.appServerRetryDelays.count - 1)
+            let retryDelay = UsageScanPolicy.appServerRetryDelays[delayIndex]
+            let retryNotBefore = now.addingTimeInterval(retryDelay)
+            appServerRateLimitCache.retryNotBefore = retryNotBefore
+            appServerRateLimitCache.isRefreshing = false
+            let lastSuccessAge = appServerRateLimitCache.lastSuccessAt.map {
+                max(0, Int(now.timeIntervalSince($0).rounded()))
+            }
+            cacheLock.unlock()
+            diagnostics?.record(
+                event: "app_server_refresh",
+                correlationID: UUID().uuidString,
+                fields: [
+                    "outcome": "failure",
+                    "failure_kind": appServerFailureKind(error),
+                    "duration_ms": elapsedMilliseconds(since: startedAt),
+                    "consecutive_failures": failureCount,
+                    "last_success_age_seconds": diagnosticValue(lastSuccessAge),
+                    "next_retry_at": Int(retryNotBefore.timeIntervalSince1970)
+                ],
+                deduplicate: false
+            )
+            return false
+        }
+    }
+
+    func appServerRefreshDelay(now: Date = Date()) -> TimeInterval {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        if let retryNotBefore = appServerRateLimitCache.retryNotBefore,
+           retryNotBefore > now {
+            return ceil(retryNotBefore.timeIntervalSince(now))
+        }
+        if let lastSuccessAt = appServerRateLimitCache.lastSuccessAt {
+            let regularDelay = max(0, UsageScanPolicy.appServerFreshCacheTTL - now.timeIntervalSince(lastSuccessAt))
+            guard let resetAt = earliestMainRateLimitReset(appServerRateLimitCache.lastSuccess) else {
+                return ceil(regularDelay)
+            }
+            let resetDelay = TimeInterval(resetAt) - now.timeIntervalSince1970
+            if resetDelay > 0 {
+                return ceil(min(regularDelay, resetDelay))
+            }
+            return UsageScanPolicy.appServerReboundConfirmationDelay
+        }
+        return 0
     }
 
     private func errorSnapshot(_ error: Error, now: Date, snapshotDurationMs: Int? = nil) -> UsageSnapshot {
@@ -2620,102 +2789,271 @@ final class CodexUsageStore: @unchecked Sendable {
             .map(\.path)
     }
 
-    private func loadRateLimits(from paths: [String], source: RateLimitSourcePreference, now: Date) -> RateLimitLoadResult {
-        let local = loadLatestRateLimits(from: paths, now: now)
+    private struct LocalRateLimitSelection {
+        let snapshot: RateLimitSnapshot
+        let candidateCount: Int
+        let recentCandidateCount: Int
+        let generationCount: Int
+        let recentGenerationCount: Int
+        let selectionReason: String
+        let selectedGenerationSupport: Int
+    }
+
+    private struct LocalGenerationDecision {
+        let snapshot: RateLimitSnapshot?
+        let reason: String
+        let support: Int
+    }
+
+    private struct LocalRateLimitGeneration {
+        let snapshot: RateLimitSnapshot
+        let support: Int
+        let activeWindowCount: Int
+    }
+
+    private struct MainRateLimitMerge {
+        let snapshot: RateLimitSnapshot
+        let primaryReason: String
+        let secondaryReason: String
+        let officialWindowCount: Int
+    }
+
+    private struct RateLimitWindowDecision {
+        let percent: Int?
+        let resetsAt: Int?
+        let reason: String
+        let usesOfficial: Bool
+    }
+
+    private enum AppServerCacheFreshness: String {
+        case fresh
+        case stale
+    }
+
+    private struct AvailableAppServerRateLimits {
+        let snapshot: RateLimitSnapshot
+        let freshness: AppServerCacheFreshness
+        let ageSeconds: Int
+
+        var sourceName: String {
+            "app-server-\(freshness.rawValue)"
+        }
+    }
+
+    private func loadRateLimits(
+        from paths: [String],
+        source: RateLimitSourcePreference,
+        now: Date,
+        diagnosticID: String
+    ) -> RateLimitLoadResult {
+        let localSelection = loadLatestRateLimits(from: paths, now: now)
+        let local = localSelection.snapshot
         switch source {
         case .appServerFirst:
-            let appServer = loadAppServerRateLimits(now: now, allowBlocking: false)
-            if let appServer, hasMainRateLimitData(appServer) {
-                let mainSnapshot = hasMainRateLimitData(local)
-                    ? conservativeMainRateLimits(appServer: appServer, local: local, now: now)
-                    : appServer
-                return RateLimitLoadResult(
-                    snapshot: mainSnapshot.withSparkQuotaWindows(
-                        mergedSparkQuotaWindows(from: [appServer, local], now: now, preferSourceOrder: true)
+            let appServer = availableAppServerRateLimits(now: now)
+            if let appServer, hasMainRateLimitData(appServer.snapshot) {
+                let merge = authoritativeMainRateLimits(
+                    appServer: appServer,
+                    local: localSelection,
+                    now: now
+                )
+                let result = RateLimitLoadResult(
+                    snapshot: merge.snapshot.withSparkQuotaWindows(
+                        mergedSparkQuotaWindows(from: [appServer.snapshot, local], now: now, preferSourceOrder: true)
                     ),
-                    source: hasAnyRateLimitData(local) ? "app-server-cache+local-jsonl" : "app-server-cache"
+                    source: merge.officialWindowCount > 0
+                        ? appServer.sourceName
+                        : (hasMainRateLimitData(local) ? "local-jsonl" : "none")
+                )
+                return loggedRateLimitResult(
+                    result,
+                    preference: source,
+                    appServer: appServer,
+                    local: localSelection,
+                    primaryReason: merge.primaryReason,
+                    secondaryReason: merge.secondaryReason,
+                    diagnosticID: diagnosticID
                 )
             }
 
             if hasMainRateLimitData(local) {
-                if let appServer, hasAnyRateLimitData(appServer) {
-                    return RateLimitLoadResult(
+                if let appServer, hasAnyRateLimitData(appServer.snapshot) {
+                    let result = RateLimitLoadResult(
                         snapshot: local.withSparkQuotaWindows(
-                            mergedSparkQuotaWindows(from: [appServer, local], now: now, preferSourceOrder: true)
+                            mergedSparkQuotaWindows(from: [appServer.snapshot, local], now: now, preferSourceOrder: true)
                         ),
-                        source: "local-jsonl+app-server-cache"
+                        source: "local-jsonl"
+                    )
+                    return loggedRateLimitResult(
+                        result,
+                        preference: source,
+                        appServer: appServer,
+                        local: localSelection,
+                        primaryReason: "local_jsonl_only",
+                        secondaryReason: "local_jsonl_only",
+                        diagnosticID: diagnosticID
                     )
                 }
-                return RateLimitLoadResult(snapshot: local, source: "local-jsonl")
+                return loggedRateLimitResult(
+                    RateLimitLoadResult(snapshot: local, source: "local-jsonl"),
+                    preference: source,
+                    appServer: appServer,
+                    local: localSelection,
+                    primaryReason: "local_jsonl_only",
+                    secondaryReason: "local_jsonl_only",
+                    diagnosticID: diagnosticID
+                )
             }
 
-            if let appServer, hasAnyRateLimitData(appServer) {
-                return RateLimitLoadResult(snapshot: appServer, source: "app-server-cache")
+            if let appServer, hasAnyRateLimitData(appServer.snapshot) {
+                return loggedRateLimitResult(
+                    RateLimitLoadResult(snapshot: appServer.snapshot, source: appServer.sourceName),
+                    preference: source,
+                    appServer: appServer,
+                    local: localSelection,
+                    primaryReason: "app_server_only",
+                    secondaryReason: "app_server_only",
+                    diagnosticID: diagnosticID
+                )
             }
 
-            return RateLimitLoadResult(
-                snapshot: local,
-                source: hasAnyRateLimitData(local) ? "local-jsonl" : "none"
+            return loggedRateLimitResult(
+                RateLimitLoadResult(
+                    snapshot: local,
+                    source: hasAnyRateLimitData(local) ? "local-jsonl" : "none"
+                ),
+                preference: source,
+                appServer: appServer,
+                local: localSelection,
+                primaryReason: "unavailable",
+                secondaryReason: "unavailable",
+                diagnosticID: diagnosticID
             )
         case .localFilesOnly:
-            return RateLimitLoadResult(
-                snapshot: local,
-                source: hasAnyRateLimitData(local) ? "local-jsonl" : "none"
+            return loggedRateLimitResult(
+                RateLimitLoadResult(
+                    snapshot: local,
+                    source: hasAnyRateLimitData(local) ? "local-jsonl" : "none"
+                ),
+                preference: source,
+                appServer: nil,
+                local: localSelection,
+                primaryReason: hasMainRateLimitData(local) ? "local_jsonl_only" : "unavailable",
+                secondaryReason: hasMainRateLimitData(local) ? "local_jsonl_only" : "unavailable",
+                diagnosticID: diagnosticID
             )
         }
     }
 
-    private func conservativeMainRateLimits(
-        appServer: RateLimitSnapshot,
-        local: RateLimitSnapshot,
+    private func authoritativeMainRateLimits(
+        appServer: AvailableAppServerRateLimits,
+        local: LocalRateLimitSelection,
         now: Date
-    ) -> RateLimitSnapshot {
-        let primary = conservativeRateLimitWindow(
-            preferred: (appServer.primaryPercent, appServer.primaryResetsAt),
-            fallback: (local.primaryPercent, local.primaryResetsAt),
+    ) -> MainRateLimitMerge {
+        let localSnapshot = local.snapshot
+        let primary = authoritativeRateLimitWindow(
+            official: (appServer.snapshot.primaryPercent, appServer.snapshot.primaryResetsAt),
+            fallback: (localSnapshot.primaryPercent, localSnapshot.primaryResetsAt),
+            officialReason: "app_server_\(appServer.freshness.rawValue)",
             now: now
         )
-        let secondary = conservativeRateLimitWindow(
-            preferred: (appServer.secondaryPercent, appServer.secondaryResetsAt),
-            fallback: (local.secondaryPercent, local.secondaryResetsAt),
+        let secondary = authoritativeRateLimitWindow(
+            official: (appServer.snapshot.secondaryPercent, appServer.snapshot.secondaryResetsAt),
+            fallback: (localSnapshot.secondaryPercent, localSnapshot.secondaryResetsAt),
+            officialReason: "app_server_\(appServer.freshness.rawValue)",
             now: now
         )
 
-        return RateLimitSnapshot(
-            primaryPercent: primary.percent,
-            secondaryPercent: secondary.percent,
-            primaryResetsAt: primary.resetsAt,
-            secondaryResetsAt: secondary.resetsAt,
-            capturedAt: appServer.capturedAt ?? local.capturedAt,
-            isPrimaryCodexLimit: appServer.isPrimaryCodexLimit || local.isPrimaryCodexLimit,
-            sparkQuotaWindows: appServer.sparkQuotaWindows
+        return MainRateLimitMerge(
+            snapshot: RateLimitSnapshot(
+                primaryPercent: primary.percent,
+                secondaryPercent: secondary.percent,
+                primaryResetsAt: primary.resetsAt,
+                secondaryResetsAt: secondary.resetsAt,
+                capturedAt: appServer.snapshot.capturedAt ?? localSnapshot.capturedAt,
+                isPrimaryCodexLimit: appServer.snapshot.isPrimaryCodexLimit || localSnapshot.isPrimaryCodexLimit,
+                sparkQuotaWindows: appServer.snapshot.sparkQuotaWindows
+            ),
+            primaryReason: primary.reason,
+            secondaryReason: secondary.reason,
+            officialWindowCount: [primary, secondary].filter(\.usesOfficial).count
         )
     }
 
-    private func conservativeRateLimitWindow(
-        preferred: (percent: Int?, resetsAt: Int?),
+    private func authoritativeRateLimitWindow(
+        official: (percent: Int?, resetsAt: Int?),
         fallback: (percent: Int?, resetsAt: Int?),
+        officialReason: String,
         now: Date
-    ) -> (percent: Int?, resetsAt: Int?) {
-        let preferredDisplay = RateLimitSnapshot.effectiveRemainingPercent(
-            preferred.percent,
-            resetsAt: preferred.resetsAt,
-            now: now
-        )
-        let fallbackDisplay = RateLimitSnapshot.effectiveRemainingPercent(
-            fallback.percent,
-            resetsAt: fallback.resetsAt,
-            now: now
-        )
-
-        guard let preferredDisplay else {
-            return fallback
-        }
-        guard let fallbackDisplay else {
-            return preferred
+    ) -> RateLimitWindowDecision {
+        if official.percent == nil, official.resetsAt == nil {
+            return RateLimitWindowDecision(
+                percent: fallback.percent,
+                resetsAt: fallback.resetsAt,
+                reason: fallback.percent == nil && fallback.resetsAt == nil ? "unavailable" : "local_jsonl_only",
+                usesOfficial: false
+            )
         }
 
-        return fallbackDisplay < preferredDisplay ? fallback : preferred
+        let resetNeedsConfirmation = official.resetsAt.map { $0 <= Int(now.timeIntervalSince1970) } ?? false
+        return RateLimitWindowDecision(
+            percent: official.percent,
+            resetsAt: official.resetsAt,
+            reason: resetNeedsConfirmation ? "\(officialReason)_pending_reset_refresh" : officialReason,
+            usesOfficial: true
+        )
+    }
+
+    private func isSuspiciousAppServerRebound(
+        _ candidate: RateLimitSnapshot,
+        comparedTo previous: RateLimitSnapshot
+    ) -> Bool {
+        let primaryIncrease = quotaIncrease(candidate.primaryPercent, over: previous.primaryPercent)
+        let secondaryIncrease = quotaIncrease(candidate.secondaryPercent, over: previous.secondaryPercent)
+        return primaryIncrease >= UsageScanPolicy.appServerReboundThreshold
+            || secondaryIncrease >= UsageScanPolicy.appServerReboundThreshold
+    }
+
+    private func quotaIncrease(_ candidate: Int?, over previous: Int?) -> Int {
+        guard let candidate, let previous else {
+            return 0
+        }
+        return candidate - previous
+    }
+
+    private func sameMainRateLimitGeneration(
+        _ lhs: RateLimitSnapshot,
+        _ rhs: RateLimitSnapshot
+    ) -> Bool {
+        sameRateLimitReset(lhs.primaryResetsAt, rhs.primaryResetsAt)
+            && sameRateLimitReset(lhs.secondaryResetsAt, rhs.secondaryResetsAt)
+    }
+
+    private func sameRateLimitReset(_ lhs: Int?, _ rhs: Int?) -> Bool {
+        switch (lhs, rhs) {
+        case (.none, .none):
+            true
+        case (.some(let lhs), .some(let rhs)):
+            abs(TimeInterval(lhs) - TimeInterval(rhs)) <= TimeInterval(UsageScanPolicy.rateLimitResetTolerance)
+        default:
+            false
+        }
+    }
+
+    private func earliestMainRateLimitReset(_ snapshot: RateLimitSnapshot?) -> Int? {
+        guard let snapshot else {
+            return nil
+        }
+        return [snapshot.primaryResetsAt, snapshot.secondaryResetsAt]
+            .compactMap { $0 }
+            .min()
+    }
+
+    private func hasReachedMainRateLimitReset(_ snapshot: RateLimitSnapshot?, now: Date) -> Bool {
+        guard let resetAt = earliestMainRateLimitReset(snapshot) else {
+            return false
+        }
+        return resetAt <= Int(now.timeIntervalSince1970)
     }
 
     private func hasMainRateLimitData(_ snapshot: RateLimitSnapshot) -> Bool {
@@ -2730,29 +3068,78 @@ final class CodexUsageStore: @unchecked Sendable {
             || !snapshot.sparkQuotaWindows.isEmpty
     }
 
-    private func loadLatestRateLimits(from paths: [String]) -> RateLimitSnapshot {
-        loadLatestRateLimits(from: paths, now: Date())
+    private func loggedRateLimitResult(
+        _ result: RateLimitLoadResult,
+        preference: RateLimitSourcePreference,
+        appServer: AvailableAppServerRateLimits?,
+        local: LocalRateLimitSelection,
+        primaryReason: String,
+        secondaryReason: String,
+        diagnosticID: String
+    ) -> RateLimitLoadResult {
+        let localSnapshot = local.snapshot
+        let finalSnapshot = result.snapshot
+        let appServerSnapshot = appServer?.snapshot
+        let cacheMetrics = appServerCacheMetrics(now: Date())
+        diagnostics?.record(
+            event: "quota_resolution",
+            correlationID: diagnosticID,
+            fields: [
+                "preference": preference.rawValue,
+                "result_source": result.source,
+                "primary_decision": primaryReason,
+                "secondary_decision": secondaryReason,
+                "reset_tolerance_seconds": UsageScanPolicy.rateLimitResetTolerance,
+                "local_consensus_minimum_support": UsageScanPolicy.rateLimitConsensusMinimumSupport,
+                "local_candidate_count": local.candidateCount,
+                "local_recent_candidate_count": local.recentCandidateCount,
+                "local_generation_count": local.generationCount,
+                "local_recent_generation_count": local.recentGenerationCount,
+                "local_selection_reason": local.selectionReason,
+                "local_selected_generation_support": local.selectedGenerationSupport,
+                "app_server_cache_state": appServer?.freshness.rawValue ?? cacheMetrics.state,
+                "app_server_cache_age_seconds": diagnosticValue(appServer?.ageSeconds ?? cacheMetrics.ageSeconds),
+                "app_server_consecutive_failures": cacheMetrics.consecutiveFailures,
+                "app_server_next_retry_at": diagnosticValue(epochSeconds(cacheMetrics.nextRetryAt)),
+                "app_server_pending_rebound": cacheMetrics.hasPendingRebound,
+                "app_server_primary_percent": diagnosticValue(appServerSnapshot?.primaryPercent),
+                "app_server_secondary_percent": diagnosticValue(appServerSnapshot?.secondaryPercent),
+                "app_server_primary_reset_at": diagnosticValue(appServerSnapshot?.primaryResetsAt),
+                "app_server_secondary_reset_at": diagnosticValue(appServerSnapshot?.secondaryResetsAt),
+                "app_server_captured_at": diagnosticValue(epochSeconds(appServerSnapshot?.capturedAt)),
+                "local_primary_percent": diagnosticValue(localSnapshot.primaryPercent),
+                "local_secondary_percent": diagnosticValue(localSnapshot.secondaryPercent),
+                "local_primary_reset_at": diagnosticValue(localSnapshot.primaryResetsAt),
+                "local_secondary_reset_at": diagnosticValue(localSnapshot.secondaryResetsAt),
+                "local_captured_at": diagnosticValue(epochSeconds(localSnapshot.capturedAt)),
+                "result_primary_percent": diagnosticValue(finalSnapshot.primaryPercent),
+                "result_secondary_percent": diagnosticValue(finalSnapshot.secondaryPercent),
+                "result_primary_reset_at": diagnosticValue(finalSnapshot.primaryResetsAt),
+                "result_secondary_reset_at": diagnosticValue(finalSnapshot.secondaryResetsAt)
+            ]
+        )
+        return result
     }
 
-    private func loadLatestRateLimits(from paths: [String], now: Date) -> RateLimitSnapshot {
+    private func diagnosticValue<T>(_ value: T?) -> Any {
+        value.map { $0 as Any } ?? NSNull()
+    }
+
+    private func epochSeconds(_ date: Date?) -> Int? {
+        date.map { Int($0.timeIntervalSince1970) }
+    }
+
+    private func loadLatestRateLimits(from paths: [String], now: Date) -> LocalRateLimitSelection {
         let snapshots = paths
             .filter { !$0.isEmpty && FileManager.default.fileExists(atPath: $0) }
             .compactMap { readRateLimitSnapshot(from: $0) }
         let sparkQuotaWindows = mergedSparkQuotaWindows(from: snapshots, now: now)
-
-        if let codexSnapshot = snapshots
-            .filter({ $0.isPrimaryCodexLimit && hasMainRateLimitData($0) })
-            .max(by: { ($0.capturedAt ?? .distantPast) < ($1.capturedAt ?? .distantPast) }) {
-            return codexSnapshot.withSparkQuotaWindows(sparkQuotaWindows)
-        }
-
-        if let latestSnapshot = snapshots
-            .filter({ hasMainRateLimitData($0) })
-            .max(by: { ($0.capturedAt ?? .distantPast) < ($1.capturedAt ?? .distantPast) }) {
-            return latestSnapshot.withSparkQuotaWindows(sparkQuotaWindows)
-        }
-
-        return RateLimitSnapshot(
+        let primaryCandidates = snapshots.filter { $0.isPrimaryCodexLimit && hasMainRateLimitData($0) }
+        let fallbackCandidates = snapshots.filter { hasMainRateLimitData($0) }
+        let candidates = primaryCandidates.isEmpty ? fallbackCandidates : primaryCandidates
+        let recentCandidates = recentRateLimitCandidates(candidates)
+        let decision = selectLocalRateLimitGeneration(from: recentCandidates, now: now)
+        let empty = RateLimitSnapshot(
             primaryPercent: nil,
             secondaryPercent: nil,
             primaryResetsAt: nil,
@@ -2761,6 +3148,105 @@ final class CodexUsageStore: @unchecked Sendable {
             isPrimaryCodexLimit: false,
             sparkQuotaWindows: []
         )
+        return LocalRateLimitSelection(
+            snapshot: (decision.snapshot ?? empty).withSparkQuotaWindows(sparkQuotaWindows),
+            candidateCount: candidates.count,
+            recentCandidateCount: recentCandidates.count,
+            generationCount: Set(candidates.map(rateLimitGenerationKey)).count,
+            recentGenerationCount: Set(recentCandidates.map(rateLimitGenerationKey)).count,
+            selectionReason: decision.reason,
+            selectedGenerationSupport: decision.support
+        )
+    }
+
+    private func selectLocalRateLimitGeneration(
+        from snapshots: [RateLimitSnapshot],
+        now: Date
+    ) -> LocalGenerationDecision {
+        guard !snapshots.isEmpty else {
+            return LocalGenerationDecision(snapshot: nil, reason: "unavailable", support: 0)
+        }
+
+        let nowEpoch = Int(now.timeIntervalSince1970)
+        let generations = Dictionary(grouping: snapshots, by: rateLimitGenerationKey)
+            .compactMap { _, members -> LocalRateLimitGeneration? in
+                guard let snapshot = members.max(by: {
+                    ($0.capturedAt ?? .distantPast) < ($1.capturedAt ?? .distantPast)
+                }) else {
+                    return nil
+                }
+                let activeWindowCount = [snapshot.primaryResetsAt, snapshot.secondaryResetsAt]
+                    .compactMap { $0 }
+                    .filter { $0 > nowEpoch }
+                    .count
+                return LocalRateLimitGeneration(
+                    snapshot: snapshot,
+                    support: members.count,
+                    activeWindowCount: activeWindowCount
+                )
+            }
+
+        guard generations.count > 1 else {
+            let generation = generations[0]
+            return LocalGenerationDecision(
+                snapshot: generation.snapshot,
+                reason: "single_generation",
+                support: generation.support
+            )
+        }
+
+        let maxActiveWindowCount = generations.map(\.activeWindowCount).max() ?? 0
+        let activeCandidates = generations.filter { $0.activeWindowCount == maxActiveWindowCount }
+        let maxSupport = activeCandidates.map(\.support).max() ?? 0
+        let supportedCandidates = activeCandidates.filter { $0.support == maxSupport }
+        let selected = supportedCandidates.min {
+            isOlderRateLimitGeneration($0.snapshot, $1.snapshot)
+        } ?? generations[0]
+
+        let reason: String
+        if activeCandidates.count < generations.count {
+            reason = "post_reset_generation"
+        } else if supportedCandidates.count < activeCandidates.count {
+            reason = "majority_future_generation"
+        } else {
+            reason = "tie_earlier_reset"
+        }
+        return LocalGenerationDecision(
+            snapshot: selected.snapshot,
+            reason: reason,
+            support: selected.support
+        )
+    }
+
+    private func recentRateLimitCandidates(_ snapshots: [RateLimitSnapshot]) -> [RateLimitSnapshot] {
+        guard let latestCapturedAt = snapshots.compactMap(\.capturedAt).max() else {
+            return snapshots
+        }
+        let recent = snapshots.filter { snapshot in
+            guard let capturedAt = snapshot.capturedAt else {
+                return false
+            }
+            return latestCapturedAt.timeIntervalSince(capturedAt) <= UsageScanPolicy.rateLimitCandidateRecencyWindow
+        }
+        return recent.isEmpty ? snapshots : recent
+    }
+
+    private func isOlderRateLimitGeneration(_ lhs: RateLimitSnapshot, _ rhs: RateLimitSnapshot) -> Bool {
+        let lhsSecondary = lhs.secondaryResetsAt ?? Int.min
+        let rhsSecondary = rhs.secondaryResetsAt ?? Int.min
+        if lhsSecondary != rhsSecondary {
+            return lhsSecondary < rhsSecondary
+        }
+        let lhsPrimary = lhs.primaryResetsAt ?? Int.min
+        let rhsPrimary = rhs.primaryResetsAt ?? Int.min
+        if lhsPrimary != rhsPrimary {
+            return lhsPrimary < rhsPrimary
+        }
+        return (lhs.capturedAt ?? .distantPast) < (rhs.capturedAt ?? .distantPast)
+    }
+
+    private func rateLimitGenerationKey(_ snapshot: RateLimitSnapshot) -> String {
+        "\(snapshot.primaryResetsAt ?? -1):\(snapshot.secondaryResetsAt ?? -1)"
     }
 
     private func mergedSparkQuotaWindows(
@@ -2805,51 +3291,148 @@ final class CodexUsageStore: @unchecked Sendable {
         }
     }
 
-    private func loadAppServerRateLimits(now: Date, allowBlocking: Bool) -> RateLimitSnapshot? {
+    private func availableAppServerRateLimits(now: Date) -> AvailableAppServerRateLimits? {
         cacheLock.lock()
-        let cached = appServerRateLimitCache
+        let snapshot = appServerRateLimitCache.lastSuccess
+        let lastSuccessAt = appServerRateLimitCache.lastSuccessAt
+        let failureCount = appServerRateLimitCache.consecutiveFailures
         cacheLock.unlock()
 
-        if let cached {
-            switch cached.state {
-            case .success(let snapshot) where now.timeIntervalSince(cached.createdAt) < UsageScanPolicy.appServerSuccessCacheTTL:
-                return snapshot
-            case .failure where now.timeIntervalSince(cached.createdAt) < UsageScanPolicy.appServerFailureCacheTTL:
-                return nil
-            default:
-                break
-            }
-        }
-
-        guard allowBlocking else {
+        guard let snapshot, let lastSuccessAt else {
             return nil
         }
+        let age = max(0, now.timeIntervalSince(lastSuccessAt))
+        guard age <= UsageScanPolicy.appServerStaleGraceTTL else {
+            return nil
+        }
+        let freshness: AppServerCacheFreshness = age < UsageScanPolicy.appServerFreshCacheTTL
+            && failureCount == 0
+            ? .fresh
+            : .stale
+        return AvailableAppServerRateLimits(
+            snapshot: snapshot,
+            freshness: freshness,
+            ageSeconds: Int(age.rounded())
+        )
+    }
 
+    private func fetchAppServerRateLimits(now: Date) throws -> RateLimitSnapshot {
+        if let appServerRateLimitLoader {
+            return try appServerRateLimitLoader(now)
+        }
         guard let appServerExecutable,
               FileManager.default.isExecutableFile(atPath: appServerExecutable) else {
-            cacheAppServerRateLimits(.failure, now: now)
-            return nil
+            throw AppServerRateLimitRefreshError.missingExecutable
         }
-
-        let output = try? Shell.run(
+        let output = try Shell.run(
             "/bin/zsh",
             ["-lc", appServerRateLimitScript(executable: appServerExecutable)],
             timeout: 8
         )
-        guard let output,
-              let snapshot = parseAppServerRateLimits(output: output, now: now) else {
-            cacheAppServerRateLimits(.failure, now: now)
-            return nil
+        guard let snapshot = parseAppServerRateLimits(output: output, now: now) else {
+            throw AppServerRateLimitRefreshError.parseFailed
         }
-
-        cacheAppServerRateLimits(.success(snapshot), now: now)
         return snapshot
     }
 
-    private func cacheAppServerRateLimits(_ state: AppServerRateLimitCache.State, now: Date) {
+    private func appServerFailureKind(_ error: Error) -> String {
+        switch error {
+        case ShellError.timedOut:
+            "timeout"
+        case ShellError.launchFailed:
+            "launch_failed"
+        case ShellError.nonZeroExit:
+            "nonzero_exit"
+        case AppServerRateLimitRefreshError.missingExecutable:
+            "missing_executable"
+        case AppServerRateLimitRefreshError.parseFailed:
+            "parse_failed"
+        default:
+            "unavailable"
+        }
+    }
+
+    private func loadPersistedAppServerRateLimits() -> PersistedAppServerRateLimitCache? {
+        guard let appServerCacheURL,
+              let data = try? Data(contentsOf: appServerCacheURL) else {
+            return nil
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .millisecondsSince1970
+        guard let persisted = try? decoder.decode(PersistedAppServerRateLimitCache.self, from: data),
+              persisted.version == PersistedAppServerRateLimitCache.currentVersion else {
+            return nil
+        }
+        return persisted
+    }
+
+    private func persistAppServerRateLimits(_ snapshot: RateLimitSnapshot, savedAt: Date) {
+        guard let appServerCacheURL else {
+            return
+        }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .millisecondsSince1970
+        encoder.outputFormatting = [.sortedKeys]
+        let persisted = PersistedAppServerRateLimitCache(
+            version: PersistedAppServerRateLimitCache.currentVersion,
+            savedAt: savedAt,
+            snapshot: snapshot
+        )
+        guard let data = try? encoder.encode(persisted) else {
+            return
+        }
+        let directory = appServerCacheURL.deletingLastPathComponent()
+        do {
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: directory.path
+            )
+            try data.write(to: appServerCacheURL, options: .atomic)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: appServerCacheURL.path
+            )
+        } catch {
+            diagnostics?.record(
+                event: "app_server_cache_write",
+                correlationID: UUID().uuidString,
+                fields: ["outcome": "failure"],
+                deduplicate: true
+            )
+        }
+    }
+
+    private func appServerCacheMetrics(now: Date) -> AppServerCacheMetrics {
         cacheLock.lock()
-        appServerRateLimitCache = AppServerRateLimitCache(createdAt: now, state: state)
-        cacheLock.unlock()
+        defer { cacheLock.unlock() }
+        let ageSeconds = appServerRateLimitCache.lastSuccessAt.map {
+            max(0, Int(now.timeIntervalSince($0).rounded()))
+        }
+        let state: String
+        if let ageSeconds {
+            if TimeInterval(ageSeconds) > UsageScanPolicy.appServerStaleGraceTTL {
+                state = "expired"
+            } else if TimeInterval(ageSeconds) >= UsageScanPolicy.appServerFreshCacheTTL
+                        || appServerRateLimitCache.consecutiveFailures > 0 {
+                state = "stale"
+            } else {
+                state = "fresh"
+            }
+        } else {
+            state = "unavailable"
+        }
+        return AppServerCacheMetrics(
+            state: state,
+            ageSeconds: ageSeconds,
+            consecutiveFailures: appServerRateLimitCache.consecutiveFailures,
+            nextRetryAt: appServerRateLimitCache.retryNotBefore,
+            hasPendingRebound: appServerRateLimitCache.pendingRebound != nil
+        )
     }
 
     private func appServerRateLimitScript(executable: String) -> String {
@@ -3507,13 +4090,34 @@ private struct RecentSessionCandidate {
 }
 
 private struct AppServerRateLimitCache {
-    let createdAt: Date
-    let state: State
+    var lastSuccess: RateLimitSnapshot?
+    var lastSuccessAt: Date?
+    var lastAttemptAt: Date?
+    var consecutiveFailures = 0
+    var retryNotBefore: Date?
+    var pendingRebound: RateLimitSnapshot?
+    var isRefreshing = false
+}
 
-    enum State {
-        case success(RateLimitSnapshot)
-        case failure
-    }
+private struct PersistedAppServerRateLimitCache: Codable {
+    static let currentVersion = 1
+
+    let version: Int
+    let savedAt: Date
+    let snapshot: RateLimitSnapshot
+}
+
+private struct AppServerCacheMetrics {
+    let state: String
+    let ageSeconds: Int?
+    let consecutiveFailures: Int
+    let nextRetryAt: Date?
+    let hasPendingRebound: Bool
+}
+
+private enum AppServerRateLimitRefreshError: Error {
+    case missingExecutable
+    case parseFailed
 }
 
 private struct PeriodUsageCache {

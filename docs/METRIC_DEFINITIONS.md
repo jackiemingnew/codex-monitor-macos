@@ -80,8 +80,25 @@ adds, removes, renames, or changes the formula for a usage metric in
   first-class metric, prefer strong-evidence log events such as `run_auto_compact` and
   report confirmed counts separately from token-sequence estimates.
 - `quota.5h` and `quota.7d` describe rate-limit windows, not token usage.
-- Active quota windows preserve the exact upstream remaining percentage,
-  including `99%`. A window becomes `100%` only after its reset time has passed.
+- Quota windows preserve the exact upstream remaining percentage, including
+  `0%`, `99%`, and `100%`. A reset timestamp is a refresh hint, not proof that
+  quota has replenished; only a new source value may change the percentage.
+- Concurrent JSONL sessions can report different quota cohorts. Recent local
+  candidates are grouped by their 5h / 7d reset pair. A generation that has
+  actually crossed reset outranks expired generations; otherwise the cohort
+  with more recent-session support wins. Ties retain the earlier stable reset
+  until it expires or the later cohort gains more support.
+- A fresh app-server value is authoritative for main Codex 5h / 7d quota. Its
+  last-known-good value remains authoritative for up to 15 minutes after a
+  failure, including across a reset boundary; local JSONL is used only after
+  that protection expires or when no official value exists.
+- An app-server response that raises either remaining percentage by 10 points
+  or more is staged for 30 seconds. It is published only after another response
+  confirms the same 5h / 7d reset generation. This prevents a single transient
+  `99% / 100%` response from replacing a confirmed exhausted window while still
+  allowing a real reset after confirmation.
+- A reached reset schedules an early app-server recheck. It never rewrites the
+  displayed percentage or grants a local cohort immediate authority.
 - The app-server executable is resolved from the current `com.openai.codex`
   application bundle with ChatGPT/Codex application-path fallbacks. Local JSONL
   remains the fallback source when app-server is unavailable.

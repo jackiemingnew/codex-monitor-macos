@@ -23,6 +23,7 @@ swiftc \
   "${ROOT_DIR}/Sources/CodexNotch/CodexRuntimeLocator.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/KeychainStore.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/SecretStore.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/MonitorDiagnostics.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/CodexRadarModels.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/CodexRadarClient.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/CodexNotchSettings.swift" \

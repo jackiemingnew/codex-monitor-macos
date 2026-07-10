@@ -30,6 +30,7 @@ final class UsageViewModel: ObservableObject {
     private var isRefreshingSnapshot = false
     private var isRefreshingUsage = false
     private var isRefreshingWatchPaths = false
+    private var isRefreshingAppServer = false
     private var pendingSnapshotRefresh = false
     private var pendingSnapshotBypassFastCache = false
     private var pendingUsageRefresh = false
@@ -45,7 +46,7 @@ final class UsageViewModel: ObservableObject {
         refresh(bypassFastCache: true)
         scheduleUsageRefresh(after: 20)
         scheduleWatcherRefresh(after: 20)
-        scheduleAppServerRateLimitRefresh(after: 30)
+        refreshAppServerRateLimits(force: true)
         observeSettings()
     }
 
@@ -129,10 +130,18 @@ final class UsageViewModel: ObservableObject {
         }
     }
 
-    func refreshAll() {
-        refresh(bypassFastCache: true)
+    func refreshAll(forceRateLimitRefresh: Bool = true) {
         refreshUsageTotals()
-        refreshAppServerRateLimits()
+        if settings.rateLimitSource == .appServerFirst {
+            if forceRateLimitRefresh {
+                refreshAppServerRateLimits(force: true)
+            } else {
+                refresh(bypassFastCache: true)
+                refreshAppServerRateLimits()
+            }
+        } else {
+            refresh(bypassFastCache: true)
+        }
     }
 
     private func refreshUsageTotals() {
@@ -264,30 +273,37 @@ final class UsageViewModel: ObservableObject {
             return
         }
 
-        let interval = delay ?? 5 * 60
+        let interval = max(1, delay ?? store.appServerRefreshDelay())
         let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 self?.refreshAppServerRateLimits()
             }
         }
-        timer.tolerance = min(60, max(10, interval * 0.35))
+        timer.tolerance = min(10, max(1, interval * 0.1))
         appServerRateLimitTimer = timer
     }
 
-    private func refreshAppServerRateLimits() {
+    private func refreshAppServerRateLimits(force: Bool = false) {
         appServerRateLimitTimer?.invalidate()
         appServerRateLimitTimer = nil
         guard settings.rateLimitSource == .appServerFirst else {
             return
         }
+        guard !isRefreshingAppServer else {
+            refresh(bypassFastCache: true)
+            return
+        }
+        isRefreshingAppServer = true
 
         Task.detached(priority: .utility) { [store] in
-            let refreshed = store.refreshAppServerRateLimits() != nil
+            let refreshed = store.refreshAppServerRateLimits(force: force)
+            let nextDelay = store.appServerRefreshDelay()
             await MainActor.run {
-                if refreshed {
+                self.isRefreshingAppServer = false
+                if refreshed || force {
                     self.refresh(bypassFastCache: true)
                 }
-                self.scheduleAppServerRateLimitRefresh()
+                self.scheduleAppServerRateLimitRefresh(after: nextDelay)
             }
         }
     }
@@ -417,10 +433,13 @@ final class UsageViewModel: ObservableObject {
         watcherRefreshTimer?.invalidate()
         watcherRefreshTimer = nil
 
-        refresh(bypassFastCache: true)
         refreshUsageTotals()
         refreshWatchPaths()
-        scheduleAppServerRateLimitRefresh(after: 30)
+        if settings.rateLimitSource == .appServerFirst {
+            refreshAppServerRateLimits(force: true)
+        } else {
+            refresh(bypassFastCache: true)
+        }
     }
 
     private var currentUsage: PeriodUsage {

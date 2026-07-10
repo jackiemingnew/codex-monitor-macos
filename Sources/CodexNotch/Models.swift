@@ -713,7 +713,7 @@ struct ThreadIDRecord: Decodable {
     let id: String
 }
 
-struct RateLimitSnapshot: Equatable {
+struct RateLimitSnapshot: Codable, Equatable {
     let primaryPercent: Int?
     let secondaryPercent: Int?
     let primaryResetsAt: Int?
@@ -748,10 +748,7 @@ struct RateLimitSnapshot: Equatable {
         Self.effectiveRemainingPercent(secondaryPercent, resetsAt: secondaryResetsAt, now: now)
     }
 
-    static func effectiveRemainingPercent(_ percent: Int?, resetsAt: Int?, now: Date) -> Int? {
-        if let resetsAt, Int(now.timeIntervalSince1970) >= resetsAt {
-            return 100
-        }
+    static func effectiveRemainingPercent(_ percent: Int?, resetsAt _: Int?, now _: Date) -> Int? {
         return percent
     }
 
@@ -769,7 +766,7 @@ struct RateLimitSnapshot: Equatable {
 
 }
 
-struct SparkQuotaWindow: Identifiable, Equatable {
+struct SparkQuotaWindow: Codable, Identifiable, Equatable {
     let id: String
     let label: String
     let remainingPercent: Int?
