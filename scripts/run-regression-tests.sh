@@ -21,6 +21,7 @@ swiftc \
   "${ROOT_DIR}/Sources/CodexNotch/Formatters.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/SnapshotOutputFormatter.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/DisplayRedactor.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/NetworkSecurityPolicy.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/IslandMetrics.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/Shell.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/CodexRuntimeLocator.swift" \

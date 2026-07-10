@@ -27,7 +27,7 @@ enum CLIProxyAPIError: LocalizedError {
     }
 }
 
-final class CLIProxyAPIClient: NSObject, URLSessionDelegate {
+final class CLIProxyAPIClient: NSObject, URLSessionTaskDelegate {
     private let configuration: CLIProxyAPIConfiguration
 
     init(configuration: CLIProxyAPIConfiguration) {
@@ -82,7 +82,7 @@ final class CLIProxyAPIClient: NSObject, URLSessionDelegate {
         sessionConfig.timeoutIntervalForResource = timeout
         let session = URLSession(
             configuration: sessionConfig,
-            delegate: configuration.allowInsecureTLS ? self : nil,
+            delegate: self,
             delegateQueue: nil
         )
         defer {
@@ -191,7 +191,7 @@ final class CLIProxyAPIClient: NSObject, URLSessionDelegate {
         sessionConfig.timeoutIntervalForResource = configuration.timeout
         let session = URLSession(
             configuration: sessionConfig,
-            delegate: configuration.allowInsecureTLS ? self : nil,
+            delegate: self,
             delegateQueue: nil
         )
         defer {
@@ -216,10 +216,37 @@ final class CLIProxyAPIClient: NSObject, URLSessionDelegate {
     ) async -> (URLSession.AuthChallengeDisposition, URLCredential?) {
         guard configuration.allowInsecureTLS,
               challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              let configuredURL = Self.managementBaseURL(from: configuration.panelURL),
+              NetworkSecurityPolicy.matchesProtectionSpace(
+                  host: challenge.protectionSpace.host,
+                  port: challenge.protectionSpace.port,
+                  protocolName: challenge.protectionSpace.protocol,
+                  configuredURL: configuredURL
+              ),
               let trust = challenge.protectionSpace.serverTrust else {
             return (.performDefaultHandling, nil)
         }
         return (.useCredential, URLCredential(trust: trust))
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        guard let configuredURL = Self.managementBaseURL(from: configuration.panelURL),
+              let newURL = request.url,
+              NetworkSecurityPolicy.allowsRedirect(
+                  from: task.currentRequest?.url ?? task.originalRequest?.url,
+                  to: newURL,
+                  configuredURL: configuredURL
+              ) else {
+            completionHandler(nil)
+            return
+        }
+        completionHandler(request)
     }
 
     static func managementBaseURL(from input: String) -> URL? {

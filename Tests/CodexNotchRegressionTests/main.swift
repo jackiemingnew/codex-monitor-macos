@@ -1564,6 +1564,50 @@ let newAPIBaseURL = runner.require(
 runner.check(newAPIBaseURL.absoluteString == "https://newapi.example.com", "NewAPI-compatible base URL should use the origin")
 runner.check(BalanceAPIClient.apiBaseURL(from: "https://newapi.example.com@evil.example.com/admin") == nil, "NewAPI-compatible panel URL must reject userinfo")
 
+let configuredSecureOrigin = URL(string: "https://panel.example.com/v0/management")!
+runner.check(
+    NetworkSecurityPolicy.allowsRedirect(
+        from: URL(string: "https://panel.example.com/v0/management/auth-files"),
+        to: URL(string: "https://panel.example.com/v0/management/login")!,
+        configuredURL: configuredSecureOrigin
+    ),
+    "same-origin HTTPS redirects should be allowed"
+)
+runner.check(
+    !NetworkSecurityPolicy.allowsRedirect(
+        from: URL(string: "https://panel.example.com/v0/management/auth-files"),
+        to: URL(string: "https://evil.example.com/steal")!,
+        configuredURL: configuredSecureOrigin
+    ),
+    "cross-origin redirects must be rejected"
+)
+runner.check(
+    !NetworkSecurityPolicy.allowsRedirect(
+        from: URL(string: "https://panel.example.com/v0/management/auth-files"),
+        to: URL(string: "http://panel.example.com/steal")!,
+        configuredURL: configuredSecureOrigin
+    ),
+    "HTTPS to HTTP redirects must be rejected"
+)
+runner.check(
+    NetworkSecurityPolicy.matchesProtectionSpace(
+        host: "PANEL.EXAMPLE.COM",
+        port: 443,
+        protocolName: "https",
+        configuredURL: configuredSecureOrigin
+    ),
+    "TLS exceptions should match the configured origin"
+)
+runner.check(
+    !NetworkSecurityPolicy.matchesProtectionSpace(
+        host: "evil.example.com",
+        port: 443,
+        protocolName: "https",
+        configuredURL: configuredSecureOrigin
+    ),
+    "TLS exceptions must not follow a challenge to another host"
+)
+
 let newAPILoginBody = try BalanceAPIClient.newAPILoginBody(
     for: BalanceAPIConfiguration(
         panelURL: "https://newapi.example.com",
@@ -1579,6 +1623,30 @@ let newAPILoginJSON = runner.require(
 )
 runner.check(newAPILoginJSON["username"] == "owner", "NewAPI login should send username")
 runner.check(newAPILoginJSON["password"] == "newapi-password", "NewAPI login should send password")
+for password in [
+    " leading-space",
+    "trailing-space ",
+    "\tpassword\n",
+    "🔐e\u{301}",
+    String(repeating: "x", count: 4_096),
+    "   "
+] {
+    let body = try BalanceAPIClient.newAPILoginBody(
+        for: BalanceAPIConfiguration(
+            panelURL: "https://newapi.example.com",
+            username: " owner ",
+            secret: password,
+            timeout: 6,
+            allowInsecureTLS: false
+        )
+    )
+    let json = runner.require(
+        try? JSONSerialization.jsonObject(with: body) as? [String: String],
+        "NewAPI whitespace password body should be JSON"
+    )
+    runner.check(json["username"] == "owner", "NewAPI login may normalize the username")
+    runner.check(json["password"] == password, "NewAPI login must preserve every password character")
+}
 
 let newAPILoginResponse = """
 {
@@ -1690,6 +1758,21 @@ let subAPILoginJSON = runner.require(
 )
 runner.check(subAPILoginJSON["email"] == "user@example.com", "Sub2API login should send the login name as email")
 runner.check(subAPILoginJSON["password"] == "subapi-password", "Sub2API login should send password")
+let subAPIWhitespacePassword = "\t subapi password \n"
+let subAPIWhitespaceBody = try BalanceAPIClient.subAPILoginBody(
+    for: BalanceAPIConfiguration(
+        panelURL: "https://subapi.example.com",
+        username: " user@example.com ",
+        secret: subAPIWhitespacePassword,
+        timeout: 6,
+        allowInsecureTLS: false
+    )
+)
+let subAPIWhitespaceJSON = runner.require(
+    try? JSONSerialization.jsonObject(with: subAPIWhitespaceBody) as? [String: String],
+    "Sub2API whitespace password body should be JSON"
+)
+runner.check(subAPIWhitespaceJSON["password"] == subAPIWhitespacePassword, "Sub2API login must preserve every password character")
 do {
     _ = try BalanceAPIClient.subAPILoginBody(
         for: BalanceAPIConfiguration(
