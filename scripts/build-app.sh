@@ -10,10 +10,12 @@ DIST_DIR="$ROOT_DIR/dist"
 APP_DIR="$DIST_DIR/$APP_NAME.app"
 DMG_STAGE_DIR="$DIST_DIR/dmg-stage"
 PACKAGE_STAGE_DIR="$DIST_DIR/package-stage"
+ICON_BUILD_DIR="$DIST_DIR/icon-build"
+ICON_PATH="$ICON_BUILD_DIR/AppIcon.icns"
 
 cd "$ROOT_DIR"
-swift "$ROOT_DIR/scripts/generate-app-icon.swift"
 mkdir -p "$DIST_DIR"
+swift "$ROOT_DIR/scripts/generate-app-icon.swift" "$ICON_BUILD_DIR"
 find "$DIST_DIR" -maxdepth 1 -type f \( -name "$APP_NAME.dmg" -o -name "$APP_NAME-*.dmg" -o -name "$PACKAGE_NAME-*.dmg" \) -delete
 rm -rf "$DMG_STAGE_DIR" "$PACKAGE_STAGE_DIR"
 
@@ -27,7 +29,7 @@ create_app_bundle() {
   rm -rf "$app_dir"
   mkdir -p "$macos_dir" "$resources_dir"
   cp "$binary_path" "$macos_dir/CodexNotch"
-  cp "$ROOT_DIR/Resources/AppIcon.icns" "$resources_dir/AppIcon.icns"
+  cp "$ICON_PATH" "$resources_dir/AppIcon.icns"
 
   cat > "$contents_dir/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -90,5 +92,5 @@ case "$(uname -m)" in
   *) create_app_bundle "$ROOT_DIR/.build/arm64-apple-macosx/release/CodexNotch" "$APP_DIR" ;;
 esac
 
-rm -rf "$DMG_STAGE_DIR" "$PACKAGE_STAGE_DIR"
+rm -rf "$DMG_STAGE_DIR" "$PACKAGE_STAGE_DIR" "$ICON_BUILD_DIR"
 echo "Built $APP_DIR"
