@@ -10,6 +10,8 @@ if [[ ! -x /usr/bin/sqlite3 ]]; then
   exit 1
 fi
 
+unset CODEX_USAGE_DELTA_DB
+
 swift build -c release --build-path "${BUILD_DIR}/package-build"
 
 swiftc \
