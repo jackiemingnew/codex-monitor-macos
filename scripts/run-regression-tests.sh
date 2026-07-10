@@ -19,6 +19,7 @@ swiftc \
   "${ROOT_DIR}/Sources/CodexNotch/Formatters.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/SnapshotOutputFormatter.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/DisplayRedactor.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/IslandMetrics.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/Shell.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/CodexRuntimeLocator.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/KeychainStore.swift" \
@@ -26,6 +27,7 @@ swiftc \
   "${ROOT_DIR}/Sources/CodexNotch/MonitorDiagnostics.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/CodexRadarModels.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/CodexRadarClient.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/CodexRadarViewModel.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/CodexNotchSettings.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/CodexUsageStore.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/BalanceMonitorModels.swift" \

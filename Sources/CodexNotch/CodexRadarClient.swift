@@ -1,6 +1,8 @@
 import Darwin
 import Foundation
 
+typealias CodexRadarRequestExecutor = @Sendable (URLRequest) async throws -> (Data, URLResponse)
+
 struct CodexRadarClient: Sendable {
     static let publicSummaryURL = URL(string: "https://codexradar.com/current.json")!
     static let authorizedCurrentURL = URL(string: "https://codexradar.com/api/v1/current")!
@@ -9,27 +11,38 @@ struct CodexRadarClient: Sendable {
     let authorizedEndpoint: URL
     let tokenProvider: CodexRadarTokenProvider
     let timeout: TimeInterval
+    let requestExecutor: CodexRadarRequestExecutor?
 
     init(
         publicEndpoint: URL = Self.publicSummaryURL,
         authorizedEndpoint: URL = Self.authorizedCurrentURL,
         tokenProvider: CodexRadarTokenProvider = CodexRadarTokenProvider(),
-        timeout: TimeInterval = 8
+        timeout: TimeInterval = 8,
+        requestExecutor: CodexRadarRequestExecutor? = nil
     ) {
         self.publicEndpoint = publicEndpoint
         self.authorizedEndpoint = authorizedEndpoint
         self.tokenProvider = tokenProvider
         self.timeout = timeout
+        self.requestExecutor = requestExecutor
     }
 
     func fetchSummary() async throws -> CodexRadarFetchResult {
         if let token = tokenProvider.token() {
-            let data = try await fetch(endpoint: authorizedEndpoint, source: .authorizedAPI, bearerToken: token)
-            return CodexRadarFetchResult(data: data, source: .authorizedAPI)
+            do {
+                let data = try await fetch(endpoint: authorizedEndpoint, source: .authorizedAPI, bearerToken: token)
+                return CodexRadarFetchResult(data: data, source: .authorizedAPI, fallbackReason: nil)
+            } catch {
+                guard let reason = Self.fallbackReason(for: error) else {
+                    throw error
+                }
+                let data = try await fetch(endpoint: publicEndpoint, source: .publicSummary, bearerToken: nil)
+                return CodexRadarFetchResult(data: data, source: .publicSummary, fallbackReason: reason)
+            }
         }
 
         let data = try await fetch(endpoint: publicEndpoint, source: .publicSummary, bearerToken: nil)
-        return CodexRadarFetchResult(data: data, source: .publicSummary)
+        return CodexRadarFetchResult(data: data, source: .publicSummary, fallbackReason: nil)
     }
 
     func fetchPublicSummary() async throws -> Data {
@@ -41,16 +54,6 @@ struct CodexRadarClient: Sendable {
             throw CodexRadarClientError.disallowedURL
         }
 
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = timeout
-        configuration.timeoutIntervalForResource = timeout
-        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-
-        let session = URLSession(configuration: configuration)
-        defer {
-            session.finishTasksAndInvalidate()
-        }
-
         var request = URLRequest(url: endpoint)
         request.httpMethod = "GET"
         request.timeoutInterval = timeout
@@ -60,7 +63,7 @@ struct CodexRadarClient: Sendable {
             request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
         }
 
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await execute(request)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw CodexRadarClientError.invalidResponse
         }
@@ -71,6 +74,42 @@ struct CodexRadarClient: Sendable {
             throw CodexRadarClientError.emptyResponse
         }
         return data
+    }
+
+    private func execute(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        if let requestExecutor {
+            return try await requestExecutor(request)
+        }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = timeout
+        configuration.timeoutIntervalForResource = timeout
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.finishTasksAndInvalidate()
+        }
+        return try await session.data(for: request)
+    }
+
+    static func fallbackReason(for error: Error) -> CodexRadarFallbackReason? {
+        if error is CancellationError {
+            return nil
+        }
+        if let urlError = error as? URLError {
+            return urlError.code == .cancelled ? nil : .apiUnavailable
+        }
+        guard let clientError = error as? CodexRadarClientError else {
+            return .apiUnavailable
+        }
+        switch clientError {
+        case .disallowedURL:
+            return nil
+        case .httpStatus(let status) where status == 401 || status == 403:
+            return .invalidToken
+        case .invalidResponse, .httpStatus, .emptyResponse:
+            return .apiUnavailable
+        }
     }
 
     static func isAllowedURL(_ url: URL, source: CodexRadarDataSource) -> Bool {
@@ -108,6 +147,21 @@ struct CodexRadarClient: Sendable {
 struct CodexRadarFetchResult: Sendable {
     let data: Data
     let source: CodexRadarDataSource
+    let fallbackReason: CodexRadarFallbackReason?
+}
+
+enum CodexRadarFallbackReason: String, Codable, Equatable, Sendable {
+    case invalidToken
+    case apiUnavailable
+
+    var displayMessage: String {
+        switch self {
+        case .invalidToken:
+            "API Token 无效，已使用公开摘要"
+        case .apiUnavailable:
+            "API 暂不可用，已使用公开摘要"
+        }
+    }
 }
 
 struct CodexRadarTokenProvider: Sendable {

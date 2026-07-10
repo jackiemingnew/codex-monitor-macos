@@ -62,6 +62,19 @@ final class CodexRadarViewModel: ObservableObject {
         }
     }
 
+    func refreshWhenPresented(now: Date = Date()) {
+        guard settings.codexRadarEnabled else {
+            snapshot = .disabled
+            return
+        }
+
+        if CodexRadarRefreshPolicy.shouldRefreshOnPresentation(lastFetchAt: snapshot.lastFetchAt, now: now) {
+            refreshFromNetwork()
+        } else {
+            scheduleNextRefresh(now: now)
+        }
+    }
+
     private func loadCacheAndSchedule() {
         refreshTimer?.invalidate()
         refreshTimer = nil
@@ -73,9 +86,16 @@ final class CodexRadarViewModel: ObservableObject {
         }
 
         if let cached = CodexRadarCache.load(from: cacheDirectory) {
+            let isStale = CodexRadarRefreshPolicy.shouldRefresh(lastFetchAt: cached.snapshot.lastFetchAt)
+            let message = if isStale {
+                cached.snapshot.fallbackReason.map { "\($0.displayMessage)；缓存可能已过期，正在后台刷新" }
+                    ?? "数据可能已过期，正在后台刷新"
+            } else {
+                cached.snapshot.fallbackReason?.displayMessage
+            }
             snapshot = cached.snapshot.withState(
-                CodexRadarRefreshPolicy.shouldRefresh(lastFetchAt: cached.snapshot.lastFetchAt) ? .stale : .ready,
-                message: CodexRadarRefreshPolicy.shouldRefresh(lastFetchAt: cached.snapshot.lastFetchAt) ? "数据可能已过期，正在后台刷新" : nil
+                isStale ? .stale : .ready,
+                message: message
             )
         } else {
             snapshot = .loading
@@ -115,14 +135,40 @@ final class CodexRadarViewModel: ObservableObject {
 
         refreshTask = Task.detached(priority: .utility) {
             do {
-                let result = try await client.fetchSummary()
+                var result = try await client.fetchSummary()
                 let fetchedAt = Date()
-                let nextSnapshot = try CodexRadarSnapshot.decodePublicSummary(
-                    from: result.data,
+                let nextSnapshot: CodexRadarSnapshot
+                do {
+                    nextSnapshot = try CodexRadarSnapshot.decodePublicSummary(
+                        from: result.data,
+                        fetchedAt: fetchedAt,
+                        dataSource: result.source,
+                        fallbackReason: result.fallbackReason
+                    )
+                } catch {
+                    guard result.source == .authorizedAPI else {
+                        throw error
+                    }
+                    let publicData = try await client.fetchPublicSummary()
+                    result = CodexRadarFetchResult(
+                        data: publicData,
+                        source: .publicSummary,
+                        fallbackReason: .apiUnavailable
+                    )
+                    nextSnapshot = try CodexRadarSnapshot.decodePublicSummary(
+                        from: publicData,
+                        fetchedAt: fetchedAt,
+                        dataSource: .publicSummary,
+                        fallbackReason: .apiUnavailable
+                    )
+                }
+                try CodexRadarCache.save(
+                    data: result.data,
                     fetchedAt: fetchedAt,
-                    dataSource: result.source
+                    source: result.source,
+                    fallbackReason: result.fallbackReason,
+                    to: cacheDirectory
                 )
-                try CodexRadarCache.save(data: result.data, fetchedAt: fetchedAt, source: result.source, to: cacheDirectory)
                 await MainActor.run {
                     guard generation == self.refreshGeneration else {
                         return
@@ -246,18 +292,29 @@ private enum CodexRadarCache {
         guard let snapshot = try? CodexRadarSnapshot.decodePublicSummary(
             from: data,
             fetchedAt: metadata?.lastFetchAt,
-            dataSource: metadata?.source ?? .publicSummary
+            dataSource: metadata?.source ?? .publicSummary,
+            fallbackReason: metadata?.fallbackReason
         ) else {
             return nil
         }
         return CodexRadarCacheEntry(snapshot: snapshot)
     }
 
-    static func save(data: Data, fetchedAt: Date, source: CodexRadarDataSource, to directory: URL) throws {
+    static func save(
+        data: Data,
+        fetchedAt: Date,
+        source: CodexRadarDataSource,
+        fallbackReason: CodexRadarFallbackReason?,
+        to directory: URL
+    ) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try data.write(to: directory.appendingPathComponent("current.json"), options: .atomic)
 
-        let metadata = CodexRadarCacheMetadata(lastFetchAt: fetchedAt, source: source)
+        let metadata = CodexRadarCacheMetadata(
+            lastFetchAt: fetchedAt,
+            source: source,
+            fallbackReason: fallbackReason
+        )
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         let metadataData = try encoder.encode(metadata)
@@ -274,7 +331,8 @@ private enum CodexRadarCache {
     }
 }
 
-private struct CodexRadarCacheMetadata: Codable {
+struct CodexRadarCacheMetadata: Codable, Equatable {
     let lastFetchAt: Date
     let source: CodexRadarDataSource?
+    let fallbackReason: CodexRadarFallbackReason?
 }

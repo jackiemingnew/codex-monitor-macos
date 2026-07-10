@@ -145,6 +145,81 @@ for metricID in [
 
 runner.check(AppInfo.version == "0.1.2", "app info should expose version 0.1.2")
 runner.check(AppInfo.displayVersion == "0.1.2", "app info should fall back to source version when bundle version is unavailable")
+let fullCodexDetailHeight = IslandMetrics.detailHeight(
+    taskRows: IslandMetrics.visibleTaskRows,
+    showsPeriodUsage: true,
+    showsSparkQuota: true
+)
+let codexDetailWithoutSpark = IslandMetrics.detailHeight(
+    taskRows: IslandMetrics.visibleTaskRows,
+    showsPeriodUsage: true,
+    showsSparkQuota: false
+)
+let codexDetailWithoutPeriod = IslandMetrics.detailHeight(
+    taskRows: IslandMetrics.visibleTaskRows,
+    showsPeriodUsage: false,
+    showsSparkQuota: true
+)
+runner.check(IslandMetrics.width == 520, "detail panel should preserve the fixed 520 point width")
+runner.check(IslandMetrics.collapsedWidth == 264, "collapsed window should match the visible 264 point pill")
+let overlayScreenFrame = CGRect(x: 0, y: 0, width: 1_440, height: 900)
+runner.check(
+    IslandMetrics.clampedOverlayCenterX(720, in: overlayScreenFrame) == 720,
+    "centered overlay position should remain unchanged"
+)
+runner.check(
+    IslandMetrics.clampedOverlayCenterX(50, in: overlayScreenFrame) == 260,
+    "overlay drag should keep the detail panel inside the left screen edge"
+)
+runner.check(
+    IslandMetrics.clampedOverlayCenterX(1_400, in: overlayScreenFrame) == 1_180,
+    "overlay drag should keep the detail panel inside the right screen edge"
+)
+runner.check(
+    IslandMetrics.clampedOverlayCenterX(920, in: overlayScreenFrame) == 920,
+    "overlay drag should preserve an in-bounds horizontal offset"
+)
+runner.check(fullCodexDetailHeight == 528, "five-row Codex detail with Spark and period usage should be 528 points tall")
+runner.check(fullCodexDetailHeight - codexDetailWithoutSpark == 40, "Spark strip should add 40 points including its section gap")
+runner.check(fullCodexDetailHeight - codexDetailWithoutPeriod == 56, "period footer should add 56 points including its section gap")
+runner.check(IslandMetrics.visibleTaskRowsHeight == 170, "task viewport should expose exactly five 34 point rows")
+runner.check(IslandMetrics.taskTableHeight(taskRows: IslandMetrics.visibleTaskRows) == 248, "task table should reserve 50 points below the five-row viewport")
+
+let diagnosticsTestRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("CodexNotchDiagnostics-\(UUID().uuidString)")
+let diagnosticsTestURL = diagnosticsTestRoot.appendingPathComponent("quota-diagnostics.jsonl")
+let diagnostics = MonitorDiagnostics(logURL: diagnosticsTestURL)
+defer {
+    try? FileManager.default.removeItem(at: diagnosticsTestRoot)
+}
+diagnostics.record(
+    event: "quota_resolution",
+    correlationID: "first",
+    fields: ["result_primary_percent": 83, "primary_decision": "local_jsonl_lower_same_generation"]
+)
+diagnostics.record(
+    event: "quota_resolution",
+    correlationID: "duplicate",
+    fields: ["result_primary_percent": 83, "primary_decision": "local_jsonl_lower_same_generation"]
+)
+diagnostics.record(
+    event: "quota_resolution",
+    correlationID: "second",
+    fields: ["result_primary_percent": 100, "primary_decision": "app_server_newer_generation"]
+)
+let diagnosticsLines = diagnostics.recentData(limit: 20)
+    .split(separator: 0x0A, omittingEmptySubsequences: true)
+let diagnosticsObjects = diagnosticsLines.compactMap { line in
+    try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any]
+}
+runner.check(diagnosticsObjects.count == 2, "diagnostic logger should deduplicate unchanged quota decisions")
+runner.check(diagnosticsObjects.last?["event"] as? String == "quota_resolution", "diagnostic logger should use a stable event name")
+runner.check(diagnosticsObjects.last?["result_primary_percent"] as? Int == 100, "diagnostic logger should preserve structured quota fields")
+runner.check(diagnosticsObjects.last?["correlation_id"] as? String == "second", "diagnostic logger should preserve the decision correlation id")
+let diagnosticsPermissions = (try? FileManager.default.attributesOfItem(atPath: diagnosticsTestURL.path)[.posixPermissions] as? NSNumber)?.intValue
+runner.check(diagnosticsPermissions == 0o600, "diagnostic log should be readable only by the current user")
+let diagnosticsDirectoryPermissions = (try? FileManager.default.attributesOfItem(atPath: diagnosticsTestRoot.path)[.posixPermissions] as? NSNumber)?.intValue
+runner.check(diagnosticsDirectoryPermissions == 0o700, "diagnostic directory should be accessible only by the current user")
 runner.check(TaskStatus.running.hudLabel == "RUNNING", "HUD running status should display RUNNING")
 runner.check(TaskStatus.recent.hudLabel == "IDLE", "HUD recent status should display as IDLE")
 runner.check(TaskStatus.idle.hudLabel == "IDLE", "HUD idle status should display as IDLE")
@@ -663,6 +738,147 @@ runner.check(radarSnapshot.attributionRequired, "Codex Radar should preserve req
 runner.check(radarSnapshot.attributionText == "数据来自 Codex 雷达 codexradar.com", "Codex Radar should preserve attribution text")
 runner.check(radarSnapshot.siteURL.absoluteString == "https://codexradar.com", "Codex Radar should preserve source site")
 
+let codexRadar56Fixture = """
+{
+  "monitored_at": "2026-07-10T11:22:58+08:00",
+  "status": "community_confirmed",
+  "recommended_action": "wait",
+  "window": {
+    "message": "当前没有开启的速蹬窗口；本次 full reset 已到账。"
+  },
+  "prediction": {
+    "summary": "当前窗口关闭。",
+    "expected_window": "本次 full reset 已到账，当前窗口关闭"
+  },
+  "model_iq": {
+    "latest": {
+      "date": "2026-07-10-am",
+      "score": 116.7,
+      "status": "invalid",
+      "passed": 7,
+      "tasks": 10,
+      "invalid": 1,
+      "valid_tasks": 9,
+      "model": "gpt-5.6-sol",
+      "reasoning_effort": "ultra",
+      "cost_usd": 33.103802
+    },
+    "comparisons": {
+      "gpt_56_sol_xhigh": {
+        "label": "GPT-5.6 Sol xhigh",
+        "latest": {"score": 105.0, "status": "green", "passed": 7, "tasks": 10, "invalid": 0, "valid_tasks": 10, "model": "gpt-5.6-sol", "reasoning_effort": "xhigh", "cost_usd": 37.127702}
+      },
+      "gpt_56_sol_high": {
+        "label": "GPT-5.6 Sol high",
+        "latest": {"score": 105.0, "status": "green", "passed": 7, "tasks": 10, "invalid": 0, "valid_tasks": 10, "model": "gpt-5.6-sol", "reasoning_effort": "high", "cost_usd": 23.423657}
+      },
+      "gpt_56_luna_medium": {
+        "label": "GPT-5.6 Luna medium",
+        "latest": {"score": 30.0, "status": "red", "passed": 2, "tasks": 10, "invalid": 0, "valid_tasks": 10, "model": "gpt-5.6-luna", "reasoning_effort": "medium", "cost_usd": 2.837291}
+      },
+      "gpt_56_sol_low": {
+        "label": "GPT-5.6 Sol low",
+        "latest": {"score": 105.0, "status": "green", "passed": 7, "tasks": 10, "invalid": 0, "valid_tasks": 10, "model": "gpt-5.6-sol", "reasoning_effort": "low", "cost_usd": 9.497932}
+      },
+      "gpt_56_sol_medium": {
+        "label": "GPT-5.6 Sol medium",
+        "latest": {"score": 120.0, "status": "green", "passed": 8, "tasks": 10, "invalid": 0, "valid_tasks": 10, "model": "gpt-5.6-sol", "reasoning_effort": "medium", "cost_usd": 15.285266}
+      },
+      "gpt_56_terra_medium": {
+        "label": "GPT-5.6 Terra medium",
+        "latest": {"score": 75.0, "status": "red", "passed": 5, "tasks": 10, "invalid": 0, "valid_tasks": 10, "model": "gpt-5.6-terra", "reasoning_effort": "medium", "cost_usd": 6.083723}
+      }
+    },
+    "quota_radar": {
+      "date": "2026-07-09-pm",
+      "updated_at": "2026-07-09T05:21:42Z",
+      "cost_usd": 116.938665,
+      "rows": [
+        {"tier": "20x Pro", "basis": "measured", "five_h": 259.86, "seven_d": 1559.16},
+        {"tier": "5x Pro", "basis": "model /4", "five_h": 64.97, "seven_d": 389.79},
+        {"tier": "Plus", "basis": "model /20", "five_h": 12.99, "seven_d": 77.96}
+      ],
+      "trend": [
+        {"date": "2026-07-08-am", "five_h_20x": 320.45, "seven_d_20x": 1922.70},
+        {"date": "2026-07-09-pm", "five_h_20x": 259.86, "seven_d_20x": 1559.16}
+      ]
+    }
+  }
+}
+""".data(using: .utf8)!
+let radar56Snapshot = try CodexRadarSnapshot.decodePublicSummary(
+    from: codexRadar56Fixture,
+    fetchedAt: radarFetchedAt,
+    dataSource: .authorizedAPI
+)
+runner.check(radar56Snapshot.models.count == 5, "Codex Radar 5.6 summary should expose every current model card")
+runner.check(radar56Snapshot.models.map(\.label) == [
+    "GPT-5.6 Sol ultra",
+    "GPT-5.6 Sol medium",
+    "GPT-5.6 Sol low",
+    "GPT-5.6 Terra medium",
+    "GPT-5.6 Luna medium"
+], "Codex Radar 5.6 cards should use dynamic labels and stable ordering")
+runner.check(radar56Snapshot.models.first?.id == "latest:gpt-5.6-sol:ultra", "Codex Radar latest card should use a stable model identity")
+runner.check(radar56Snapshot.models.first?.validTasks == 9, "Codex Radar should decode valid task counts")
+runner.check(radar56Snapshot.models.first?.invalidTasks == 1, "Codex Radar should decode invalid task counts")
+runner.check(radar56Snapshot.models.first?.taskSummary == "7/9 · 1 无效", "Codex Radar cards should use valid tasks as the benchmark denominator")
+runner.check(radar56Snapshot.models.first?.scoreBand == .healthy, "Codex Radar should color an invalid 116.7 result by score while preserving invalid metadata")
+runner.check(radar56Snapshot.signalText == "本次 full reset 已到账，当前窗口关闭", "Codex Radar signal should prefer the expected window")
+runner.check(abs((radar56Snapshot.modelRunCostUSD ?? 0) - 66.808014) < 0.000001, "Codex Radar should sum only the five displayed model costs")
+runner.check(radar56Snapshot.quotaCalibrationCostUSD == 116.938665, "Codex Radar should expose quota calibration cost separately")
+runner.check(radar56Snapshot.costUSD == 116.938665, "Codex Radar should preserve the existing compatible cost value")
+runner.check(radar56Snapshot.quotaDate == "2026-07-09-pm", "Codex Radar should expose the quota batch date")
+runner.check(radar56Snapshot.quotaTrend.count == 2, "Codex Radar should decode quota trend points")
+runner.check(radar56Snapshot.quotaTrendSummary?.startValue == 1922.70, "Codex Radar quota trend should retain its starting value")
+runner.check(radar56Snapshot.quotaTrendSummary?.endValue == 1559.16, "Codex Radar quota trend should retain its ending value")
+runner.check(abs((radar56Snapshot.quotaTrendSummary?.delta ?? 0) + 363.54) < 0.000001, "Codex Radar quota trend should calculate the signed delta")
+runner.check(abs((radar56Snapshot.quotaTrendSummary?.percentChange ?? 0) + 18.907785) < 0.0001, "Codex Radar quota trend should calculate percent change")
+runner.check(radar56Snapshot.quotaTrendSummary?.direction == .negative, "a lower 7d quota estimate should use negative trend semantics")
+runner.check(radar56Snapshot.quotaRows.map(\.displayBasis) == ["实测", "推测", "推测"], "Codex Radar quota basis should use concise Chinese labels")
+runner.check(CodexRadarCurrencyFormatter.displayText(1559.16) == "$1,559.16", "Codex Radar currency should include a symbol, grouping, and two decimals")
+runner.check(CodexRadarBatchDateFormatter.displayText("2026-07-10-am") == "7/10 AM", "Codex Radar should format morning benchmark batches compactly")
+runner.check(CodexRadarBatchDateFormatter.displayText("2026-07-10-pm") == "7/10 PM", "Codex Radar should format afternoon benchmark batches compactly")
+runner.check(CodexRadarScoreBand.classify(nil) == .unknown, "missing Radar scores should use a neutral band")
+runner.check(CodexRadarScoreBand.classify(30) == .critical, "Radar scores below 60 should be critical")
+runner.check(CodexRadarScoreBand.classify(59.9) == .critical, "Radar critical band should end below 60")
+runner.check(CodexRadarScoreBand.classify(60) == .warning, "Radar scores at 60 should enter the warning band")
+runner.check(CodexRadarScoreBand.classify(89.9) == .warning, "Radar warning band should end below 90")
+runner.check(CodexRadarScoreBand.classify(90) == .baseline, "Radar scores at 90 should enter the baseline band")
+runner.check(CodexRadarScoreBand.classify(109.9) == .baseline, "Radar baseline band should end below 110")
+runner.check(CodexRadarScoreBand.classify(110) == .healthy, "Radar scores at 110 should enter the healthy band")
+runner.check(CodexRadarScoreBand.classify(116.7) == .healthy, "Radar score 116.7 should be healthy regardless of API status")
+runner.check(CodexRadarScoreBand.classify(120) == .healthy, "Radar scores above 110 should remain healthy")
+
+let positiveTrendFixture = String(data: codexRadar56Fixture, encoding: .utf8)!
+    .replacingOccurrences(of: "\"seven_d_20x\": 1922.70", with: "\"seven_d_20x\": 1200.00")
+    .replacingOccurrences(of: "\"seven_d_20x\": 1559.16", with: "\"seven_d_20x\": 1800.00")
+    .data(using: .utf8)!
+let positiveTrendSnapshot = try CodexRadarSnapshot.decodePublicSummary(from: positiveTrendFixture, fetchedAt: radarFetchedAt)
+runner.check(positiveTrendSnapshot.quotaTrendSummary?.direction == .positive, "a higher 7d quota estimate should use positive trend semantics")
+runner.check(positiveTrendSnapshot.quotaTrendSummary?.percentChange == 50, "a positive quota trend should preserve its signed percent change")
+
+let codexRadarFutureFixture = """
+{
+  "model_iq": {
+    "latest": {"date": "2026-08-01-am", "score": 111, "model": "gpt-5.7-nova", "reasoning_effort": "ultra"},
+    "comparisons": {
+      "gpt_57_orbit_medium": {"latest": {"score": 82, "model": "gpt-5.7-orbit", "reasoning_effort": "medium"}},
+      "gpt_57_nova_low": {"latest": {"score": 103, "model": "gpt-5.7-nova", "reasoning_effort": "low"}}
+    }
+  }
+}
+""".data(using: .utf8)!
+let radarFutureSnapshot = try CodexRadarSnapshot.decodePublicSummary(from: codexRadarFutureFixture, fetchedAt: radarFetchedAt)
+runner.check(radarFutureSnapshot.models.map(\.label) == [
+    "GPT-5.7 Nova ultra",
+    "GPT-5.7 Nova low",
+    "GPT-5.7 Orbit medium"
+], "Codex Radar should display unknown future model families without hard-coded keys")
+runner.check(radarFutureSnapshot.modelRunCostUSD == nil, "Codex Radar should not invent a model run cost when all model costs are missing")
+runner.check(radarFutureSnapshot.quotaTrend.isEmpty, "Codex Radar should allow missing quota trend data")
+runner.check(radarFutureSnapshot.quotaTrendSummary == nil, "Codex Radar should hide trend summaries with fewer than two points")
+
 let radarMissingModelIQ = """
 {
   "monitored_at": "2026-07-01T06:27:00+08:00",
@@ -746,6 +962,96 @@ try CodexRadarTokenProvider.saveToken("", to: radarTokenFile)
 runner.check(!FileManager.default.fileExists(atPath: radarTokenFile.path), "Codex Radar empty token save should remove the local token file")
 try? FileManager.default.removeItem(at: radarTokenDirectory)
 
+func radarResponse(for request: URLRequest, status: Int, data: Data) -> (Data, URLResponse) {
+    let response = HTTPURLResponse(
+        url: request.url!,
+        statusCode: status,
+        httpVersion: "HTTP/2",
+        headerFields: ["Content-Type": "application/json"]
+    )!
+    return (data, response)
+}
+
+let authorizedRecorder = RequestPathRecorder()
+let authorizedRadarClient = CodexRadarClient(
+    tokenProvider: CodexRadarTokenProvider(
+        environment: [CodexRadarTokenProvider.environmentKey: "test-token"],
+        tokenFileURL: radarTokenFile
+    ),
+    requestExecutor: { request in
+        authorizedRecorder.append(request.url?.path ?? "")
+        return radarResponse(for: request, status: 200, data: codexRadar56Fixture)
+    }
+)
+let authorizedFetch = try waitForAsync { try await authorizedRadarClient.fetchSummary() }
+runner.check(authorizedFetch.source == .authorizedAPI, "Codex Radar should use the authorized API when a token is available")
+runner.check(authorizedFetch.fallbackReason == nil, "a successful authorized API request should not report fallback")
+runner.check(authorizedRecorder.paths == ["/api/v1/current"], "a successful API request should not call the public summary")
+
+let publicRecorder = RequestPathRecorder()
+let publicRadarClient = CodexRadarClient(
+    tokenProvider: CodexRadarTokenProvider(environment: [:], tokenFileURL: radarTokenFile),
+    requestExecutor: { request in
+        publicRecorder.append(request.url?.path ?? "")
+        return radarResponse(for: request, status: 200, data: codexRadar56Fixture)
+    }
+)
+let publicFetch = try waitForAsync { try await publicRadarClient.fetchSummary() }
+runner.check(publicFetch.source == .publicSummary, "Codex Radar should use the public summary when no token is configured")
+runner.check(publicFetch.fallbackReason == nil, "normal public mode should not be labeled as API fallback")
+runner.check(publicRecorder.paths == ["/current.json"], "no-token mode should not call the authorized API")
+
+let fallbackRecorder = RequestPathRecorder()
+let fallbackRadarClient = CodexRadarClient(
+    tokenProvider: CodexRadarTokenProvider(
+        environment: [CodexRadarTokenProvider.environmentKey: "expired-token"],
+        tokenFileURL: radarTokenFile
+    ),
+    requestExecutor: { request in
+        fallbackRecorder.append(request.url?.path ?? "")
+        if request.url?.path == "/api/v1/current" {
+            return radarResponse(for: request, status: 401, data: Data())
+        }
+        return radarResponse(for: request, status: 200, data: codexRadar56Fixture)
+    }
+)
+let fallbackFetch = try waitForAsync { try await fallbackRadarClient.fetchSummary() }
+runner.check(fallbackFetch.source == .publicSummary, "an unauthorized API request should fall back to the public summary")
+runner.check(fallbackFetch.fallbackReason == .invalidToken, "401 fallback should identify an invalid token")
+runner.check(fallbackRecorder.paths == ["/api/v1/current", "/current.json"], "API fallback should make exactly one public request")
+runner.check(CodexRadarClient.fallbackReason(for: CodexRadarClientError.httpStatus(403)) == .invalidToken, "403 should identify an invalid Radar token")
+runner.check(CodexRadarClient.fallbackReason(for: CodexRadarClientError.httpStatus(429)) == .apiUnavailable, "429 should use the temporary API fallback")
+runner.check(CodexRadarClient.fallbackReason(for: CodexRadarClientError.httpStatus(500)) == .apiUnavailable, "5xx should use the temporary API fallback")
+runner.check(CodexRadarClient.fallbackReason(for: URLError(.timedOut)) == .apiUnavailable, "timeouts should use the temporary API fallback")
+runner.check(CodexRadarClient.fallbackReason(for: CodexRadarClientError.disallowedURL) == nil, "URL allowlist failures must not silently fall back")
+
+let fallbackSnapshot = try CodexRadarSnapshot.decodePublicSummary(
+    from: codexRadar56Fixture,
+    fetchedAt: radarFetchedAt,
+    dataSource: .publicSummary,
+    fallbackReason: .invalidToken
+)
+runner.check(fallbackSnapshot.fallbackReason == .invalidToken, "Codex Radar snapshots should retain their API fallback reason")
+runner.check(fallbackSnapshot.message == "API Token 无效，已使用公开摘要", "Codex Radar fallback should expose a user-facing source notice")
+
+let legacyRadarMetadata = """
+{"lastFetchAt":"2026-07-10T00:20:07Z","source":"authorizedAPI"}
+""".data(using: .utf8)!
+let metadataDecoder = JSONDecoder()
+metadataDecoder.dateDecodingStrategy = .iso8601
+let decodedLegacyRadarMetadata = try metadataDecoder.decode(CodexRadarCacheMetadata.self, from: legacyRadarMetadata)
+runner.check(decodedLegacyRadarMetadata.fallbackReason == nil, "legacy Radar cache metadata should decode without a fallback field")
+let fallbackRadarMetadata = CodexRadarCacheMetadata(
+    lastFetchAt: radarFetchedAt,
+    source: .publicSummary,
+    fallbackReason: .apiUnavailable
+)
+let metadataEncoder = JSONEncoder()
+metadataEncoder.dateEncodingStrategy = .iso8601
+let encodedFallbackRadarMetadata = try metadataEncoder.encode(fallbackRadarMetadata)
+let decodedFallbackRadarMetadata = try metadataDecoder.decode(CodexRadarCacheMetadata.self, from: encodedFallbackRadarMetadata)
+runner.check(decodedFallbackRadarMetadata == fallbackRadarMetadata, "Radar cache metadata should preserve fallback source state")
+
 let radarCalendar = CodexRadarRefreshPolicy.beijingCalendar
 let beforeMorningSlot = dateFromISO8601("2026-07-01T07:00:00+08:00", message: "before morning slot date should parse")
 let morningSlot = dateFromISO8601("2026-07-01T08:20:00+08:00", message: "morning slot date should parse")
@@ -794,6 +1100,20 @@ runner.check(
         calendar: radarCalendar
     ),
     "Codex Radar should only refresh once per schedule point"
+)
+runner.check(
+    !CodexRadarRefreshPolicy.shouldRefreshOnPresentation(
+        lastFetchAt: beforeMorningSlot,
+        now: beforeMorningSlot.addingTimeInterval(29 * 60)
+    ),
+    "Codex Radar presentation refresh should keep a cache younger than 30 minutes"
+)
+runner.check(
+    CodexRadarRefreshPolicy.shouldRefreshOnPresentation(
+        lastFetchAt: beforeMorningSlot,
+        now: beforeMorningSlot.addingTimeInterval(30 * 60)
+    ),
+    "Codex Radar presentation refresh should refresh a 30 minute old cache"
 )
 runner.check(
     !CodexRadarRefreshPolicy.canManualRefresh(

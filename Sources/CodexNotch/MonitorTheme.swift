@@ -28,6 +28,21 @@ enum MonitorTheme {
     }
 
     enum Typography {
+        static let detailTitle = Font.system(size: 16, weight: .semibold)
+        static let detailStatus = Font.system(size: 11, weight: .semibold)
+        static let detailTab = Font.system(size: 12, weight: .medium)
+        static let detailTabSelected = Font.system(size: 12, weight: .semibold)
+        static let quotaLabel = Font.system(size: 11, weight: .semibold)
+        static let quotaValue = Font.system(size: 13, weight: .semibold)
+        static let quotaMeta = Font.system(size: 10.5, weight: .medium)
+        static let sparkLabel = Font.system(size: 11, weight: .semibold)
+        static let sparkMeta = Font.system(size: 10.5, weight: .medium)
+        static let tableHeader = Font.system(size: 10.5, weight: .semibold)
+        static let tableBody = Font.system(size: 12, weight: .medium)
+        static let tableValue = Font.system(size: 11, weight: .medium)
+        static let tableStatus = Font.system(size: 9, weight: .semibold, design: .rounded)
+        static let periodLabel = Font.system(size: 11, weight: .medium)
+        static let periodValue = Font.system(size: 13, weight: .semibold)
         static let settingsTitle = Font.system(size: 18, weight: .bold)
         static let settingsSubtitle = Font.system(size: 12, weight: .medium)
         static let settingsSidebarLabel = Font.system(size: 12, weight: .bold)
@@ -56,7 +71,8 @@ enum MonitorTheme {
     static let textSecondary = Color.white.opacity(0.62)
     static let textTertiary = Color.white.opacity(0.44)
     static let healthy = Color(red: 0.45, green: 0.78, blue: 0.53)
-    static let running = Color(red: 0.47, green: 0.72, blue: 0.82)
+    static let running = healthy
+    static let radarBaseline = Color(red: 0.35, green: 0.72, blue: 0.82)
     static let warning = Color(red: 0.92, green: 0.68, blue: 0.42)
     static let critical = Color(red: 0.88, green: 0.45, blue: 0.45)
     static let neutral = Color.white.opacity(0.34)

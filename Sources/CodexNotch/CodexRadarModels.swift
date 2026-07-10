@@ -9,7 +9,7 @@ enum CodexRadarDataSource: String, Codable, Equatable, Sendable {
         case .authorizedAPI:
             "API"
         case .publicSummary:
-            "Public summary"
+            "Public"
         }
     }
 }
@@ -22,15 +22,58 @@ enum CodexRadarPanelState: Equatable, Sendable {
     case error
 }
 
+enum CodexRadarScoreBand: Equatable, Sendable {
+    case healthy
+    case baseline
+    case warning
+    case critical
+    case unknown
+
+    static func classify(_ score: Double?) -> CodexRadarScoreBand {
+        guard let score else {
+            return .unknown
+        }
+        if score >= 110 {
+            return .healthy
+        }
+        if score >= 90 {
+            return .baseline
+        }
+        if score >= 60 {
+            return .warning
+        }
+        return .critical
+    }
+}
+
 struct CodexRadarModelScore: Identifiable, Equatable, Sendable {
     let id: String
     let label: String
+    let model: String?
+    let reasoningEffort: String?
     let score: Double?
     let status: String?
     let passed: Int?
     let tasks: Int?
+    let validTasks: Int?
+    let invalidTasks: Int?
     let costUSD: Double?
     let wallTimeHuman: String?
+
+    var scoreBand: CodexRadarScoreBand {
+        CodexRadarScoreBand.classify(score)
+    }
+
+    var taskSummary: String {
+        guard let passed, let denominator = validTasks ?? tasks else {
+            return "--/--"
+        }
+        let result = "\(passed)/\(denominator)"
+        guard let invalidTasks, invalidTasks > 0 else {
+            return result
+        }
+        return "\(result) · \(invalidTasks) 无效"
+    }
 }
 
 struct CodexRadarQuotaRow: Identifiable, Equatable, Sendable {
@@ -40,6 +83,43 @@ struct CodexRadarQuotaRow: Identifiable, Equatable, Sendable {
     let fiveH: Double?
     let sevenD: Double?
     let basis: String?
+
+    var displayBasis: String {
+        guard let basis = basis?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !basis.isEmpty else {
+            return "--"
+        }
+        let normalized = basis.lowercased()
+        if normalized.contains("measured") {
+            return "实测"
+        }
+        if normalized.contains("model") {
+            return "推测"
+        }
+        return basis
+    }
+}
+
+enum CodexRadarTrendDirection: Equatable, Sendable {
+    case positive
+    case negative
+    case neutral
+}
+
+struct CodexRadarQuotaTrendPoint: Identifiable, Equatable, Sendable {
+    var id: String { date }
+
+    let date: String
+    let fiveH20x: Double?
+    let sevenD20x: Double?
+}
+
+struct CodexRadarQuotaTrendSummary: Equatable, Sendable {
+    let startValue: Double
+    let endValue: Double
+    let delta: Double
+    let percentChange: Double
+    let direction: CodexRadarTrendDirection
 }
 
 struct CodexRadarSnapshot: Equatable, Sendable {
@@ -57,8 +137,14 @@ struct CodexRadarSnapshot: Equatable, Sendable {
     var recommendedAction: String?
     var windowMessage: String?
     var predictionSummary: String?
+    var expectedWindow: String?
+    var modelRunCostUSD: Double?
+    var quotaCalibrationCostUSD: Double?
+    var quotaDate: String?
+    var quotaTrend: [CodexRadarQuotaTrendPoint]
     var costUSD: Double?
     var dataSource: CodexRadarDataSource
+    var fallbackReason: CodexRadarFallbackReason?
     var attributionText: String
     var attributionRequired: Bool
     var siteURL: URL
@@ -76,8 +162,14 @@ struct CodexRadarSnapshot: Equatable, Sendable {
         recommendedAction: nil,
         windowMessage: nil,
         predictionSummary: nil,
+        expectedWindow: nil,
+        modelRunCostUSD: nil,
+        quotaCalibrationCostUSD: nil,
+        quotaDate: nil,
+        quotaTrend: [],
         costUSD: nil,
         dataSource: .authorizedAPI,
+        fallbackReason: nil,
         attributionText: defaultAttributionText,
         attributionRequired: true,
         siteURL: siteURL,
@@ -96,8 +188,14 @@ struct CodexRadarSnapshot: Equatable, Sendable {
         recommendedAction: nil,
         windowMessage: nil,
         predictionSummary: nil,
+        expectedWindow: nil,
+        modelRunCostUSD: nil,
+        quotaCalibrationCostUSD: nil,
+        quotaDate: nil,
+        quotaTrend: [],
         costUSD: nil,
         dataSource: .authorizedAPI,
+        fallbackReason: nil,
         attributionText: defaultAttributionText,
         attributionRequired: true,
         siteURL: siteURL,
@@ -113,6 +211,38 @@ struct CodexRadarSnapshot: Equatable, Sendable {
         return sourceDates.max() ?? lastFetchAt
     }
 
+    var signalText: String? {
+        expectedWindow?.nilIfBlank
+            ?? windowMessage?.nilIfBlank
+            ?? predictionSummary?.nilIfBlank
+    }
+
+    var quotaTrendSummary: CodexRadarQuotaTrendSummary? {
+        let values = quotaTrend.compactMap(\.sevenD20x)
+        guard let startValue = values.first,
+              let endValue = values.last,
+              values.count >= 2,
+              startValue != 0 else {
+            return nil
+        }
+        let delta = endValue - startValue
+        let direction: CodexRadarTrendDirection
+        if delta > 0 {
+            direction = .positive
+        } else if delta < 0 {
+            direction = .negative
+        } else {
+            direction = .neutral
+        }
+        return CodexRadarQuotaTrendSummary(
+            startValue: startValue,
+            endValue: endValue,
+            delta: delta,
+            percentChange: delta / startValue * 100,
+            direction: direction
+        )
+    }
+
     func withState(_ state: CodexRadarPanelState, message: String? = nil) -> CodexRadarSnapshot {
         var copy = self
         copy.panelState = state
@@ -123,7 +253,8 @@ struct CodexRadarSnapshot: Equatable, Sendable {
     static func decodePublicSummary(
         from data: Data,
         fetchedAt: Date? = nil,
-        dataSource: CodexRadarDataSource = .publicSummary
+        dataSource: CodexRadarDataSource = .publicSummary,
+        fallbackReason: CodexRadarFallbackReason? = nil
     ) throws -> CodexRadarSnapshot {
         let summary = try JSONDecoder().decode(CodexRadarPublicSummary.self, from: data)
         let attribution = summary.apiAccess?.requirements
@@ -139,9 +270,17 @@ struct CodexRadarSnapshot: Equatable, Sendable {
                 basis: $0.basis?.nilIfBlank
             )
         } ?? []
-        let summedModelCost = models.compactMap(\.costUSD).reduce(0, +)
-        let costUSD = modelIQ?.quotaRadar?.costUSD
-            ?? (summedModelCost > 0 ? summedModelCost : nil)
+        let modelCosts = models.compactMap(\.costUSD)
+        let modelRunCostUSD = modelCosts.isEmpty ? nil : modelCosts.reduce(0, +)
+        let quotaCalibrationCostUSD = modelIQ?.quotaRadar?.costUSD
+        let costUSD = quotaCalibrationCostUSD ?? modelRunCostUSD
+        let quotaTrend = modelIQ?.quotaRadar?.trend?.map {
+            CodexRadarQuotaTrendPoint(
+                date: $0.date,
+                fiveH20x: $0.fiveH20x,
+                sevenD20x: $0.sevenD20x
+            )
+        } ?? []
 
         return CodexRadarSnapshot(
             panelState: .ready,
@@ -155,17 +294,25 @@ struct CodexRadarSnapshot: Equatable, Sendable {
             recommendedAction: summary.recommendedAction?.nilIfBlank,
             windowMessage: summary.window?.message?.nilIfBlank,
             predictionSummary: summary.prediction?.summary?.nilIfBlank,
+            expectedWindow: summary.prediction?.expectedWindow?.nilIfBlank,
+            modelRunCostUSD: modelRunCostUSD,
+            quotaCalibrationCostUSD: quotaCalibrationCostUSD,
+            quotaDate: modelIQ?.quotaRadar?.date?.nilIfBlank,
+            quotaTrend: quotaTrend,
             costUSD: costUSD,
             dataSource: dataSource,
+            fallbackReason: fallbackReason,
             attributionText: attributionText,
             attributionRequired: attribution?.attributionRequired ?? true,
             siteURL: siteURL,
-            message: nil
+            message: fallbackReason?.displayMessage
         )
     }
 }
 
 enum CodexRadarRefreshPolicy {
+    static let presentationMaximumAge: TimeInterval = 30 * 60
+
     static let automaticRefreshHours: [(hour: Int, minute: Int)] = [
         (8, 20),
         (14, 20)
@@ -189,6 +336,17 @@ enum CodexRadarRefreshPolicy {
             return true
         }
         return now.timeIntervalSince(lastManualRefreshAt) >= minimumGap
+    }
+
+    static func shouldRefreshOnPresentation(
+        lastFetchAt: Date?,
+        now: Date = Date(),
+        maximumAge: TimeInterval = presentationMaximumAge
+    ) -> Bool {
+        guard let lastFetchAt else {
+            return true
+        }
+        return now.timeIntervalSince(lastFetchAt) >= maximumAge
     }
 
     static func lastScheduledRefresh(before now: Date, calendar: Calendar = beijingCalendar) -> Date {
@@ -233,6 +391,41 @@ enum CodexRadarDateParser {
     }
 }
 
+enum CodexRadarBatchDateFormatter {
+    static func displayText(_ value: String?) -> String? {
+        guard let value = value?.nilIfBlank else {
+            return nil
+        }
+        let parts = value.split(separator: "-").map(String.init)
+        guard parts.count >= 4,
+              let month = Int(parts[1]),
+              let day = Int(parts[2]) else {
+            return value
+        }
+        let period = parts[3].split(separator: "_").first?.uppercased() ?? ""
+        guard period == "AM" || period == "PM" else {
+            return value
+        }
+        return "\(month)/\(day) \(period)"
+    }
+}
+
+enum CodexRadarCurrencyFormatter {
+    static func displayText(_ value: Double?) -> String {
+        guard let value else {
+            return "--"
+        }
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .currency
+        formatter.currencyCode = "USD"
+        formatter.currencySymbol = "$"
+        formatter.locale = Locale(identifier: "en_US")
+        formatter.minimumFractionDigits = 2
+        formatter.maximumFractionDigits = 2
+        return formatter.string(from: NSNumber(value: value)) ?? String(format: "$%.2f", value)
+    }
+}
+
 private struct CodexRadarPublicSummary: Decodable {
     let monitoredAt: String?
     let status: String?
@@ -259,6 +452,12 @@ private struct CodexRadarWindowSummary: Decodable {
 
 private struct CodexRadarPredictionSummary: Decodable {
     let summary: String?
+    let expectedWindow: String?
+
+    enum CodingKeys: String, CodingKey {
+        case summary
+        case expectedWindow = "expected_window"
+    }
 }
 
 private struct CodexRadarAPIAccess: Decodable {
@@ -278,6 +477,9 @@ private struct CodexRadarAttributionRequirements: Decodable {
 }
 
 private struct CodexRadarModelIQ: Decodable {
+    private static let maximumModelCards = 5
+    private static let preferredLatestSeriesEfforts = ["medium", "low"]
+
     let latest: CodexRadarModelResult?
     let comparisons: [String: CodexRadarComparison]?
     let quotaRadar: CodexRadarQuotaRadar?
@@ -289,26 +491,239 @@ private struct CodexRadarModelIQ: Decodable {
     }
 
     var modelCards: [CodexRadarModelScore] {
-        var cards: [CodexRadarModelScore] = []
-        if let latest {
-            cards.append(latest.modelScore(id: "gpt_55_xhigh", fallbackLabel: "GPT-5.5 xhigh"))
+        let entries: [CodexRadarModelEntry]
+        guard let latest else {
+            entries = comparisonEntries(latestModel: nil)
+            return selectedEntries(from: entries, capacity: Self.maximumModelCards).map(\.score)
         }
 
-        let order: [(key: String, label: String)] = [
-            ("gpt_55_high", "GPT-5.5 high"),
-            ("gpt_55_medium", "GPT-5.5 medium"),
-            ("gpt_54_xhigh", "GPT-5.4 xhigh"),
-            ("gpt_54_high", "GPT-5.4 high")
-        ]
-        for item in order {
-            guard let comparison = comparisons?[item.key] else {
-                continue
+        let latestDescriptor = CodexRadarModelDescriptor(
+            key: nil,
+            providedLabel: nil,
+            model: latest.model,
+            reasoningEffort: latest.reasoningEffort
+        )
+        let latestID = "latest:\(latestDescriptor.normalizedModel):\(latestDescriptor.reasoningEffort ?? "default")"
+        entries = comparisonEntries(latestModel: latestDescriptor.normalizedModel)
+        let selectedComparisons = selectedEntries(
+            from: entries,
+            capacity: Self.maximumModelCards - 1
+        )
+        return [latest.modelScore(id: latestID, descriptor: latestDescriptor)]
+            + selectedComparisons.map(\.score)
+    }
+
+    private func comparisonEntries(latestModel: String?) -> [CodexRadarModelEntry] {
+        (comparisons ?? [:]).compactMap { key, comparison in
+            guard let result = comparison.latest else {
+                return nil
             }
-            if let latest = comparison.latest {
-                cards.append(latest.modelScore(id: item.key, fallbackLabel: comparison.label?.nilIfBlank ?? item.label))
+            let descriptor = CodexRadarModelDescriptor(
+                key: key,
+                providedLabel: comparison.label,
+                model: result.model,
+                reasoningEffort: result.reasoningEffort
+            )
+            return CodexRadarModelEntry(
+                score: result.modelScore(id: key, descriptor: descriptor),
+                descriptor: descriptor,
+                isLatestSeries: descriptor.normalizedModel == latestModel
+            )
+        }
+        .sorted(by: CodexRadarModelEntry.precedes)
+    }
+
+    private func selectedEntries(
+        from entries: [CodexRadarModelEntry],
+        capacity: Int
+    ) -> [CodexRadarModelEntry] {
+        guard entries.count > capacity, capacity > 0 else {
+            return Array(entries.prefix(max(0, capacity)))
+        }
+
+        var selectedIDs = Set<String>()
+        func select(_ entry: CodexRadarModelEntry) {
+            guard selectedIDs.count < capacity else {
+                return
+            }
+            selectedIDs.insert(entry.score.id)
+        }
+
+        for effort in Self.preferredLatestSeriesEfforts {
+            if let entry = entries.first(where: {
+                $0.isLatestSeries && $0.descriptor.reasoningEffort == effort
+            }) {
+                select(entry)
             }
         }
-        return cards
+
+        var visitedFamilies = Set<String>()
+        for entry in entries where !entry.isLatestSeries {
+            let family = entry.descriptor.normalizedModel
+            guard visitedFamilies.insert(family).inserted else {
+                continue
+            }
+            let familyEntries = entries.filter { $0.descriptor.normalizedModel == family }
+            select(familyEntries.first(where: { $0.descriptor.reasoningEffort == "medium" }) ?? entry)
+        }
+
+        for entry in entries {
+            select(entry)
+        }
+
+        return entries.filter { selectedIDs.contains($0.score.id) }
+    }
+}
+
+private struct CodexRadarModelEntry {
+    let score: CodexRadarModelScore
+    let descriptor: CodexRadarModelDescriptor
+    let isLatestSeries: Bool
+
+    static func precedes(_ lhs: Self, _ rhs: Self) -> Bool {
+        if lhs.descriptor.version != rhs.descriptor.version {
+            return CodexRadarModelDescriptor.versionPrecedes(lhs.descriptor.version, rhs.descriptor.version)
+        }
+        if lhs.isLatestSeries != rhs.isLatestSeries {
+            return lhs.isLatestSeries
+        }
+        if lhs.descriptor.effortRank != rhs.descriptor.effortRank {
+            return lhs.descriptor.effortRank > rhs.descriptor.effortRank
+        }
+        if lhs.score.score != rhs.score.score {
+            return (lhs.score.score ?? -.infinity) > (rhs.score.score ?? -.infinity)
+        }
+        return lhs.score.label.localizedCaseInsensitiveCompare(rhs.score.label) == .orderedAscending
+    }
+}
+
+private struct CodexRadarModelDescriptor {
+    private static let effortRanks = [
+        "ultra": 6,
+        "xhigh": 5,
+        "high": 4,
+        "medium": 3,
+        "low": 2,
+        "minimal": 1
+    ]
+
+    let model: String?
+    let reasoningEffort: String?
+    let label: String
+    let normalizedModel: String
+    let version: [Int]
+    let effortRank: Int
+
+    init(key: String?, providedLabel: String?, model: String?, reasoningEffort: String?) {
+        let cleanLabel = providedLabel?.nilIfBlank
+        let resolvedEffort = reasoningEffort?.nilIfBlank?.lowercased()
+            ?? Self.effort(fromLabel: cleanLabel)
+            ?? Self.effort(fromKey: key)
+        let resolvedModel = model?.nilIfBlank?.lowercased()
+            ?? Self.model(fromLabel: cleanLabel, effort: resolvedEffort)
+            ?? Self.model(fromKey: key, effort: resolvedEffort)
+
+        self.model = resolvedModel
+        self.reasoningEffort = resolvedEffort
+        self.label = cleanLabel
+            ?? Self.displayLabel(model: resolvedModel, effort: resolvedEffort)
+            ?? key?.replacingOccurrences(of: "_", with: " ")
+            ?? "Unknown model"
+        self.normalizedModel = resolvedModel ?? "unknown"
+        self.version = Self.version(from: resolvedModel ?? cleanLabel)
+        self.effortRank = Self.effortRanks[resolvedEffort ?? ""] ?? 0
+    }
+
+    static func versionPrecedes(_ lhs: [Int], _ rhs: [Int]) -> Bool {
+        let count = max(lhs.count, rhs.count)
+        for index in 0..<count {
+            let left = index < lhs.count ? lhs[index] : 0
+            let right = index < rhs.count ? rhs[index] : 0
+            if left != right {
+                return left > right
+            }
+        }
+        return false
+    }
+
+    private static func effort(fromLabel label: String?) -> String? {
+        guard let candidate = label?.split(separator: " ").last?.lowercased(),
+              effortRanks[candidate] != nil else {
+            return nil
+        }
+        return candidate
+    }
+
+    private static func effort(fromKey key: String?) -> String? {
+        guard let candidate = key?.split(separator: "_").last?.lowercased(),
+              effortRanks[candidate] != nil else {
+            return nil
+        }
+        return candidate
+    }
+
+    private static func model(fromLabel label: String?, effort: String?) -> String? {
+        guard let label else {
+            return nil
+        }
+        var parts = label.split(separator: " ").map(String.init)
+        if let effort, parts.last?.lowercased() == effort {
+            parts.removeLast()
+        }
+        guard !parts.isEmpty else {
+            return nil
+        }
+        return parts.joined(separator: "-").lowercased()
+    }
+
+    private static func model(fromKey key: String?, effort: String?) -> String? {
+        guard let key else {
+            return nil
+        }
+        var parts = key.split(separator: "_").map(String.init)
+        if let effort, parts.last?.lowercased() == effort {
+            parts.removeLast()
+        }
+        guard parts.count >= 2, parts[0].lowercased() == "gpt" else {
+            return nil
+        }
+        let compactVersion = parts[1]
+        let version: String
+        if compactVersion.contains(".") || compactVersion.count < 2 {
+            version = compactVersion
+        } else {
+            version = "\(compactVersion.prefix(1)).\(compactVersion.dropFirst())"
+        }
+        return (["gpt", version] + parts.dropFirst(2)).joined(separator: "-").lowercased()
+    }
+
+    private static func displayLabel(model: String?, effort: String?) -> String? {
+        guard let model else {
+            return nil
+        }
+        let parts = model.split(separator: "-").map(String.init)
+        let base: String
+        if parts.count >= 2, parts[0].lowercased() == "gpt" {
+            let family = parts.dropFirst(2).map { $0.capitalized }.joined(separator: " ")
+            base = family.isEmpty ? "GPT-\(parts[1])" : "GPT-\(parts[1]) \(family)"
+        } else {
+            base = parts.map { $0.capitalized }.joined(separator: " ")
+        }
+        guard let effort else {
+            return base
+        }
+        return "\(base) \(effort)"
+    }
+
+    private static func version(from value: String?) -> [Int] {
+        guard let value else {
+            return []
+        }
+        let tokens = value.split { !$0.isNumber && $0 != "." }
+        guard let versionToken = tokens.first(where: { $0.contains(".") }) else {
+            return []
+        }
+        return versionToken.split(separator: ".").compactMap { Int($0) }
     }
 }
 
@@ -323,6 +738,8 @@ private struct CodexRadarModelResult: Decodable {
     let status: String?
     let passed: Int?
     let tasks: Int?
+    let validTasks: Int?
+    let invalidTasks: Int?
     let model: String?
     let reasoningEffort: String?
     let costUSD: Double?
@@ -334,6 +751,8 @@ private struct CodexRadarModelResult: Decodable {
         case status
         case passed
         case tasks
+        case validTasks = "valid_tasks"
+        case invalidTasks = "invalid"
         case model
         case reasoningEffort = "reasoning_effort"
         case costUSD = "cost_usd"
@@ -347,20 +766,26 @@ private struct CodexRadarModelResult: Decodable {
         status = try container.decodeIfPresent(String.self, forKey: .status)
         passed = container.decodeFlexibleIntIfPresent(forKey: .passed)
         tasks = container.decodeFlexibleIntIfPresent(forKey: .tasks)
+        validTasks = container.decodeFlexibleIntIfPresent(forKey: .validTasks)
+        invalidTasks = container.decodeFlexibleIntIfPresent(forKey: .invalidTasks)
         model = try container.decodeIfPresent(String.self, forKey: .model)
         reasoningEffort = try container.decodeIfPresent(String.self, forKey: .reasoningEffort)
         costUSD = container.decodeFlexibleDoubleIfPresent(forKey: .costUSD)
         wallTimeHuman = try container.decodeIfPresent(String.self, forKey: .wallTimeHuman)
     }
 
-    func modelScore(id: String, fallbackLabel: String) -> CodexRadarModelScore {
+    func modelScore(id: String, descriptor: CodexRadarModelDescriptor) -> CodexRadarModelScore {
         CodexRadarModelScore(
             id: id,
-            label: fallbackLabel,
+            label: descriptor.label,
+            model: descriptor.model,
+            reasoningEffort: descriptor.reasoningEffort,
             score: score,
             status: status?.nilIfBlank,
             passed: passed,
             tasks: tasks,
+            validTasks: validTasks,
+            invalidTasks: invalidTasks,
             costUSD: costUSD,
             wallTimeHuman: wallTimeHuman?.nilIfBlank
         )
@@ -368,21 +793,46 @@ private struct CodexRadarModelResult: Decodable {
 }
 
 private struct CodexRadarQuotaRadar: Decodable {
+    let date: String?
     let updatedAt: String?
     let costUSD: Double?
     let rows: [CodexRadarQuotaRowDTO]?
+    let trend: [CodexRadarQuotaTrendPointDTO]?
 
     enum CodingKeys: String, CodingKey {
+        case date
         case updatedAt = "updated_at"
         case costUSD = "cost_usd"
         case rows
+        case trend
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        date = try container.decodeIfPresent(String.self, forKey: .date)
         updatedAt = try container.decodeIfPresent(String.self, forKey: .updatedAt)
         costUSD = container.decodeFlexibleDoubleIfPresent(forKey: .costUSD)
         rows = try container.decodeIfPresent([CodexRadarQuotaRowDTO].self, forKey: .rows)
+        trend = try container.decodeIfPresent([CodexRadarQuotaTrendPointDTO].self, forKey: .trend)
+    }
+}
+
+private struct CodexRadarQuotaTrendPointDTO: Decodable {
+    let date: String
+    let fiveH20x: Double?
+    let sevenD20x: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case date
+        case fiveH20x = "five_h_20x"
+        case sevenD20x = "seven_d_20x"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        date = (try container.decodeIfPresent(String.self, forKey: .date)) ?? "unknown"
+        fiveH20x = container.decodeFlexibleDoubleIfPresent(forKey: .fiveH20x)
+        sevenD20x = container.decodeFlexibleDoubleIfPresent(forKey: .sevenD20x)
     }
 }
 

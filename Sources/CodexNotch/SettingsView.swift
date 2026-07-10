@@ -514,7 +514,7 @@ struct SettingsView: View {
                 HelpLabel(title: "启用 Codex Radar", help: "启用后详情页会出现 Codex Radar tab，默认优先读取 codexradar.com 授权 API。")
             }
 
-            Text("默认使用 CodexRadar API；没有本机 token 时会自动降级到 public summary。每天最多两次自动刷新：北京时间 08:20 和 14:20。")
+            Text("有本机 token 时使用 CodexRadar API；没有 token 或 API 暂不可用时读取公开摘要。每天在北京时间 08:20、14:20 自动刷新，打开 Radar 时会校验超过 30 分钟的缓存。")
                 .font(MonitorTheme.Typography.settingsHelper)
                 .foregroundStyle(MonitorTheme.settingsTextSecondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1428,17 +1428,22 @@ struct SettingsView: View {
     private var codexRadarStatusText: String {
         switch codexRadarViewModel.snapshot.panelState {
         case .disabled:
-            "未启用"
+            return "未启用"
         case .loading:
-            "读取中"
+            return "读取中"
         case .ready:
-            codexRadarViewModel.snapshot.models.isEmpty
-                ? "\(codexRadarViewModel.snapshot.dataSource.displayLabel) 无模型数据"
-                : "\(codexRadarViewModel.snapshot.dataSource.displayLabel) 已更新"
+            let source = codexRadarViewModel.snapshot.fallbackReason == nil
+                ? codexRadarViewModel.snapshot.dataSource.displayLabel
+                : "Public（API 回退）"
+            return codexRadarViewModel.snapshot.models.isEmpty
+                ? "\(source) 无模型数据"
+                : "\(source) 已更新"
         case .stale:
-            "数据可能过期"
+            return codexRadarViewModel.snapshot.fallbackReason == nil
+                ? "数据可能过期"
+                : "Public（API 回退）· 可能过期"
         case .error:
-            codexRadarViewModel.snapshot.message ?? "读取失败"
+            return codexRadarViewModel.snapshot.message ?? "读取失败"
         }
     }
 

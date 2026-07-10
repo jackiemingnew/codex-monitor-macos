@@ -3,13 +3,20 @@ import CoreGraphics
 enum IslandMetrics {
     static let shoulderWidth: CGFloat = 148
     static let notchWidth: CGFloat = 224
+    static let collapsedWidth: CGFloat = 264
     static let collapsedHeight: CGFloat = 38
     static let collapsedPillHorizontalPadding: CGFloat = 10
     static let detailHeaderHeight: CGFloat = 22
     static let detailPageSwitcherHeight: CGFloat = 30
-    static let detailTopPadding: CGFloat = 44
-    static let detailBottomPadding: CGFloat = 18
+    static let detailTopPadding: CGFloat = 26
+    static let detailBottomPadding: CGFloat = 12
     static let detailOverlap: CGFloat = 18
+    static let detailQuotaHeight: CGFloat = 66
+    static let detailSparkHeight: CGFloat = 32
+    static let detailTaskHeaderHeight: CGFloat = 28
+    static let detailTaskRowHeight: CGFloat = 34
+    static let detailTaskEmptySpace: CGFloat = 50
+    static let detailPeriodFooterHeight: CGFloat = 44
     static let minimumDetailHeight: CGFloat = 390
     static let visibleTaskRows = 5
 
@@ -21,23 +28,44 @@ enum IslandMetrics {
         shoulderWidth * 2 + notchWidth
     }
 
+    static func clampedOverlayCenterX(_ proposedCenterX: CGFloat, in screenFrame: CGRect) -> CGFloat {
+        guard screenFrame.width >= width else {
+            return screenFrame.midX
+        }
+        let halfDetailWidth = width / 2
+        return min(
+            max(proposedCenterX, screenFrame.minX + halfDetailWidth),
+            screenFrame.maxX - halfDetailWidth
+        )
+    }
+
     static func detailHeight(taskRows: Int, showsPeriodUsage: Bool, showsSparkQuota: Bool = false) -> CGFloat {
         let rows = max(1, min(visibleTaskRows, taskRows))
-        let sparkHeight: CGFloat = showsSparkQuota ? 8 + 32 : 0
-        let localTelemetryHeight: CGFloat = 48 + sparkHeight + 52 + 26
-        let taskStackHeight = CGFloat(rows) * 34
-        let periodHeight: CGFloat = showsPeriodUsage ? 8 + 44 : 0
+        let sparkHeight: CGFloat = showsSparkQuota ? 8 + detailSparkHeight : 0
+        let periodHeight: CGFloat = showsPeriodUsage ? 12 + detailPeriodFooterHeight : 0
         let contentHeight = detailTopPadding
             + detailHeaderHeight
             + 10
             + detailPageSwitcherHeight
             + 10
-            + localTelemetryHeight
+            + detailQuotaHeight
             + 8
-            + taskStackHeight
+            + sparkHeight
+            + taskTableHeight(taskRows: rows)
             + periodHeight
             + detailBottomPadding
         return max(minimumDetailHeight, ceil(contentHeight))
+    }
+
+    static func taskTableHeight(taskRows: Int) -> CGFloat {
+        let rows = max(1, min(visibleTaskRows, taskRows))
+        return detailTaskHeaderHeight
+            + CGFloat(rows) * detailTaskRowHeight
+            + detailTaskEmptySpace
+    }
+
+    static var visibleTaskRowsHeight: CGFloat {
+        CGFloat(visibleTaskRows) * detailTaskRowHeight
     }
 
     static func remoteDetailHeight(accountRows: Int, usesTallRows: Bool = false) -> CGFloat {

@@ -7,6 +7,10 @@ struct CodexNotchApp {
     static func main() {
         let arguments = CommandLine.arguments
         let snapshotOptions = SnapshotCommandOptions(arguments: Array(arguments.dropFirst()))
+        if arguments.contains("--print-diagnostics") {
+            FileHandle.standardOutput.write(MonitorDiagnostics.shared.recentData(limit: snapshotOptions.limit))
+            return
+        }
         if snapshotOptions.shouldRecordDeltaSnapshot {
             let store = CodexUsageStore(
                 codexDirectory: snapshotOptions.codexDirectory,
@@ -271,6 +275,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+private final class CollapsedHostingView<Content: View>: NSHostingView<Content> {
+    var onClick: (() -> Void)?
+    var onDragChanged: ((CGFloat) -> Void)?
+    var onDragEnded: ((CGFloat) -> Void)?
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    func configureInteractions() {
+        let panGesture = NSPanGestureRecognizer(target: self, action: #selector(handlePanGesture(_:)))
+        panGesture.buttonMask = 0x1
+        addGestureRecognizer(panGesture)
+
+        let clickGesture = NSClickGestureRecognizer(target: self, action: #selector(handleClickGesture(_:)))
+        clickGesture.buttonMask = 0x1
+        addGestureRecognizer(clickGesture)
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .openHand)
+    }
+
+    @objc private func handleClickGesture(_ gesture: NSClickGestureRecognizer) {
+        guard gesture.state == .ended else {
+            return
+        }
+        onClick?()
+    }
+
+    @objc private func handlePanGesture(_ gesture: NSPanGestureRecognizer) {
+        let translationX = gesture.translation(in: self).x
+        switch gesture.state {
+        case .began, .changed:
+            onDragChanged?(translationX)
+        case .ended, .cancelled:
+            onDragEnded?(translationX)
+        default:
+            break
+        }
+    }
+}
+
 @MainActor
 final class NotchOverlayController {
     private let settings = CodexNotchSettings()
@@ -294,10 +342,17 @@ final class NotchOverlayController {
     )
     private var cancellables: Set<AnyCancellable> = []
     private var eventMonitors: [Any] = []
+    private var horizontalOffset: CGFloat = 0
+    private var dragStartCenterX: CGFloat?
 
     init() {
         window = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: IslandMetrics.width, height: IslandMetrics.collapsedHeight),
+            contentRect: NSRect(
+                x: 0,
+                y: 0,
+                width: IslandMetrics.collapsedWidth,
+                height: IslandMetrics.collapsedHeight
+            ),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -322,6 +377,7 @@ final class NotchOverlayController {
         window.hasShadow = false
         window.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
         window.ignoresMouseEvents = false
+        window.isMovable = false
         window.isMovableByWindowBackground = false
         window.collectionBehavior = [
             .canJoinAllSpaces,
@@ -337,14 +393,33 @@ final class NotchOverlayController {
             remoteViewModel: remoteViewModel,
             newAPIViewModel: newAPIViewModel,
             subAPIViewModel: subAPIViewModel,
-            overlayState: overlayState,
             settings: settings,
             onSettings: { [weak self] in
                 self?.showSettings()
             }
         )
-        let hostingView = NSHostingView(rootView: view)
-        hostingView.frame = NSRect(x: 0, y: 0, width: IslandMetrics.width, height: IslandMetrics.collapsedHeight)
+        let hostingView = CollapsedHostingView(rootView: view)
+        hostingView.onClick = { [weak self] in
+            guard let self else {
+                return
+            }
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+                self.overlayState.isExpanded.toggle()
+            }
+        }
+        hostingView.onDragChanged = { [weak self] translationX in
+            self?.moveOverlay(translationX: translationX, ended: false)
+        }
+        hostingView.onDragEnded = { [weak self] translationX in
+            self?.moveOverlay(translationX: translationX, ended: true)
+        }
+        hostingView.configureInteractions()
+        hostingView.frame = NSRect(
+            x: 0,
+            y: 0,
+            width: IslandMetrics.collapsedWidth,
+            height: IslandMetrics.collapsedHeight
+        )
         hostingView.wantsLayer = true
         hostingView.layer?.backgroundColor = NSColor.clear.cgColor
         window.contentView = hostingView
@@ -469,6 +544,7 @@ final class NotchOverlayController {
                 self.updateFrames()
             }
             .store(in: &cancellables)
+
     }
 
     private func installEventMonitors() {
@@ -539,7 +615,7 @@ final class NotchOverlayController {
     }
 
     private func refreshDetailData() {
-        viewModel.refreshAll()
+        viewModel.refreshAll(forceRateLimitRefresh: false)
 
         if settings.remoteMonitorEnabled {
             remoteViewModel.refreshNow()
@@ -551,7 +627,7 @@ final class NotchOverlayController {
             subAPIViewModel.refreshNow()
         }
         if settings.codexRadarEnabled {
-            codexRadarViewModel.refreshIfNeeded()
+            codexRadarViewModel.refreshWhenPresented()
         }
     }
 
@@ -568,24 +644,59 @@ final class NotchOverlayController {
         window.orderFrontRegardless()
     }
 
+    private func moveOverlay(translationX: CGFloat, ended: Bool) {
+        guard let screen = primaryDisplayScreen() ?? NSScreen.screens.first else {
+            return
+        }
+        if dragStartCenterX == nil {
+            dragStartCenterX = IslandMetrics.clampedOverlayCenterX(
+                screen.frame.midX + horizontalOffset,
+                in: screen.frame
+            )
+        }
+        let proposedCenterX = (dragStartCenterX ?? screen.frame.midX) + translationX
+        let centerX = IslandMetrics.clampedOverlayCenterX(proposedCenterX, in: screen.frame)
+        horizontalOffset = centerX - screen.frame.midX
+        updateFrames()
+        if ended {
+            dragStartCenterX = nil
+        }
+    }
+
     private func updateFrames() {
         guard let screen = primaryDisplayScreen() ?? NSScreen.screens.first else {
             return
         }
 
         let detailHeight = detailWindow == nil && !overlayState.isExpanded ? localDetailHeight : currentDetailHeight
-        let x = screen.frame.midX - IslandMetrics.width / 2
+        let centerX = IslandMetrics.clampedOverlayCenterX(
+            screen.frame.midX + horizontalOffset,
+            in: screen.frame
+        )
+        horizontalOffset = centerX - screen.frame.midX
+        let collapsedX = centerX - IslandMetrics.collapsedWidth / 2
+        let detailX = centerX - IslandMetrics.width / 2
         let islandY = screen.frame.maxY - IslandMetrics.collapsedHeight
-        let islandFrame = NSRect(x: x, y: islandY, width: IslandMetrics.width, height: IslandMetrics.collapsedHeight)
+        let islandFrame = NSRect(
+            x: collapsedX,
+            y: islandY,
+            width: IslandMetrics.collapsedWidth,
+            height: IslandMetrics.collapsedHeight
+        )
         let detailFrame = NSRect(
-            x: x,
+            x: detailX,
             y: islandY - detailHeight + IslandMetrics.detailOverlap,
             width: IslandMetrics.width,
             height: detailHeight
         )
 
         window.setFrame(islandFrame, display: true, animate: false)
-        window.contentView?.frame = NSRect(x: 0, y: 0, width: IslandMetrics.width, height: IslandMetrics.collapsedHeight)
+        window.contentView?.frame = NSRect(
+            x: 0,
+            y: 0,
+            width: IslandMetrics.collapsedWidth,
+            height: IslandMetrics.collapsedHeight
+        )
         detailWindow?.setFrame(detailFrame, display: true, animate: false)
         detailWindow?.contentView?.frame = NSRect(x: 0, y: 0, width: IslandMetrics.width, height: detailHeight)
     }
