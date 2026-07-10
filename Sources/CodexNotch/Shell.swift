@@ -25,20 +25,29 @@ enum ShellError: Error, LocalizedError {
 }
 
 enum Shell {
+    private static let outputLimit = 1024 * 1024
+
     static func run(_ executable: String, _ arguments: [String], timeout: TimeInterval? = nil) throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
 
-        let outputPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = outputPipe
+        let standardOutput = Pipe()
+        let standardError = Pipe()
+        let outputCollector = ShellOutputCollector(limit: outputLimit)
+        let errorCollector = ShellOutputCollector(limit: outputLimit)
+        let readers = DispatchGroup()
+        process.standardOutput = standardOutput
+        process.standardError = standardError
 
         do {
             try process.run()
         } catch {
             throw ShellError.launchFailed(executable)
         }
+
+        drain(standardOutput.fileHandleForReading, into: outputCollector, group: readers)
+        drain(standardError.fileHandleForReading, into: errorCollector, group: readers)
 
         if let timeout {
             let completed = DispatchSemaphore(value: 0)
@@ -55,12 +64,14 @@ enum Shell {
                     _ = completed.wait(timeout: .now() + .milliseconds(300))
                 }
 
-                try? outputPipe.fileHandleForReading.close()
-                throw ShellError.timedOut(executable, timeout, "")
+                try? standardOutput.fileHandleForReading.close()
+                try? standardError.fileHandleForReading.close()
+                _ = readers.wait(timeout: .now() + .seconds(1))
+                throw ShellError.timedOut(executable, timeout, combinedOutput(outputCollector, errorCollector))
             }
 
-            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(decoding: outputData, as: UTF8.self)
+            readers.wait()
+            let output = combinedOutput(outputCollector, errorCollector)
 
             guard process.terminationStatus == 0 else {
                 throw ShellError.nonZeroExit(executable, process.terminationStatus, output)
@@ -69,15 +80,41 @@ enum Shell {
             return output
         }
 
-        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(decoding: outputData, as: UTF8.self)
         process.waitUntilExit()
+        readers.wait()
+        let output = combinedOutput(outputCollector, errorCollector)
 
         guard process.terminationStatus == 0 else {
             throw ShellError.nonZeroExit(executable, process.terminationStatus, output)
         }
 
         return output
+    }
+
+    private static func drain(
+        _ handle: FileHandle,
+        into collector: ShellOutputCollector,
+        group: DispatchGroup
+    ) {
+        group.enter()
+        DispatchQueue.global(qos: .utility).async {
+            defer {
+                try? handle.close()
+                group.leave()
+            }
+            while let chunk = try? handle.read(upToCount: 16 * 1024), !chunk.isEmpty {
+                collector.append(chunk)
+            }
+        }
+    }
+
+    private static func combinedOutput(
+        _ standardOutput: ShellOutputCollector,
+        _ standardError: ShellOutputCollector
+    ) -> String {
+        [standardOutput.rendered, standardError.rendered]
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
     }
 
     static func sqliteJSON<T: Decodable>(
@@ -176,6 +213,36 @@ enum Shell {
         }
 
         return relationships
+    }
+}
+
+private final class ShellOutputCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private let limit: Int
+    private var data = Data()
+    private var truncated = false
+
+    init(limit: Int) {
+        self.limit = max(1, limit)
+    }
+
+    func append(_ chunk: Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        let remaining = max(0, limit - data.count)
+        if remaining > 0 {
+            data.append(chunk.prefix(remaining))
+        }
+        if chunk.count > remaining {
+            truncated = true
+        }
+    }
+
+    var rendered: String {
+        lock.lock()
+        defer { lock.unlock() }
+        let output = String(decoding: data, as: UTF8.self)
+        return truncated ? "\(output)\n[output truncated]" : output
     }
 }
 
