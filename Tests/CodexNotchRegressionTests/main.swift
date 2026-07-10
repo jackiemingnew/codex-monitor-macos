@@ -1573,6 +1573,30 @@ let retryWriteDefaults = runner.require(
     "secret write retry defaults should be available"
 )
 retryWriteDefaults.removePersistentDomain(forName: retryWriteSuiteName)
+
+let invalidMigrationSuiteName = "CodexNotchInvalidSecretMigration-\(UUID().uuidString)"
+let invalidMigrationDefaults = runner.require(
+    UserDefaults(suiteName: invalidMigrationSuiteName),
+    "invalid migration defaults should be available"
+)
+invalidMigrationDefaults.removePersistentDomain(forName: invalidMigrationSuiteName)
+invalidMigrationDefaults.set("keychain", forKey: "secretStorageMode")
+invalidMigrationDefaults.set(
+    Data(#"{"sourceMode":"keychain","targetMode":"keychain","expectedDigest":"invalid"}"#.utf8),
+    forKey: "secretStorageMigrationState"
+)
+var invalidMigrationVault = SecretVault()
+invalidMigrationVault.set("must-survive", for: .cliproxyManagement)
+let invalidMigrationStore = CountingSecretStore(vault: invalidMigrationVault)
+let invalidMigrationSettings = CodexNotchSettings(
+    defaults: invalidMigrationDefaults,
+    secretStores: SecretStoreFactory(keychain: invalidMigrationStore, database: CountingSecretStore()),
+    launchAtLoginManager: FakeLaunchAtLoginManager()
+)
+runner.check(invalidMigrationSettings.loadSecretsIfNeeded(), "invalid same-store migration state should not block secret loading")
+runner.check(invalidMigrationStore.deleteCount == 0, "invalid same-store migration state must not delete the active vault")
+runner.check(invalidMigrationSettings.cliproxyManagementKey == "must-survive", "invalid migration state must preserve the active secret")
+invalidMigrationDefaults.removePersistentDomain(forName: invalidMigrationSuiteName)
 let retryWriteSource = CountingSecretStore()
 let retryWriteTarget = CountingSecretStore(failOnSave: true)
 let retryWriteSettings = CodexNotchSettings(
