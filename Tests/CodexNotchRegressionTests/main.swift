@@ -1164,6 +1164,7 @@ final class CountingSecretStore: SecretStore {
     private let failOnSave: Bool
     private(set) var loadCount = 0
     private(set) var saveCount = 0
+    private(set) var deleteCount = 0
 
     init(vault: SecretVault = SecretVault(), failOnLoad: Bool = false, failOnSave: Bool = false) {
         self.vault = vault
@@ -1185,6 +1186,11 @@ final class CountingSecretStore: SecretStore {
             throw CountingSecretStoreError.save
         }
         self.vault = vault
+    }
+
+    func deleteVault() throws {
+        deleteCount += 1
+        vault = SecretVault()
     }
 }
 
@@ -1291,6 +1297,37 @@ let databaseSecretStore = DatabaseSecretStore(databaseURL: secretDatabaseURL)
 try databaseSecretStore.saveVault(secretVault)
 let loadedDatabaseVault = try databaseSecretStore.loadVault()
 runner.check(loadedDatabaseVault == secretVault, "database secret store should persist one vault")
+let databasePayloadType = try Shell.sqliteJSON(
+    database: secretDatabaseURL.path,
+    query: "select typeof(payload) as value from secret_vault where id = 'default';",
+    as: [[String: String]].self,
+    readOnly: true
+).first?["value"]
+runner.check(databasePayloadType == "blob", "database secret store should bind the vault as a blob")
+try databaseSecretStore.deleteVault()
+let deletedDatabaseVault = try databaseSecretStore.loadVault()
+runner.check(deletedDatabaseVault.isEmpty, "database secret store should delete the vault row")
+
+let legacyVaultData = try JSONEncoder().encode(secretVault)
+let legacyEncodedVault = legacyVaultData.base64EncodedString()
+try Shell.sqliteExec(
+    database: secretDatabaseURL.path,
+    query: "insert or replace into secret_vault(id, payload, updated_at) values('default', '\(legacyEncodedVault)', 0);"
+)
+let loadedLegacyDatabaseVault = try databaseSecretStore.loadVault()
+runner.check(loadedLegacyDatabaseVault == secretVault, "database secret store should read legacy Base64 vault rows")
+try Shell.sqliteExec(
+    database: secretDatabaseURL.path,
+    query: "update secret_vault set payload = X'00FF' where id = 'default';"
+)
+do {
+    _ = try databaseSecretStore.loadVault()
+    runner.check(false, "corrupt database vault should throw")
+} catch DatabaseSecretStoreError.corruptPayload {
+    runner.check(true, "corrupt database vault should be reported explicitly")
+} catch {
+    runner.check(false, "corrupt database vault should use the dedicated error")
+}
 try? FileManager.default.removeItem(at: secretDatabaseURL.deletingLastPathComponent())
 
 var lazyStartupVault = SecretVault()
