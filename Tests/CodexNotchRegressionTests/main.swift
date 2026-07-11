@@ -5676,6 +5676,36 @@ let secondTokenSnapshot = tokenCacheStore.loadSnapshot(
 )
 runner.check(secondTokenSnapshot.tasks.first { $0.id == tokenCacheSessionID }?.tokenCount == 150, "appending after an initially unterminated token line should not double count the pending line")
 
+let tokenCacheAttributes = try FileManager.default.attributesOfItem(atPath: tokenCachePath.path)
+let tokenCacheSize = (tokenCacheAttributes[.size] as? NSNumber)?.intValue ?? 0
+let tokenCacheModifiedAt = tokenCacheAttributes[.modificationDate] as? Date ?? now
+let tokenCacheInode = (tokenCacheAttributes[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0
+let replacementTokenPath = tokenCacheSessionDirectory.appendingPathComponent("replacement-\(UUID().uuidString).jsonl")
+let replacementTokenLine = #"{"timestamp":"\#(timestamp)","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":300}}}}"# + "\n"
+var replacementTokenData = Data(replacementTokenLine.utf8)
+runner.check(replacementTokenData.count <= tokenCacheSize, "replacement token fixture should fit the original byte size")
+if replacementTokenData.count < tokenCacheSize {
+    replacementTokenData.append(Data(repeating: UInt8(ascii: " "), count: tokenCacheSize - replacementTokenData.count))
+}
+try replacementTokenData.write(to: replacementTokenPath)
+try FileManager.default.setAttributes([.modificationDate: tokenCacheModifiedAt], ofItemAtPath: replacementTokenPath.path)
+let replacementTokenAttributes = try FileManager.default.attributesOfItem(atPath: replacementTokenPath.path)
+let replacementTokenInode = (replacementTokenAttributes[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0
+runner.check(replacementTokenInode != tokenCacheInode, "replacement token fixture should use a different inode")
+try FileManager.default.removeItem(at: tokenCachePath)
+try FileManager.default.moveItem(at: replacementTokenPath, to: tokenCachePath)
+let replacedTokenSnapshot = tokenCacheStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now.addingTimeInterval(2)
+)
+runner.check(
+    replacedTokenSnapshot.tasks.first { $0.id == tokenCacheSessionID }?.tokenCount == 300,
+    "same-size same-mtime rollout replacement should invalidate token caches by inode"
+)
+
 if runner.failures > 0 {
     FileHandle.standardError.write(Data("\(runner.failures) regression test(s) failed\n".utf8))
     exit(1)

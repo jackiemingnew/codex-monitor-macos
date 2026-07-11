@@ -2558,7 +2558,9 @@ final class CodexUsageStore: @unchecked Sendable {
         let hadTokenEvent: Bool
         if let cached,
            cached.bytesScanned < signature.size,
-           cached.signature.modifiedAt <= signature.modifiedAt {
+           cached.signature.inode == signature.inode,
+           cached.signature.size <= signature.size,
+           cached.signature.modifiedAtNanoseconds <= signature.modifiedAtNanoseconds {
             scanStart = cached.bytesScanned
             initialTotal = cached.tokens
             initialPendingLine = cached.pendingLine
@@ -4010,13 +4012,30 @@ final class CodexUsageStore: @unchecked Sendable {
     }
 
     private func fileSignature(_ path: String) -> FileSignature {
-        guard let attributes = try? FileManager.default.attributesOfItem(atPath: path) else {
-            return FileSignature(path: path, exists: false, size: 0, modifiedAt: 0)
+        var fileInfo = stat()
+        let status = path.withCString { pointer in
+            Darwin.lstat(pointer, &fileInfo)
+        }
+        guard status == 0 else {
+            return FileSignature(
+                path: path,
+                exists: false,
+                inode: 0,
+                size: 0,
+                modifiedAtNanoseconds: 0
+            )
         }
 
-        let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
-        let modifiedAt = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-        return FileSignature(path: path, exists: true, size: size, modifiedAt: modifiedAt)
+        let size = fileInfo.st_size > 0 ? UInt64(fileInfo.st_size) : 0
+        let modifiedAtNanoseconds = Int64(fileInfo.st_mtimespec.tv_sec) * 1_000_000_000
+            + Int64(fileInfo.st_mtimespec.tv_nsec)
+        return FileSignature(
+            path: path,
+            exists: true,
+            inode: UInt64(fileInfo.st_ino),
+            size: size,
+            modifiedAtNanoseconds: modifiedAtNanoseconds
+        )
     }
 
     private func sqliteLiteral(_ value: String) -> String {
@@ -4332,6 +4351,7 @@ private struct StoreSignature: Equatable {
 private struct FileSignature: Equatable {
     let path: String
     let exists: Bool
+    let inode: UInt64
     let size: UInt64
-    let modifiedAt: TimeInterval
+    let modifiedAtNanoseconds: Int64
 }
