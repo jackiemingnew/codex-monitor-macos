@@ -166,9 +166,11 @@ swift build -c release
 DMG 会输出到 `dist/`，文件名包含软件名、版本号和支持架构，例如：
 
 ```text
-dist/codex-monitor-0.1.2-arm64.dmg
-dist/codex-monitor-0.1.2-amd64.dmg
+dist/codex-monitor-0.2.0-arm64.dmg
+dist/codex-monitor-0.2.0-amd64.dmg
 ```
+
+版本号唯一读取自仓库根目录的 `VERSION`；`Info.plist`、DMG 文件名和 Release tag 必须保持一致。
 
 安装到当前用户的 Applications 目录：
 
@@ -205,6 +207,29 @@ dist/codex-monitor-0.1.2-amd64.dmg
 验证后的 DMG 和 `SHA256SUMS` 会复制到当前目录下的 `clean-package-artifacts/<commit>/`。设置 `KEEP_CLEAN_CLONE=1` 可以保留临时 checkout，设置 `CLEAN_PACKAGE_OUTPUT_DIR` 可以更改产物目录。
 
 GitHub Actions 中的 DMG 使用 ad-hoc 签名，未经过 Apple notarization，只作为可复现构建与测试产物，不等同于正式签名 Release。
+
+### 正式 Release
+
+`.github/workflows/release.yml` 只在推送 `v*` tag 时运行。它会强制校验 tag 与 `VERSION` 一致，导入临时 Developer ID keychain，完成双架构构建、Hardened Runtime 签名、Apple notarization、ticket stapling 和 Gatekeeper 验证，最后创建 GitHub Release 并上传两个 DMG 与 `SHA256SUMS`。Apple 的流程要求见[官方 notarization 文档](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)。
+
+需要先在 GitHub Actions Secrets 配置：
+
+- `DEVELOPER_ID_CERTIFICATE_BASE64`：Developer ID Application `.p12` 的 Base64 内容。
+- `DEVELOPER_ID_CERTIFICATE_PASSWORD`：`.p12` 密码。
+- `APPLE_API_PRIVATE_KEY_BASE64`：App Store Connect API `.p8` 私钥的 Base64 内容。
+- `APPLE_API_KEY_ID`：App Store Connect API Key ID。
+- `APPLE_API_ISSUER_ID`：Team API Key 的 Issuer ID；Individual API Key 可留空。
+
+凭证不会写入仓库或 Release artifact。确认 `main` 的 `Clean macOS package / verify` 通过后，再创建版本 tag：
+
+```bash
+git switch main
+git pull --ff-only
+git tag -a v0.2.0 -m "Codex Monitor v0.2.0"
+git push origin v0.2.0
+```
+
+不要在签名 secrets 未配置时推送正式 tag；Release workflow 会拒绝缺少凭证的发布。
 
 ### 调试命令
 
@@ -257,7 +282,7 @@ GitHub Actions 中的 DMG 使用 ad-hoc 签名，未经过 Apple notarization，
 - Codex Radar token 只用于读取 codexradar.com 授权 API，并随统一凭证库的 Keychain/本机数据库模式迁移。请不要把旧版 token 文件、环境变量值或设置截图提交到公开仓库。
 - CPA Manager Plus 模式读取的是服务端巡检结果。服务端巡检频率由 CPA Manager Plus 自身配置决定，客户端刷新只是读取最新结果。
 - `固定自签名证书` 仅在配置 origin 与服务器叶证书 SHA-256 指纹同时匹配时连接；跨源或 HTTPS→HTTP 重定向会被拒绝。
-- 当前构建脚本使用 ad-hoc 签名，适合本机使用。如果要公开发布给其他用户，建议使用 Apple Developer ID 签名并进行 notarization。
+- 本地构建默认使用 ad-hoc 签名，适合本机验证；正式 tag Release 强制使用 Developer ID、Hardened Runtime 和 Apple notarization。
 - 请不要把任何真实面板地址、管理密钥、账号密码或本机密钥数据库提交到公开仓库。
 
 ### 项目结构
@@ -265,10 +290,13 @@ GitHub Actions 中的 DMG 使用 ad-hoc 签名，未经过 Apple notarization，
 ```text
 Sources/CodexNotch/              应用源码
 Tests/CodexNotchRegressionTests/ 回归测试
+VERSION                         版本号唯一真源
 scripts/build-app.sh             构建 .app 和 .dmg
 scripts/install-user-app.sh      安装到 ~/Applications
+scripts/notarize-release.sh      notarize、staple 并验证正式 DMG
 scripts/run-regression-tests.sh  运行回归测试
 scripts/clean-dev-artifacts.sh   清理 .build 和 dist 开发产物
+.github/workflows/release.yml    tag 驱动的正式 Release
 ```
 
 ### 许可证
@@ -425,9 +453,11 @@ Build a double-clickable `.app` and `.dmg`:
 The DMG is written to `dist/` with the app name, version, and supported architecture in the filename, for example:
 
 ```text
-dist/codex-monitor-0.1.2-arm64.dmg
-dist/codex-monitor-0.1.2-amd64.dmg
+dist/codex-monitor-0.2.0-arm64.dmg
+dist/codex-monitor-0.2.0-amd64.dmg
 ```
+
+The repository-root `VERSION` file is the single version source. `Info.plist`, DMG filenames, and the Release tag must agree.
 
 Install into the current user's Applications folder:
 
@@ -464,6 +494,29 @@ The optional arguments are the repository URL and ref:
 Validated DMGs and `SHA256SUMS` are copied to `clean-package-artifacts/<commit>/` under the current directory. Set `KEEP_CLEAN_CLONE=1` to retain the temporary checkout or `CLEAN_PACKAGE_OUTPUT_DIR` to choose another artifact directory.
 
 DMGs produced by GitHub Actions use ad-hoc signing and are not Apple-notarized. They are reproducible build/test artifacts, not official signed releases.
+
+### Official Releases
+
+`.github/workflows/release.yml` runs only for pushed `v*` tags. It requires the tag to match `VERSION`, imports a temporary Developer ID keychain, performs the dual-architecture build, Hardened Runtime signing, Apple notarization, ticket stapling, and Gatekeeper assessment, then creates a GitHub Release containing both DMGs and `SHA256SUMS`. See [Apple's notarization documentation](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution) for the underlying requirements.
+
+Configure these GitHub Actions secrets first:
+
+- `DEVELOPER_ID_CERTIFICATE_BASE64`: Base64-encoded Developer ID Application `.p12`.
+- `DEVELOPER_ID_CERTIFICATE_PASSWORD`: password for the `.p12`.
+- `APPLE_API_PRIVATE_KEY_BASE64`: Base64-encoded App Store Connect API `.p8` private key.
+- `APPLE_API_KEY_ID`: App Store Connect API Key ID.
+- `APPLE_API_ISSUER_ID`: Issuer ID for a Team API Key; leave empty for an Individual API Key.
+
+Credentials are never written to the repository or Release artifacts. After `Clean macOS package / verify` passes on `main`, create the version tag:
+
+```bash
+git switch main
+git pull --ff-only
+git tag -a v0.2.0 -m "Codex Monitor v0.2.0"
+git push origin v0.2.0
+```
+
+Do not push an official tag before the signing secrets are configured. The Release workflow intentionally fails rather than publishing an unsigned fallback.
 
 ### Debug Commands
 
@@ -517,7 +570,7 @@ Run regression tests:
 - Codex Radar tokens are used only for the codexradar.com authorized API and migrate with the unified Keychain/local-database vault. Do not commit legacy token files, environment variable values, or settings screenshots to a public repository.
 - CPA Manager Plus mode reads server-side inspection results. The inspection frequency is controlled by CPA Manager Plus, while this app only controls how often it reads the latest result.
 - `Pin self-signed certificate` requires both the configured origin and the leaf-certificate SHA-256 fingerprint to match; cross-origin and HTTPS-to-HTTP redirects are rejected.
-- The current build script uses ad-hoc signing, which is suitable for local use. For public distribution, use Apple Developer ID signing and notarization.
+- Local builds use ad-hoc signing by default. Official tag releases require Developer ID, Hardened Runtime, and Apple notarization.
 - Never commit real panel URLs, management keys, account passwords, or local secret database files to a public repository.
 
 ### Repository Layout
@@ -525,10 +578,13 @@ Run regression tests:
 ```text
 Sources/CodexNotch/              App source
 Tests/CodexNotchRegressionTests/ Regression tests
+VERSION                         Single source for the app version
 scripts/build-app.sh             Build .app and .dmg
 scripts/install-user-app.sh      Install to ~/Applications
+scripts/notarize-release.sh      Notarize, staple, and verify release DMGs
 scripts/run-regression-tests.sh  Run regression tests
 scripts/clean-dev-artifacts.sh   Remove .build and dist development artifacts
+.github/workflows/release.yml    Tag-driven official Release
 ```
 
 ### License

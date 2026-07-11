@@ -4,14 +4,25 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="codex监测"
 PACKAGE_NAME="codex-monitor"
-APP_VERSION="0.1.2"
+APP_VERSION="$(tr -d '[:space:]' < "$ROOT_DIR/VERSION")"
+APP_BUILD_NUMBER="${APP_BUILD_NUMBER:-1}"
 BUNDLE_ID="com.alight.codexnotch"
+CODE_SIGN_IDENTITY="${CODE_SIGN_IDENTITY:--}"
 DIST_DIR="$ROOT_DIR/dist"
 APP_DIR="$DIST_DIR/$APP_NAME.app"
 DMG_STAGE_DIR="$DIST_DIR/dmg-stage"
 PACKAGE_STAGE_DIR="$DIST_DIR/package-stage"
 ICON_BUILD_DIR="$DIST_DIR/icon-build"
 ICON_PATH="$ICON_BUILD_DIR/AppIcon.icns"
+
+if [[ ! "$APP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "VERSION must contain a semantic version such as 0.2.0" >&2
+  exit 1
+fi
+if [[ ! "$APP_BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
+  echo "APP_BUILD_NUMBER must be a positive integer" >&2
+  exit 1
+fi
 
 cd "$ROOT_DIR"
 mkdir -p "$DIST_DIR"
@@ -53,7 +64,7 @@ create_app_bundle() {
   <key>CFBundleShortVersionString</key>
   <string>$APP_VERSION</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>$APP_BUILD_NUMBER</string>
   <key>LSMinimumSystemVersion</key>
   <string>14.0</string>
   <key>LSUIElement</key>
@@ -64,7 +75,14 @@ create_app_bundle() {
 </plist>
 PLIST
 
-  codesign --force --deep --sign - "$app_dir"
+  if [[ "$CODE_SIGN_IDENTITY" == "-" ]]; then
+    codesign --force --sign - "$macos_dir/CodexNotch"
+    codesign --force --sign - "$app_dir"
+  else
+    codesign --force --options runtime --timestamp --sign "$CODE_SIGN_IDENTITY" "$macos_dir/CodexNotch"
+    codesign --force --options runtime --timestamp --sign "$CODE_SIGN_IDENTITY" "$app_dir"
+  fi
+  codesign --verify --deep --strict "$app_dir"
 }
 
 build_arch() {
