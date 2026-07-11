@@ -24,6 +24,10 @@ if [[ -z "$API_KEY_PATH" || -z "$API_KEY_ID" ]]; then
   echo "APPLE_API_PRIVATE_KEY_PATH and APPLE_API_KEY_ID are required" >&2
   exit 1
 fi
+if [[ -z "$API_ISSUER_ID" ]]; then
+  echo "APPLE_API_ISSUER_ID is required for a Team API Key" >&2
+  exit 1
+fi
 if [[ ! -f "$API_KEY_PATH" ]]; then
   echo "APPLE_API_PRIVATE_KEY_PATH does not exist" >&2
   exit 1
@@ -37,10 +41,7 @@ if [[ "${#dmgs[@]}" -ne 2 ]]; then
   exit 1
 fi
 
-notary_auth=(--key "$API_KEY_PATH" --key-id "$API_KEY_ID")
-if [[ -n "$API_ISSUER_ID" ]]; then
-  notary_auth+=(--issuer "$API_ISSUER_ID")
-fi
+notary_auth=(--key "$API_KEY_PATH" --key-id "$API_KEY_ID" --issuer "$API_ISSUER_ID")
 
 for dmg_path in "${dmgs[@]}"; do
   result_path="$CHECK_DIR/$(basename "$dmg_path").json"

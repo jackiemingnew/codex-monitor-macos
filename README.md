@@ -216,13 +216,15 @@ GitHub Actions 中的 DMG 使用 ad-hoc 签名，未经过 Apple notarization，
 
 `.github/workflows/release.yml` 只在推送 `v*` tag 时运行。它会强制校验 tag 与 `VERSION` 一致，导入临时 Developer ID keychain，完成双架构构建、Hardened Runtime 签名、Apple notarization、ticket stapling 和 Gatekeeper 验证，最后创建 GitHub Release 并上传两个 DMG 与 `SHA256SUMS`。Apple 的流程要求见[官方 notarization 文档](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)。
 
-需要先在 GitHub Actions Secrets 配置：
+`notarytool` 必须使用 App Store Connect Team API Key；[Apple 的 API Key 文档](https://developer.apple.com/documentation/appstoreconnectapi/creating-api-keys-for-app-store-connect-api)明确说明 Individual API Key 不能调用 `notaryTool`。Team API Key 的创建方式见 [App Store Connect API 官方文档](https://developer.apple.com/help/app-store-connect/get-started/app-store-connect-api/)。
+
+需要先在 GitHub Actions Secrets 配置以下五项必填凭据：
 
 - `DEVELOPER_ID_CERTIFICATE_BASE64`：Developer ID Application `.p12` 的 Base64 内容。
 - `DEVELOPER_ID_CERTIFICATE_PASSWORD`：`.p12` 密码。
-- `APPLE_API_PRIVATE_KEY_BASE64`：App Store Connect API `.p8` 私钥的 Base64 内容。
-- `APPLE_API_KEY_ID`：App Store Connect API Key ID。
-- `APPLE_API_ISSUER_ID`：Team API Key 的 Issuer ID；Individual API Key 可留空。
+- `APPLE_API_PRIVATE_KEY_BASE64`：App Store Connect Team API Key `.p8` 私钥的 Base64 内容。
+- `APPLE_API_KEY_ID`：Team API Key ID。
+- `APPLE_API_ISSUER_ID`：Team API Key 的 Issuer ID。
 
 凭证不会写入仓库或 Release artifact。确认 `main` 的 `Clean macOS package / verify` 通过后，再创建版本 tag：
 
@@ -503,13 +505,15 @@ DMGs produced by GitHub Actions use ad-hoc signing and are not Apple-notarized. 
 
 `.github/workflows/release.yml` runs only for pushed `v*` tags. It requires the tag to match `VERSION`, imports a temporary Developer ID keychain, performs the dual-architecture build, Hardened Runtime signing, Apple notarization, ticket stapling, and Gatekeeper assessment, then creates a GitHub Release containing both DMGs and `SHA256SUMS`. See [Apple's notarization documentation](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution) for the underlying requirements.
 
-Configure these GitHub Actions secrets first:
+`notarytool` requires an App Store Connect Team API Key; [Apple's API key documentation](https://developer.apple.com/documentation/appstoreconnectapi/creating-api-keys-for-app-store-connect-api) explicitly states that Individual API Keys cannot use `notaryTool`. See the [App Store Connect API help](https://developer.apple.com/help/app-store-connect/get-started/app-store-connect-api/) for Team API Key creation.
+
+Configure all five required GitHub Actions secrets first:
 
 - `DEVELOPER_ID_CERTIFICATE_BASE64`: Base64-encoded Developer ID Application `.p12`.
 - `DEVELOPER_ID_CERTIFICATE_PASSWORD`: password for the `.p12`.
-- `APPLE_API_PRIVATE_KEY_BASE64`: Base64-encoded App Store Connect API `.p8` private key.
-- `APPLE_API_KEY_ID`: App Store Connect API Key ID.
-- `APPLE_API_ISSUER_ID`: Issuer ID for a Team API Key; leave empty for an Individual API Key.
+- `APPLE_API_PRIVATE_KEY_BASE64`: Base64-encoded App Store Connect Team API Key `.p8` private key.
+- `APPLE_API_KEY_ID`: Team API Key ID.
+- `APPLE_API_ISSUER_ID`: Issuer ID for the Team API Key.
 
 Credentials are never written to the repository or Release artifacts. After `Clean macOS package / verify` passes on `main`, create the version tag:
 
