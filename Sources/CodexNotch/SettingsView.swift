@@ -115,6 +115,7 @@ private struct SettingsDraft: Equatable {
     var showSparkQuota = false
     var showContextMetrics = false
     var codexRadarEnabled = true
+    var codexRadarUsesAuthorizedAPI = false
     var codexRadarAPIToken = ""
     var taskHistoryRange: TaskHistoryRange = .threeDays
     var notchDisplaySource: NotchDisplaySource = .codex
@@ -160,6 +161,7 @@ private struct SettingsDraft: Equatable {
         showSparkQuota = settings.showSparkQuota
         showContextMetrics = settings.showContextMetrics
         codexRadarEnabled = settings.codexRadarEnabled
+        codexRadarUsesAuthorizedAPI = settings.codexRadarUsesAuthorizedAPI
         codexRadarAPIToken = settings.secretsAreLoaded ? settings.codexRadarAPIToken : ""
         taskHistoryRange = settings.taskHistoryRange
         notchDisplaySource = settings.notchDisplaySource
@@ -261,8 +263,13 @@ struct SettingsView: View {
         .onChange(of: draft.subAPIMonitorEnabled) { _, enabled in
             loadBalanceSecretsIfEnabling(enabled, source: .subAPI)
         }
+        .onChange(of: draft.codexRadarUsesAuthorizedAPI) { _, enabled in
+            if enabled {
+                loadCodexRadarTokenForEditing()
+            }
+        }
         .onChange(of: selectedTab) { _, tab in
-            if tab == .codexRadar {
+            if tab == .codexRadar, draft.codexRadarUsesAuthorizedAPI {
                 loadCodexRadarTokenForEditing()
             }
         }
@@ -535,10 +542,15 @@ struct SettingsView: View {
     private var codexRadarSettingsContent: some View {
         Section("Codex Radar") {
             Toggle(isOn: $draft.codexRadarEnabled) {
-                HelpLabel(title: "启用 Codex Radar", help: "启用后详情页会出现 Codex Radar tab，默认优先读取 codexradar.com 授权 API。")
+                HelpLabel(title: "启用 Codex Radar", help: "启用后详情页会出现 Codex Radar tab，默认读取 codexradar.com 公开摘要。")
             }
 
-            Text("有本机 token 时使用 CodexRadar API；没有 token 或 API 暂不可用时读取公开摘要。每天在北京时间 08:20、14:20 自动刷新，打开 Radar 时会校验超过 30 分钟的缓存。")
+            Toggle(isOn: $draft.codexRadarUsesAuthorizedAPI) {
+                HelpLabel(title: "使用授权 API", help: "默认关闭。开启后才会读取统一凭证库中的 Radar token；关闭时始终使用公开摘要。")
+            }
+            .disabled(!draft.codexRadarEnabled)
+
+            Text("默认读取公开摘要，不访问钥匙串。仅在主动开启授权 API 后读取本机 token；API 暂不可用时仍会回退公开摘要。每天在北京时间 08:20、14:20 自动刷新。")
                 .font(MonitorTheme.Typography.settingsHelper)
                 .foregroundStyle(MonitorTheme.settingsTextSecondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -549,7 +561,11 @@ struct SettingsView: View {
                 placeholder: codexRadarTokenLoadedForEditing ? "留空时读取环境变量或降级公开 summary" : "进入此页面后加载安全凭证",
                 help: "读取顺序：CODEXRADAR_API_TOKEN 环境变量、统一凭证库、公开 summary。启动和后台刷新不会弹出钥匙串授权。"
             )
-            .disabled(!draft.codexRadarEnabled || !codexRadarTokenLoadedForEditing)
+            .disabled(
+                !draft.codexRadarEnabled
+                    || !draft.codexRadarUsesAuthorizedAPI
+                    || !codexRadarTokenLoadedForEditing
+            )
 
             if let codexRadarTokenError {
                 Text("Radar token 操作失败：\(codexRadarTokenError)")
@@ -1629,6 +1645,7 @@ struct SettingsView: View {
             || next.remoteMonitorEnabled
             || next.newAPIMonitorEnabled
             || next.subAPIMonitorEnabled
+            || next.codexRadarUsesAuthorizedAPI
         if requiresSecretLoad, !settings.loadSecretsIfNeeded() {
             return
         }
@@ -1680,6 +1697,7 @@ struct SettingsView: View {
         settings.showSparkQuota = next.showSparkQuota
         settings.showContextMetrics = next.showContextMetrics
         settings.codexRadarEnabled = next.codexRadarEnabled
+        let radarModeChanged = next.codexRadarUsesAuthorizedAPI != settings.codexRadarUsesAuthorizedAPI
         let radarTokenChanged = codexRadarTokenLoadedForEditing
             && next.codexRadarAPIToken != current.codexRadarAPIToken
         if codexRadarTokenLoadedForEditing {
@@ -1691,6 +1709,7 @@ struct SettingsView: View {
                 return
             }
         }
+        settings.codexRadarUsesAuthorizedAPI = next.codexRadarUsesAuthorizedAPI
         settings.taskHistoryRange = next.taskHistoryRange
         settings.notchDisplaySource = next.notchDisplaySource
 
@@ -1764,7 +1783,7 @@ struct SettingsView: View {
         }
         settings.enablePulse = next.enablePulse
 
-        if radarTokenChanged || current.secretStorageMode != next.secretStorageMode {
+        if radarModeChanged || radarTokenChanged || current.secretStorageMode != next.secretStorageMode {
             codexRadarViewModel.credentialsDidChange()
         }
 

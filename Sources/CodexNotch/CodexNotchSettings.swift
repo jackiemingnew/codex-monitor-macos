@@ -55,6 +55,7 @@ final class CodexNotchSettings: ObservableObject {
         static let showSparkQuota = "showSparkQuota"
         static let showContextMetrics = "showContextMetrics"
         static let codexRadarEnabled = "codexRadarEnabled"
+        static let codexRadarUsesAuthorizedAPI = "codexRadarUsesAuthorizedAPI"
         static let enablePulse = "enablePulse"
         static let overlayHorizontalPosition = "overlayHorizontalPosition"
         static let taskHistoryRange = "taskHistoryRange"
@@ -161,6 +162,12 @@ final class CodexNotchSettings: ObservableObject {
     @Published var codexRadarEnabled: Bool {
         didSet {
             defaults.set(codexRadarEnabled, forKey: Keys.codexRadarEnabled)
+        }
+    }
+
+    @Published var codexRadarUsesAuthorizedAPI: Bool {
+        didSet {
+            defaults.set(codexRadarUsesAuthorizedAPI, forKey: Keys.codexRadarUsesAuthorizedAPI)
         }
     }
 
@@ -453,6 +460,7 @@ final class CodexNotchSettings: ObservableObject {
         self.showSparkQuota = defaults.object(forKey: Keys.showSparkQuota) as? Bool ?? false
         self.showContextMetrics = defaults.object(forKey: Keys.showContextMetrics) as? Bool ?? false
         self.codexRadarEnabled = defaults.object(forKey: Keys.codexRadarEnabled) as? Bool ?? true
+        self.codexRadarUsesAuthorizedAPI = defaults.object(forKey: Keys.codexRadarUsesAuthorizedAPI) as? Bool ?? false
         self.enablePulse = defaults.object(forKey: Keys.enablePulse) as? Bool ?? true
         self.overlayHorizontalPosition = Self.clampedOverlayHorizontalPosition(
             defaults.object(forKey: Keys.overlayHorizontalPosition) as? Double ?? 0
@@ -558,6 +566,10 @@ final class CodexNotchSettings: ObservableObject {
             return CodexRadarCredential(token: token, source: .environment)
         }
 
+        guard codexRadarUsesAuthorizedAPI else {
+            return CodexRadarCredential(token: nil, source: .none)
+        }
+
         if secretsLoaded {
             return storedCodexRadarCredential(from: secretVault)
         }
@@ -598,6 +610,7 @@ final class CodexNotchSettings: ObservableObject {
             throw SecretStorageMigrationError.verificationFailed
         }
         secretVault = updatedVault
+        codexRadarUsesAuthorizedAPI = Self.trimmedRadarToken(value) != nil
         codexRadarCredentialError = cleanupLegacyCodexRadarTokenIfPresent(expectedVault: updatedVault)
     }
 
