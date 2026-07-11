@@ -64,6 +64,7 @@ struct NotchIslandView: View {
     @ObservedObject var subAPIViewModel: BalanceMonitorViewModel
     @ObservedObject var settings: CodexNotchSettings
     let onSettings: () -> Void
+    let onResetPosition: () -> Void
     @State private var pulse = false
 
     private var snapshot: UsageSnapshot {
@@ -101,6 +102,12 @@ struct NotchIslandView: View {
         .clipShape(RoundedRectangle(cornerRadius: MonitorTheme.Radius.collapsedPill, style: .continuous))
         .contentShape(RoundedRectangle(cornerRadius: MonitorTheme.Radius.collapsedPill, style: .continuous))
         .contextMenu {
+            Button {
+                onResetPosition()
+            } label: {
+                Label("返回默认位置", systemImage: "arrow.counterclockwise")
+            }
+            Divider()
             Button("设置") {
                 onSettings()
             }

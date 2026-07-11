@@ -39,6 +39,24 @@ enum IslandMetrics {
         )
     }
 
+    static func overlayHorizontalTravel(in screenFrame: CGRect) -> CGFloat {
+        max(0, (screenFrame.width - width) / 2)
+    }
+
+    static func overlayCenterX(normalizedPosition: CGFloat, in screenFrame: CGRect) -> CGFloat {
+        let position = min(1, max(-1, normalizedPosition))
+        return screenFrame.midX + position * overlayHorizontalTravel(in: screenFrame)
+    }
+
+    static func normalizedOverlayPosition(centerX: CGFloat, in screenFrame: CGRect) -> CGFloat {
+        let travel = overlayHorizontalTravel(in: screenFrame)
+        guard travel > 0 else {
+            return 0
+        }
+        let clampedCenterX = clampedOverlayCenterX(centerX, in: screenFrame)
+        return min(1, max(-1, (clampedCenterX - screenFrame.midX) / travel))
+    }
+
     static func detailHeight(taskRows: Int, showsPeriodUsage: Bool, showsSparkQuota: Bool = false) -> CGFloat {
         let rows = max(1, min(visibleTaskRows, taskRows))
         let sparkHeight: CGFloat = showsSparkQuota ? 8 + detailSparkHeight : 0
@@ -85,5 +103,25 @@ enum IslandMetrics {
             + cpaUsageHeight
             + detailBottomPadding
         return max(minimumDetailHeight, ceil(contentHeight))
+    }
+}
+
+struct OverlayDragSession {
+    private var anchorPointerX: CGFloat
+    private var anchorCenterX: CGFloat
+
+    init(pointerX: CGFloat, centerX: CGFloat) {
+        anchorPointerX = pointerX
+        anchorCenterX = centerX
+    }
+
+    mutating func update(pointerX: CGFloat, in screenFrame: CGRect) -> CGFloat {
+        let proposedCenterX = anchorCenterX + pointerX - anchorPointerX
+        let centerX = IslandMetrics.clampedOverlayCenterX(proposedCenterX, in: screenFrame)
+        if centerX != proposedCenterX {
+            anchorPointerX = pointerX
+            anchorCenterX = centerX
+        }
+        return centerX
     }
 }
