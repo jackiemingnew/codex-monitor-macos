@@ -17,6 +17,10 @@ trap cleanup EXIT
 
 cd "$ROOT_DIR"
 
+bash -n \
+  "$ROOT_DIR/scripts/build-app.sh" \
+  "$ROOT_DIR/scripts/notarize-release.sh"
+
 if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
   echo "Tracked source files must be clean before clean-package verification" >&2
   git status --short --untracked-files=no >&2
@@ -45,10 +49,10 @@ unset CODEXRADAR_API_TOKEN
 "$ROOT_DIR/scripts/run-regression-tests.sh"
 "$ROOT_DIR/scripts/build-app.sh"
 
-expected_version="$(sed -n 's/^APP_VERSION="\([^"]*\)"/\1/p' "$ROOT_DIR/scripts/build-app.sh")"
+expected_version="$(tr -d '[:space:]' < "$ROOT_DIR/VERSION")"
 expected_bundle_id="$(sed -n 's/^BUNDLE_ID="\([^"]*\)"/\1/p' "$ROOT_DIR/scripts/build-app.sh")"
 if [[ -z "$expected_version" || -z "$expected_bundle_id" ]]; then
-  echo "Unable to read package metadata from scripts/build-app.sh" >&2
+  echo "Unable to read package metadata from VERSION or scripts/build-app.sh" >&2
   exit 1
 fi
 
