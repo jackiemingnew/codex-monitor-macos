@@ -1,24 +1,38 @@
 import Foundation
+import LocalAuthentication
 import Security
 
 enum KeychainStore {
     enum Error: Swift.Error {
+        case interactionRequired
         case unhandledStatus(OSStatus)
     }
 
-    static func read(service: String, account: String) throws -> String {
-        let query: [String: Any] = [
+    static func read(
+        service: String,
+        account: String,
+        accessMode: SecretStoreAccessMode = .interactive
+    ) throws -> String {
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
+        if accessMode == .nonInteractive {
+            let context = LAContext()
+            context.interactionNotAllowed = true
+            query[kSecUseAuthenticationContext as String] = context
+        }
 
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         if status == errSecItemNotFound {
             return ""
+        }
+        if status == errSecInteractionNotAllowed {
+            throw Error.interactionRequired
         }
         guard status == errSecSuccess else {
             throw Error.unhandledStatus(status)
@@ -81,6 +95,8 @@ enum KeychainStore {
 extension KeychainStore.Error: LocalizedError {
     var errorDescription: String? {
         switch self {
+        case .interactionRequired:
+            return "Keychain access requires user authorization."
         case .unhandledStatus(let status):
             let message = SecCopyErrorMessageString(status, nil) as String?
             return message ?? "Keychain error \(status)"

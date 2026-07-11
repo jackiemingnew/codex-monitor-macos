@@ -160,7 +160,7 @@ private struct SettingsDraft: Equatable {
         showSparkQuota = settings.showSparkQuota
         showContextMetrics = settings.showContextMetrics
         codexRadarEnabled = settings.codexRadarEnabled
-        codexRadarAPIToken = CodexRadarTokenProvider.loadSavedToken()
+        codexRadarAPIToken = settings.secretsAreLoaded ? settings.codexRadarAPIToken : ""
         taskHistoryRange = settings.taskHistoryRange
         notchDisplaySource = settings.notchDisplaySource
         remoteMonitorEnabled = settings.remoteMonitorEnabled
@@ -226,6 +226,7 @@ struct SettingsView: View {
     @State private var accountEditorDraft = BalanceAccountConfiguration(source: .newAPI)
     @State private var deleteCandidate: AccountDeleteCandidate?
     @State private var codexRadarTokenError: String?
+    @State private var codexRadarTokenLoadedForEditing = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -259,6 +260,11 @@ struct SettingsView: View {
         }
         .onChange(of: draft.subAPIMonitorEnabled) { _, enabled in
             loadBalanceSecretsIfEnabling(enabled, source: .subAPI)
+        }
+        .onChange(of: selectedTab) { _, tab in
+            if tab == .codexRadar {
+                loadCodexRadarTokenForEditing()
+            }
         }
         .sheet(item: $accountEditorContext, onDismiss: resetAccountEditorState) { context in
             accountEditorSheet(source: context.source)
@@ -540,13 +546,19 @@ struct SettingsView: View {
             labeledSecureField(
                 "API Token",
                 text: $draft.codexRadarAPIToken,
-                placeholder: "留空时读取环境变量或降级公开 summary",
-                help: "读取顺序：CODEXRADAR_API_TOKEN 环境变量、本机 token 文件、公开 summary 降级。本机 token 只保存到当前用户的 Application Support 目录。"
+                placeholder: codexRadarTokenLoadedForEditing ? "留空时读取环境变量或降级公开 summary" : "进入此页面后加载安全凭证",
+                help: "读取顺序：CODEXRADAR_API_TOKEN 环境变量、统一凭证库、公开 summary。启动和后台刷新不会弹出钥匙串授权。"
             )
-            .disabled(!draft.codexRadarEnabled)
+            .disabled(!draft.codexRadarEnabled || !codexRadarTokenLoadedForEditing)
 
             if let codexRadarTokenError {
-                Text("Radar token 保存失败：\(codexRadarTokenError)")
+                Text("Radar token 操作失败：\(codexRadarTokenError)")
+                    .font(MonitorTheme.Typography.settingsHelper)
+                    .foregroundStyle(MonitorTheme.settingsError)
+            }
+
+            if let error = settings.codexRadarCredentialError {
+                Text(error)
                     .font(MonitorTheme.Typography.settingsHelper)
                     .foregroundStyle(MonitorTheme.settingsError)
             }
@@ -1466,18 +1478,27 @@ struct SettingsView: View {
         case .loading:
             return "读取中"
         case .ready:
-            let source = codexRadarViewModel.snapshot.fallbackReason == nil
-                ? codexRadarViewModel.snapshot.dataSource.displayLabel
-                : "Public（API 回退）"
+            let source = codexRadarSourceText
             return codexRadarViewModel.snapshot.models.isEmpty
                 ? "\(source) 无模型数据"
                 : "\(source) 已更新"
         case .stale:
-            return codexRadarViewModel.snapshot.fallbackReason == nil
-                ? "数据可能过期"
-                : "Public（API 回退）· 可能过期"
+            return "\(codexRadarSourceText) · 可能过期"
         case .error:
             return codexRadarViewModel.snapshot.message ?? "读取失败"
+        }
+    }
+
+    private var codexRadarSourceText: String {
+        switch codexRadarViewModel.snapshot.fallbackReason {
+        case .invalidToken, .apiUnavailable:
+            "Public（API 回退）"
+        case .credentialAuthorizationRequired:
+            "Public（凭证待授权）"
+        case .credentialUnavailable:
+            "Public（凭证不可用）"
+        case nil:
+            codexRadarViewModel.snapshot.dataSource.displayLabel
         }
     }
 
@@ -1529,6 +1550,21 @@ struct SettingsView: View {
             return
         }
         draft.cliproxyManagementKey = settings.cliproxyManagementKey
+    }
+
+    private func loadCodexRadarTokenForEditing() {
+        guard !codexRadarTokenLoadedForEditing else {
+            return
+        }
+        guard settings.loadSecretsIfNeeded() else {
+            codexRadarTokenError = settings.codexRadarCredentialError
+                ?? settings.secretStorageError
+                ?? "安全凭证加载失败"
+            return
+        }
+        draft.codexRadarAPIToken = settings.codexRadarAPIToken
+        codexRadarTokenLoadedForEditing = true
+        codexRadarTokenError = nil
     }
 
     private func loadBalanceSecretsIfEnabling(_ enabled: Bool, source: BalanceMonitorSource) {
@@ -1644,12 +1680,16 @@ struct SettingsView: View {
         settings.showSparkQuota = next.showSparkQuota
         settings.showContextMetrics = next.showContextMetrics
         settings.codexRadarEnabled = next.codexRadarEnabled
-        do {
-            try CodexRadarTokenProvider.saveToken(next.codexRadarAPIToken)
-            codexRadarTokenError = nil
-        } catch {
-            codexRadarTokenError = error.localizedDescription
-            return
+        let radarTokenChanged = codexRadarTokenLoadedForEditing
+            && next.codexRadarAPIToken != current.codexRadarAPIToken
+        if codexRadarTokenLoadedForEditing {
+            do {
+                try settings.setCodexRadarAPIToken(next.codexRadarAPIToken)
+                codexRadarTokenError = nil
+            } catch {
+                codexRadarTokenError = error.localizedDescription
+                return
+            }
         }
         settings.taskHistoryRange = next.taskHistoryRange
         settings.notchDisplaySource = next.notchDisplaySource
@@ -1723,6 +1763,10 @@ struct SettingsView: View {
             settings.setLaunchAtLoginEnabled(next.launchAtLoginEnabled)
         }
         settings.enablePulse = next.enablePulse
+
+        if radarTokenChanged || current.secretStorageMode != next.secretStorageMode {
+            codexRadarViewModel.credentialsDidChange()
+        }
 
         selectedPreset = .matching(next)
         reloadDraft()

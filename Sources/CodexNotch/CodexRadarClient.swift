@@ -1,4 +1,3 @@
-import Darwin
 import Foundation
 
 typealias CodexRadarRequestExecutor = @Sendable (URLRequest) async throws -> (Data, URLResponse)
@@ -9,28 +8,25 @@ struct CodexRadarClient: Sendable {
 
     let publicEndpoint: URL
     let authorizedEndpoint: URL
-    let tokenProvider: CodexRadarTokenProvider
     let timeout: TimeInterval
     let requestExecutor: CodexRadarRequestExecutor?
 
     init(
         publicEndpoint: URL = Self.publicSummaryURL,
         authorizedEndpoint: URL = Self.authorizedCurrentURL,
-        tokenProvider: CodexRadarTokenProvider = CodexRadarTokenProvider(),
         timeout: TimeInterval = 8,
         requestExecutor: CodexRadarRequestExecutor? = nil
     ) {
         self.publicEndpoint = publicEndpoint
         self.authorizedEndpoint = authorizedEndpoint
-        self.tokenProvider = tokenProvider
         self.timeout = timeout
         self.requestExecutor = requestExecutor
     }
 
-    func fetchSummary() async throws -> CodexRadarFetchResult {
-        if let token = tokenProvider.token() {
+    func fetchSummary(bearerToken: String?) async throws -> CodexRadarFetchResult {
+        if let bearerToken {
             do {
-                let data = try await fetch(endpoint: authorizedEndpoint, source: .authorizedAPI, bearerToken: token)
+                let data = try await fetch(endpoint: authorizedEndpoint, source: .authorizedAPI, bearerToken: bearerToken)
                 return CodexRadarFetchResult(data: data, source: .authorizedAPI, fallbackReason: nil)
             } catch {
                 guard let reason = Self.fallbackReason(for: error) else {
@@ -159,6 +155,8 @@ struct CodexRadarFetchResult: Sendable {
 enum CodexRadarFallbackReason: String, Codable, Equatable, Sendable {
     case invalidToken
     case apiUnavailable
+    case credentialAuthorizationRequired
+    case credentialUnavailable
 
     var displayMessage: String {
         switch self {
@@ -166,67 +164,11 @@ enum CodexRadarFallbackReason: String, Codable, Equatable, Sendable {
             "API Token 无效，已使用公开摘要"
         case .apiUnavailable:
             "API 暂不可用，已使用公开摘要"
+        case .credentialAuthorizationRequired:
+            "Radar 凭证待授权，本次使用公开摘要"
+        case .credentialUnavailable:
+            "Radar 凭证不可用，本次使用公开摘要"
         }
-    }
-}
-
-struct CodexRadarTokenProvider: Sendable {
-    static let environmentKey = "CODEXRADAR_API_TOKEN"
-
-    let environment: [String: String]
-    let tokenFileURL: URL
-
-    init(
-        environment: [String: String] = ProcessInfo.processInfo.environment,
-        tokenFileURL: URL = Self.defaultTokenFileURL()
-    ) {
-        self.environment = environment
-        self.tokenFileURL = tokenFileURL
-    }
-
-    func token() -> String? {
-        if let environmentToken = Self.trimmedToken(environment[Self.environmentKey]) {
-            return environmentToken
-        }
-        return Self.trimmedToken(Self.loadSavedToken(from: tokenFileURL))
-    }
-
-    static func defaultTokenFileURL() -> URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
-        return base
-            .appendingPathComponent("CodexNotch", isDirectory: true)
-            .appendingPathComponent("CodexRadar", isDirectory: true)
-            .appendingPathComponent("token")
-    }
-
-    static func loadSavedToken(from tokenFileURL: URL = defaultTokenFileURL()) -> String {
-        guard let data = try? Data(contentsOf: tokenFileURL) else {
-            return ""
-        }
-        return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    static func saveToken(_ token: String, to tokenFileURL: URL = defaultTokenFileURL()) throws {
-        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        let directory = tokenFileURL.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        chmod(directory.path, S_IRWXU)
-
-        guard !trimmed.isEmpty else {
-            if FileManager.default.fileExists(atPath: tokenFileURL.path) {
-                try FileManager.default.removeItem(at: tokenFileURL)
-            }
-            return
-        }
-
-        try Data(trimmed.utf8).write(to: tokenFileURL, options: .atomic)
-        chmod(tokenFileURL.path, S_IRUSR | S_IWUSR)
-    }
-
-    private static func trimmedToken(_ value: String?) -> String? {
-        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return trimmed.isEmpty ? nil : trimmed
     }
 }
 
