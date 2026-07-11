@@ -5888,6 +5888,68 @@ runner.check(
     "unchanged directory state should reuse the refreshed snapshot inside 30 seconds"
 )
 
+let archivedSubagentCacheRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("CodexNotchArchivedSubagentCache-\(UUID().uuidString)")
+try FileManager.default.createDirectory(at: archivedSubagentCacheRoot, withIntermediateDirectories: true)
+defer {
+    try? FileManager.default.removeItem(at: archivedSubagentCacheRoot)
+}
+let archivedSubagentState = archivedSubagentCacheRoot.appendingPathComponent("state_5.sqlite").path
+let archivedSubagentLogs = archivedSubagentCacheRoot.appendingPathComponent("logs_2.sqlite").path
+let archivedSubagentSessionID = "019e073a-c032-74e2-966e-b85ede0c9cf4"
+let archivedSubagentParentID = "019e073a-c032-74e2-966e-b85ede0c9cf5"
+let archivedSubagentDirectory = archivedSubagentCacheRoot.appendingPathComponent("archived_sessions/2026/07/12", isDirectory: true)
+try FileManager.default.createDirectory(at: archivedSubagentDirectory, withIntermediateDirectories: true)
+let archivedSubagentPath = archivedSubagentDirectory.appendingPathComponent("rollout-2026-07-12T00-00-02-\(archivedSubagentSessionID).jsonl")
+try """
+{"timestamp":"\(timestamp)","type":"session_meta","payload":{"thread_source":"subagent","parent_thread_id":"\(archivedSubagentParentID)"}}
+""".write(to: archivedSubagentPath, atomically: true, encoding: .utf8)
+try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: archivedSubagentPath.path)
+_ = try Shell.run("/usr/bin/sqlite3", [
+    archivedSubagentState,
+    """
+    create table threads(
+      id text,
+      title text,
+      tokens_used integer,
+      model text,
+      reasoning_effort text,
+      rollout_path text,
+      created_at integer,
+      updated_at integer,
+      recency_at integer,
+      archived integer default 0
+    );
+    insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, created_at, updated_at, recency_at, archived)
+    values('\(archivedSubagentSessionID)', 'Archived child', 1, 'gpt-5.5', 'high', '\(archivedSubagentPath.path)', \(Int(now.timeIntervalSince1970)), \(Int(now.timeIntervalSince1970)), \(Int(now.timeIntervalSince1970)), 1);
+    """
+])
+_ = try Shell.run("/usr/bin/sqlite3", [
+    archivedSubagentLogs,
+    "create table logs(thread_id text, ts integer, target text, feedback_log_body text);"
+])
+let archivedSubagentCacheStore = CodexUsageStore(codexDirectory: archivedSubagentCacheRoot, ripgrepCandidates: [])
+_ = archivedSubagentCacheStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now
+)
+let archivedCacheStatsAfterFirstRefresh = archivedSubagentCacheStore.sessionFileCacheStats()
+_ = archivedSubagentCacheStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now.addingTimeInterval(1)
+)
+let archivedCacheStatsAfterSecondRefresh = archivedSubagentCacheStore.sessionFileCacheStats()
+runner.check(
+    archivedCacheStatsAfterSecondRefresh.prefixScans == archivedCacheStatsAfterFirstRefresh.prefixScans,
+    "filtered archived subagent files should remain cached across unchanged full refreshes"
+)
+
 if runner.failures > 0 {
     FileHandle.standardError.write(Data("\(runner.failures) regression test(s) failed\n".utf8))
     exit(1)

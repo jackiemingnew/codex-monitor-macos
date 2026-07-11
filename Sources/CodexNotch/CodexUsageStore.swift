@@ -358,6 +358,7 @@ final class CodexUsageStore: @unchecked Sendable {
             )
             let retainedSessionPaths = Set(
                 recentTaskSessionPaths(limit: max(TaskHistoryRange.month.queryLimit * 3, 80))
+                    + recentSessionPaths(limit: max(TaskHistoryRange.month.queryLimit * 3, 80))
                     + displayThreads.map(\.rolloutPath)
                     + usageDeltaThreads.map(\.rolloutPath)
                     + rateLimitPaths
@@ -754,12 +755,13 @@ final class CodexUsageStore: @unchecked Sendable {
     }
 
     private func trimSessionFileCaches(retaining paths: Set<String>) {
+        let canonicalPaths = Set(paths.map { fileSignature($0).path })
         cacheLock.lock()
-        sessionTokenTotalCache = sessionTokenTotalCache.filter { paths.contains($0.key) }
-        sessionContextUsageCache = sessionContextUsageCache.filter { paths.contains($0.key) }
-        sessionPrefixFactsCache = sessionPrefixFactsCache.filter { paths.contains($0.key) }
-        sessionRateLimitCache = sessionRateLimitCache.filter { paths.contains($0.key) }
-        sessionActivityCache = sessionActivityCache.filter { paths.contains($0.key) }
+        sessionTokenTotalCache = sessionTokenTotalCache.filter { canonicalPaths.contains($0.key) }
+        sessionContextUsageCache = sessionContextUsageCache.filter { canonicalPaths.contains($0.key) }
+        sessionPrefixFactsCache = sessionPrefixFactsCache.filter { canonicalPaths.contains($0.key) }
+        sessionRateLimitCache = sessionRateLimitCache.filter { canonicalPaths.contains($0.key) }
+        sessionActivityCache = sessionActivityCache.filter { canonicalPaths.contains($0.key) }
         cacheLock.unlock()
     }
 
@@ -2452,8 +2454,9 @@ final class CodexUsageStore: @unchecked Sendable {
         }
 
         let signature = fileSignature(path)
+        let cacheKey = signature.path
         cacheLock.lock()
-        let cached = sessionActivityCache[path]
+        let cached = sessionActivityCache[cacheKey]
         cacheLock.unlock()
 
         let facts: SessionActivityCache
@@ -2488,7 +2491,7 @@ final class CodexUsageStore: @unchecked Sendable {
                 readSucceeded: text != nil
             )
             cacheLock.lock()
-            sessionActivityCache[path] = facts
+            sessionActivityCache[cacheKey] = facts
             sessionFileCacheCounters.activityScans += 1
             cacheLock.unlock()
         }
@@ -2588,9 +2591,10 @@ final class CodexUsageStore: @unchecked Sendable {
         guard signature.exists else {
             return empty
         }
+        let cacheKey = signature.path
 
         cacheLock.lock()
-        let cached = sessionPrefixFactsCache[path]
+        let cached = sessionPrefixFactsCache[cacheKey]
         cacheLock.unlock()
         if let cached, cached.signature == signature {
             return cached.facts
@@ -2610,7 +2614,7 @@ final class CodexUsageStore: @unchecked Sendable {
                 facts: cached.facts
             )
             cacheLock.lock()
-            sessionPrefixFactsCache[path] = retained
+            sessionPrefixFactsCache[cacheKey] = retained
             cacheLock.unlock()
             return retained.facts
         }
@@ -2629,7 +2633,7 @@ final class CodexUsageStore: @unchecked Sendable {
             )
             : parsed
         cacheLock.lock()
-        sessionPrefixFactsCache[path] = SessionPrefixFactsCache(
+        sessionPrefixFactsCache[cacheKey] = SessionPrefixFactsCache(
             signature: signature,
             scannedBytes: min(signature.size, scanLimit),
             facts: facts
@@ -2715,15 +2719,16 @@ final class CodexUsageStore: @unchecked Sendable {
         guard signature.exists else {
             return nil
         }
+        let cacheKey = signature.path
 
         cacheLock.lock()
-        if let cached = sessionTokenTotalCache[path],
+        if let cached = sessionTokenTotalCache[cacheKey],
            cached.signature == signature {
             cacheLock.unlock()
             return cached.foundTokenEvent ? cached.tokens : nil
         }
 
-        let cached = sessionTokenTotalCache[path]
+        let cached = sessionTokenTotalCache[cacheKey]
         cacheLock.unlock()
 
         let scanStart: UInt64
@@ -2758,7 +2763,7 @@ final class CodexUsageStore: @unchecked Sendable {
         }
 
         cacheLock.lock()
-        sessionTokenTotalCache[path] = SessionTokenTotalCache(
+        sessionTokenTotalCache[cacheKey] = SessionTokenTotalCache(
             signature: signature,
             bytesScanned: scan.bytesScanned,
             tokens: scan.tokens,
@@ -3929,9 +3934,10 @@ final class CodexUsageStore: @unchecked Sendable {
         guard signature.exists else {
             return nil
         }
+        let cacheKey = signature.path
 
         cacheLock.lock()
-        let cached = sessionRateLimitCache[rolloutPath]
+        let cached = sessionRateLimitCache[cacheKey]
         cacheLock.unlock()
         if let cached, cached.signature == signature {
             return cached.snapshot
@@ -3939,7 +3945,7 @@ final class CodexUsageStore: @unchecked Sendable {
 
         let snapshot = scanRateLimitSnapshot(from: rolloutPath)
         cacheLock.lock()
-        sessionRateLimitCache[rolloutPath] = SessionRateLimitCache(
+        sessionRateLimitCache[cacheKey] = SessionRateLimitCache(
             signature: signature,
             snapshot: snapshot
         )
@@ -4055,8 +4061,9 @@ final class CodexUsageStore: @unchecked Sendable {
         guard signature.exists else {
             return (nil, false)
         }
+        let cacheKey = signature.path
         cacheLock.lock()
-        let cached = sessionContextUsageCache[rolloutPath]
+        let cached = sessionContextUsageCache[cacheKey]
         cacheLock.unlock()
 
         if let cached, cached.signature == signature {
@@ -4065,7 +4072,7 @@ final class CodexUsageStore: @unchecked Sendable {
 
         let usage = scanContextUsage(from: rolloutPath)
         cacheLock.lock()
-        sessionContextUsageCache[rolloutPath] = SessionContextUsageCache(signature: signature, usage: usage)
+        sessionContextUsageCache[cacheKey] = SessionContextUsageCache(signature: signature, usage: usage)
         cacheLock.unlock()
         return (usage, true)
     }
@@ -4210,13 +4217,14 @@ final class CodexUsageStore: @unchecked Sendable {
     }
 
     private func fileSignature(_ path: String) -> FileSignature {
+        let canonicalPath = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
         var fileInfo = stat()
-        let status = path.withCString { pointer in
+        let status = canonicalPath.withCString { pointer in
             Darwin.lstat(pointer, &fileInfo)
         }
         guard status == 0 else {
             return FileSignature(
-                path: path,
+                path: canonicalPath,
                 exists: false,
                 inode: 0,
                 size: 0,
@@ -4230,12 +4238,12 @@ final class CodexUsageStore: @unchecked Sendable {
             + Int64(fileInfo.st_mtimespec.tv_nsec)
         let isDirectory = (fileInfo.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR)
         return FileSignature(
-            path: path,
+            path: canonicalPath,
             exists: true,
             inode: UInt64(fileInfo.st_ino),
             size: size,
             modifiedAtNanoseconds: modifiedAtNanoseconds,
-            directoryFingerprint: isDirectory ? directoryFingerprint(path) : 0
+            directoryFingerprint: isDirectory ? directoryFingerprint(canonicalPath) : 0
         )
     }
 
