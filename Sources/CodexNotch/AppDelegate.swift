@@ -280,6 +280,9 @@ private final class CollapsedHostingView<Content: View>: NSHostingView<Content>,
     var onDragBegan: ((CGFloat) -> Void)?
     var onDragChanged: ((CGFloat) -> Void)?
     var onDragEnded: ((CGFloat) -> Void)?
+    var onResetPosition: (() -> Void)?
+    var onSettings: (() -> Void)?
+    var onRefresh: (() -> Void)?
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
         true
@@ -308,6 +311,49 @@ private final class CollapsedHostingView<Content: View>: NSHostingView<Content>,
     override func resetCursorRects() {
         super.resetCursorRects()
         addCursorRect(bounds, cursor: .openHand)
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        NSMenu.popUpContextMenu(makeContextMenu(), with: event, for: self)
+    }
+
+    private func makeContextMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        menu.addItem(menuItem(
+            title: "返回默认位置",
+            systemImage: "arrow.counterclockwise",
+            action: #selector(resetPosition)
+        ))
+        menu.addItem(.separator())
+        menu.addItem(menuItem(title: "设置", systemImage: "gearshape", action: #selector(openSettings)))
+        menu.addItem(menuItem(title: "刷新", systemImage: "arrow.clockwise", action: #selector(refresh)))
+        menu.addItem(.separator())
+        menu.addItem(menuItem(title: "退出 codex监测", systemImage: "power", action: #selector(quit)))
+        return menu
+    }
+
+    private func menuItem(title: String, systemImage: String, action: Selector) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        item.image = NSImage(systemSymbolName: systemImage, accessibilityDescription: title)
+        return item
+    }
+
+    @objc private func resetPosition() {
+        onResetPosition?()
+    }
+
+    @objc private func openSettings() {
+        onSettings?()
+    }
+
+    @objc private func refresh() {
+        onRefresh?()
+    }
+
+    @objc private func quit() {
+        NSApp.terminate(nil)
     }
 
     @objc private func handleClickGesture(_ gesture: NSClickGestureRecognizer) {
@@ -407,13 +453,7 @@ final class NotchOverlayController {
             remoteViewModel: remoteViewModel,
             newAPIViewModel: newAPIViewModel,
             subAPIViewModel: subAPIViewModel,
-            settings: settings,
-            onSettings: { [weak self] in
-                self?.showSettings()
-            },
-            onResetPosition: { [weak self] in
-                self?.resetOverlayPosition()
-            }
+            settings: settings
         )
         let hostingView = CollapsedHostingView(rootView: view)
         hostingView.onClick = { [weak self] in
@@ -432,6 +472,15 @@ final class NotchOverlayController {
         }
         hostingView.onDragEnded = { [weak self] pointerX in
             self?.moveOverlay(pointerX: pointerX, ended: true)
+        }
+        hostingView.onResetPosition = { [weak self] in
+            self?.resetOverlayPosition()
+        }
+        hostingView.onSettings = { [weak self] in
+            self?.showSettings()
+        }
+        hostingView.onRefresh = { [weak self] in
+            self?.viewModel.refreshAll()
         }
         hostingView.configureInteractions()
         hostingView.frame = NSRect(
