@@ -5165,6 +5165,34 @@ let deltaMetadataTableCount = try Shell.sqliteJSON(
     readOnly: true
 ).first?.count ?? 0
 runner.check(deltaMetadataTableCount == 1, "delta cache should persist upgrade and maintenance metadata")
+let expiredMaintenanceThreadID = "delta-maintenance-expired"
+let expiredMaintenanceObservedMs = observedNowMs - Int64(32 * 24 * 60 * 60 * 1_000)
+_ = try Shell.run("/usr/bin/sqlite3", [
+    deltaDatabase,
+    "insert into token_snapshot_history(thread_id, tokens_used, updated_at_ms, observed_at_ms) values('\(expiredMaintenanceThreadID)', 1, \(expiredMaintenanceObservedMs), \(expiredMaintenanceObservedMs));"
+])
+runner.check(
+    localStore.recordDeltaSnapshot(now: now.addingTimeInterval(60 * 60), range: .month),
+    "delta recording inside the maintenance interval should succeed"
+)
+let expiredRowsBeforeDailyPrune = try Shell.sqliteJSON(
+    database: deltaDatabase,
+    query: "select count(*) as count from token_snapshot_history where thread_id = '\(expiredMaintenanceThreadID)';",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? -1
+runner.check(expiredRowsBeforeDailyPrune == 1, "retention cleanup should not rescan history more than once per day")
+runner.check(
+    localStore.recordDeltaSnapshot(now: now.addingTimeInterval(25 * 60 * 60), range: .month),
+    "delta recording after the maintenance interval should succeed"
+)
+let expiredRowsAfterDailyPrune = try Shell.sqliteJSON(
+    database: deltaDatabase,
+    query: "select count(*) as count from token_snapshot_history where thread_id = '\(expiredMaintenanceThreadID)';",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? -1
+runner.check(expiredRowsAfterDailyPrune == 0, "retention cleanup should prune expired history after one day")
 
 let nodeCompatibleData = SnapshotOutputFormatter.nodeCompatibleJSONData(
     for: localExportSnapshot,
@@ -5365,6 +5393,25 @@ let lateLegacyImportRows = try Shell.sqliteJSON(
     readOnly: true
 ).first?.count ?? -1
 runner.check(lateLegacyImportRows == 0, "legacy delta history should be imported only once after the completion marker is stored")
+let migratedRowsBeforeTokenChange = migratedHistoryRows
+_ = try Shell.run("/usr/bin/sqlite3", [
+    legacyStateDatabase,
+    "update threads set tokens_used = 2100, updated_at = \(Int(now.timeIntervalSince1970) + 2) where id = '\(legacySessionID)';"
+])
+runner.check(
+    legacyStore.recordDeltaSnapshot(now: now.addingTimeInterval(2), range: .day),
+    "a real token change should record a new delta history point"
+)
+let migratedRowsAfterTokenChange = try Shell.sqliteJSON(
+    database: migratedDeltaDatabase,
+    query: "select count(*) as count from token_snapshot_history where thread_id = '\(legacySessionID)';",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? 0
+runner.check(
+    migratedRowsAfterTokenChange == migratedRowsBeforeTokenChange + 1,
+    "one real token change should append exactly one delta history row"
+)
 
 let missingLegacyTablesRoot = URL(fileURLWithPath: NSTemporaryDirectory())
     .appendingPathComponent("CodexNotchMissingLegacyTables-\(UUID().uuidString)")
@@ -5415,6 +5462,88 @@ let missingLegacyStore = CodexUsageStore(
     ripgrepCandidates: []
 )
 runner.check(missingLegacyStore.recordDeltaSnapshot(now: now, range: .day), "legacy cache without token tables should not block Swift delta recording")
+
+let retryLegacyRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("CodexNotchRetryLegacyMigration-\(UUID().uuidString)")
+try FileManager.default.createDirectory(at: retryLegacyRoot, withIntermediateDirectories: true)
+defer {
+    try? FileManager.default.removeItem(at: retryLegacyRoot)
+}
+let retryLegacySessionID = "019e073a-c032-74e2-966e-b85ede0c9cf1"
+let retryLegacyState = retryLegacyRoot.appendingPathComponent("state_5.sqlite").path
+let retryLegacyLogs = retryLegacyRoot.appendingPathComponent("logs_2.sqlite").path
+_ = try Shell.run("/usr/bin/sqlite3", [
+    retryLegacyState,
+    """
+    create table threads(
+      id text,
+      title text,
+      tokens_used integer,
+      model text,
+      reasoning_effort text,
+      rollout_path text,
+      created_at integer,
+      updated_at integer,
+      archived integer default 0
+    );
+    insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, created_at, updated_at, archived)
+    values('\(retryLegacySessionID)', 'Retry legacy migration', 100, 'gpt-5.5', 'high', '', \(Int(now.timeIntervalSince1970)), \(Int(now.timeIntervalSince1970)), 0);
+    """
+])
+_ = try Shell.run("/usr/bin/sqlite3", [
+    retryLegacyLogs,
+    "create table logs(thread_id text, ts integer, target text, feedback_log_body text);"
+])
+let retryLegacyDirectory = retryLegacyRoot.appendingPathComponent("context-guard", isDirectory: true)
+try FileManager.default.createDirectory(at: retryLegacyDirectory, withIntermediateDirectories: true)
+let retryLegacyDatabase = retryLegacyDirectory.appendingPathComponent("usage-deltas.sqlite").path
+_ = try Shell.run("/usr/bin/sqlite3", [
+    retryLegacyDatabase,
+    "create table token_snapshot_history(thread_id text primary key);"
+])
+let retryMigratedDatabase = retryLegacyRoot.appendingPathComponent("SwiftCache/usage-deltas.sqlite").path
+let retryLegacyStore = CodexUsageStore(
+    codexDirectory: retryLegacyRoot,
+    deltaDatabase: retryMigratedDatabase,
+    ripgrepCandidates: []
+)
+runner.check(
+    !retryLegacyStore.recordDeltaSnapshot(now: now, range: .day),
+    "a malformed legacy token table should fail without marking migration complete"
+)
+let failedLegacyMarkerRows = (try? Shell.sqliteJSON(
+    database: retryMigratedDatabase,
+    query: "select count(*) as count from delta_cache_metadata where key = 'legacy_import_completed';",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count) ?? -1
+runner.check(failedLegacyMarkerRows == 0, "failed legacy migration should leave its completion marker unset")
+_ = try Shell.run("/usr/bin/sqlite3", [
+    retryLegacyDatabase,
+    """
+    drop table token_snapshot_history;
+    create table token_snapshot_history (
+      thread_id text not null,
+      tokens_used integer not null,
+      updated_at_ms integer not null,
+      observed_at_ms integer not null,
+      primary key(thread_id, observed_at_ms)
+    );
+    insert into token_snapshot_history(thread_id, tokens_used, updated_at_ms, observed_at_ms)
+    values('\(retryLegacySessionID)', 50, \(legacyBaselineMs), \(legacyBaselineMs));
+    """
+])
+runner.check(
+    retryLegacyStore.recordDeltaSnapshot(now: now.addingTimeInterval(1), range: .day),
+    "legacy migration should retry after the source table is repaired"
+)
+let retriedLegacyRows = try Shell.sqliteJSON(
+    database: retryMigratedDatabase,
+    query: "select count(*) as count from token_snapshot_history where thread_id = '\(retryLegacySessionID)' and tokens_used = 50;",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? 0
+runner.check(retriedLegacyRows == 1, "retried legacy migration should import the repaired history exactly once")
 
 let largeUsageRoot = URL(fileURLWithPath: NSTemporaryDirectory())
     .appendingPathComponent("CodexNotchLargeUsage-\(UUID().uuidString)")
