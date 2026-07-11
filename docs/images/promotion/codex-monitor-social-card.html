@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Codex Monitor Social Card</title>
+  <style>
+    * { box-sizing: border-box; }
+
+    html,
+    body {
+      width: 1200px;
+      height: 630px;
+      margin: 0;
+      overflow: hidden;
+      background: #07090a;
+      color: rgba(255, 255, 255, 0.94);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", sans-serif;
+    }
+
+    .card {
+      position: relative;
+      width: 1200px;
+      height: 630px;
+      overflow: hidden;
+      background: #090c0d;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+    }
+
+    .top-line {
+      position: absolute;
+      inset: 0 0 auto;
+      height: 8px;
+      background: #2f88bc;
+    }
+
+    .copy {
+      position: absolute;
+      z-index: 4;
+      top: 65px;
+      left: 64px;
+      width: 468px;
+    }
+
+    .identity {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 34px;
+    }
+
+    .app-icon {
+      width: 52px;
+      height: 52px;
+      border-radius: 12px;
+      box-shadow: 0 8px 22px rgba(0, 0, 0, 0.4);
+    }
+
+    .eyebrow {
+      color: rgba(255, 255, 255, 0.58);
+      font-size: 14px;
+      font-weight: 650;
+      line-height: 1.35;
+      letter-spacing: 0;
+    }
+
+    h1 {
+      margin: 0 0 20px;
+      font-size: 58px;
+      font-weight: 760;
+      line-height: 1.02;
+      letter-spacing: 0;
+    }
+
+    .tagline {
+      width: 450px;
+      margin: 0 0 17px;
+      font-size: 28px;
+      font-weight: 700;
+      line-height: 1.38;
+      letter-spacing: 0;
+    }
+
+    .description {
+      width: 420px;
+      margin: 0 0 30px;
+      color: rgba(255, 255, 255, 0.62);
+      font-size: 16px;
+      font-weight: 520;
+      line-height: 1.55;
+      letter-spacing: 0;
+    }
+
+    .feature-list {
+      display: grid;
+      gap: 12px;
+      margin-bottom: 31px;
+    }
+
+    .feature {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      color: rgba(255, 255, 255, 0.82);
+      font-size: 16px;
+      font-weight: 640;
+      letter-spacing: 0;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      flex: 0 0 8px;
+      border-radius: 50%;
+      background: #72c786;
+      box-shadow: 0 0 0 4px rgba(114, 199, 134, 0.1);
+    }
+
+    .repo {
+      display: inline-flex;
+      align-items: center;
+      height: 34px;
+      padding: 0 13px;
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      border-radius: 7px;
+      background: rgba(255, 255, 255, 0.045);
+      color: rgba(255, 255, 255, 0.68);
+      font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0;
+    }
+
+    .visual {
+      position: absolute;
+      z-index: 2;
+      top: 38px;
+      right: 8px;
+      width: 650px;
+      height: 570px;
+    }
+
+    .menu-sample {
+      position: absolute;
+      z-index: 5;
+      top: 4px;
+      left: 82px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      height: 38px;
+      padding: 0 13px;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 8px;
+      background: rgba(16, 20, 22, 0.94);
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.36);
+    }
+
+    .menu-sample span {
+      color: rgba(255, 255, 255, 0.46);
+      font-size: 11px;
+      font-weight: 720;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+
+    .menu-sample img {
+      width: 96px;
+      height: 36px;
+      object-fit: contain;
+    }
+
+    .shot {
+      position: absolute;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      background: #0a0c0d;
+      box-shadow: 0 24px 70px rgba(0, 0, 0, 0.62);
+    }
+
+    .shot img {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .shot-primary {
+      z-index: 3;
+      top: 60px;
+      left: 36px;
+      width: 520px;
+      height: 508px;
+      border-radius: 24px;
+    }
+
+    .shot-radar {
+      z-index: 4;
+      right: 0;
+      bottom: 22px;
+      width: 318px;
+      height: 298px;
+      border-radius: 18px;
+    }
+
+    .vertical-rule {
+      position: absolute;
+      z-index: 1;
+      top: 46px;
+      bottom: 46px;
+      left: 566px;
+      width: 1px;
+      background: rgba(255, 255, 255, 0.08);
+    }
+
+    .footer-note {
+      position: absolute;
+      z-index: 4;
+      right: 40px;
+      bottom: 15px;
+      color: rgba(255, 255, 255, 0.35);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0;
+    }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <div class="top-line"></div>
+    <div class="vertical-rule"></div>
+
+    <section class="copy">
+      <div class="identity">
+        <img class="app-icon" src="app-icon.png" alt="">
+        <div class="eyebrow">OPEN SOURCE · NATIVE SWIFTUI<br>macOS 14+</div>
+      </div>
+
+      <h1>Codex Monitor</h1>
+      <p class="tagline">让 Codex 的运行、额度与模型信号始终可见</p>
+      <p class="description">A compact macOS HUD for local Codex activity, quota windows, task usage, and Codex Radar signals.</p>
+
+      <div class="feature-list">
+        <div class="feature"><span class="dot"></span><span>实时任务状态与 5h / 7d 剩余额度</span></div>
+        <div class="feature"><span class="dot"></span><span>浮动 HUD 与原生菜单栏两种模式</span></div>
+        <div class="feature"><span class="dot"></span><span>降智雷达、额度雷达与本地用量</span></div>
+      </div>
+
+      <div class="repo">github.com/jackiemingnew/codex-monitor-macos</div>
+    </section>
+
+    <section class="visual" aria-label="Codex Monitor product screenshots">
+      <div class="menu-sample">
+        <span>Menu bar</span>
+        <img src="../screenshots/menu-bar-compact.png" alt="">
+      </div>
+
+      <div class="shot shot-primary">
+        <img src="../screenshots/floating-hud-codex-detail.png" alt="">
+      </div>
+
+      <div class="shot shot-radar">
+        <img src="../screenshots/codex-radar.png" alt="">
+      </div>
+    </section>
+
+    <div class="footer-note">Codex Monitor v0.2</div>
+  </main>
+</body>
+</html>
