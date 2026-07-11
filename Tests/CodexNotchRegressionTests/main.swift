@@ -5675,6 +5675,57 @@ let secondTokenSnapshot = tokenCacheStore.loadSnapshot(
     now: now.addingTimeInterval(1)
 )
 runner.check(secondTokenSnapshot.tasks.first { $0.id == tokenCacheSessionID }?.tokenCount == 150, "appending after an initially unterminated token line should not double count the pending line")
+runner.check(CodexUsageStore.fastSnapshotCacheMaxAge == 30, "fast snapshot cache should use the agreed 30 second upper bound")
+let cacheStatsAfterChangedFile = tokenCacheStore.sessionFileCacheStats()
+let unchangedTokenSnapshot = tokenCacheStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now.addingTimeInterval(2)
+)
+runner.check(unchangedTokenSnapshot.tasks.first { $0.id == tokenCacheSessionID }?.tokenCount == 150, "unchanged rollout refresh should preserve token totals")
+let cacheStatsAfterUnchangedFile = tokenCacheStore.sessionFileCacheStats()
+runner.check(
+    cacheStatsAfterUnchangedFile.prefixScans == cacheStatsAfterChangedFile.prefixScans,
+    "unchanged rollout refresh should not rescan session metadata prefixes"
+)
+runner.check(
+    cacheStatsAfterUnchangedFile.rateLimitScans == cacheStatsAfterChangedFile.rateLimitScans,
+    "unchanged rollout refresh should not rescan rate-limit tails"
+)
+runner.check(
+    cacheStatsAfterUnchangedFile.activityScans == cacheStatsAfterChangedFile.activityScans,
+    "unchanged rollout refresh should not rescan activity tails"
+)
+let rateLimitAppendLine = #"{"timestamp":"\#(timestamp)","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":0}},"rate_limits":{"limit_id":"codex","primary":{"used_percent":25},"secondary":{"used_percent":40}}}}"# + "\n"
+if let handle = try? FileHandle(forWritingTo: tokenCachePath) {
+    try handle.seekToEnd()
+    try handle.write(contentsOf: Data(rateLimitAppendLine.utf8))
+    try handle.close()
+}
+try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(3)], ofItemAtPath: tokenCachePath.path)
+let appendedRateLimitSnapshot = tokenCacheStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now.addingTimeInterval(3)
+)
+runner.check(appendedRateLimitSnapshot.primaryPercent == 75, "appending rate-limit data should invalidate the changed rollout cache")
+let cacheStatsAfterAppendedFile = tokenCacheStore.sessionFileCacheStats()
+runner.check(
+    cacheStatsAfterAppendedFile.prefixScans == cacheStatsAfterUnchangedFile.prefixScans + 1,
+    "one appended rollout should trigger one metadata prefix rescan"
+)
+runner.check(
+    cacheStatsAfterAppendedFile.rateLimitScans == cacheStatsAfterUnchangedFile.rateLimitScans + 1,
+    "one appended rollout should trigger one rate-limit tail rescan"
+)
+runner.check(
+    cacheStatsAfterAppendedFile.activityScans == cacheStatsAfterUnchangedFile.activityScans + 1,
+    "one appended rollout should trigger one activity tail rescan"
+)
 
 let tokenCacheAttributes = try FileManager.default.attributesOfItem(atPath: tokenCachePath.path)
 let tokenCacheSize = (tokenCacheAttributes[.size] as? NSNumber)?.intValue ?? 0
@@ -5699,11 +5750,142 @@ let replacedTokenSnapshot = tokenCacheStore.loadSnapshot(
     bypassFastCache: true,
     rateLimitSource: .localFilesOnly,
     taskHistoryRange: .day,
-    now: now.addingTimeInterval(2)
+    now: now.addingTimeInterval(4)
 )
 runner.check(
     replacedTokenSnapshot.tasks.first { $0.id == tokenCacheSessionID }?.tokenCount == 300,
     "same-size same-mtime rollout replacement should invalidate token caches by inode"
+)
+let cacheStatsBeforeFastHit = tokenCacheStore.sessionFileCacheStats()
+let withinFastCacheWindow = tokenCacheStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: false,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now.addingTimeInterval(33)
+)
+runner.check(withinFastCacheWindow.tasks.first { $0.id == tokenCacheSessionID }?.tokenCount == 300, "29 second fast-cache hit should preserve snapshot output")
+let cacheStatsAfterFastHit = tokenCacheStore.sessionFileCacheStats()
+runner.check(
+    cacheStatsAfterFastHit.fastSnapshotHits == cacheStatsBeforeFastHit.fastSnapshotHits + 1,
+    "unchanged snapshots should reuse the full cache inside 30 seconds"
+)
+_ = tokenCacheStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: false,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now.addingTimeInterval(35)
+)
+let cacheStatsAfterFastExpiry = tokenCacheStore.sessionFileCacheStats()
+runner.check(
+    cacheStatsAfterFastExpiry.fastSnapshotHits == cacheStatsAfterFastHit.fastSnapshotHits,
+    "fast snapshot cache should expire after 30 seconds"
+)
+_ = tokenCacheStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now.addingTimeInterval(36)
+)
+let cacheStatsAfterForcedRefresh = tokenCacheStore.sessionFileCacheStats()
+runner.check(
+    cacheStatsAfterForcedRefresh.fastSnapshotHits == cacheStatsAfterFastExpiry.fastSnapshotHits,
+    "forced refresh should bypass the 30 second fast snapshot cache"
+)
+try FileManager.default.removeItem(at: tokenCachePath)
+_ = tokenCacheStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now.addingTimeInterval(37)
+)
+runner.check(tokenCacheStore.sessionFileCacheStats().entryCount == 0, "session caches should evict files outside the current scan set")
+
+let fastCacheActivityRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("CodexNotchFastCacheActivity-\(UUID().uuidString)")
+try FileManager.default.createDirectory(at: fastCacheActivityRoot, withIntermediateDirectories: true)
+defer {
+    try? FileManager.default.removeItem(at: fastCacheActivityRoot)
+}
+let fastCacheActivityState = fastCacheActivityRoot.appendingPathComponent("state_5.sqlite").path
+let fastCacheActivityLogs = fastCacheActivityRoot.appendingPathComponent("logs_2.sqlite").path
+_ = try Shell.run("/usr/bin/sqlite3", [
+    fastCacheActivityState,
+    """
+    create table threads(
+      id text,
+      title text,
+      tokens_used integer,
+      model text,
+      reasoning_effort text,
+      rollout_path text,
+      created_at integer,
+      updated_at integer,
+      archived integer default 0
+    );
+    """
+])
+_ = try Shell.run("/usr/bin/sqlite3", [
+    fastCacheActivityLogs,
+    "create table logs(thread_id text, ts integer, target text, feedback_log_body text);"
+])
+let fastCacheActivityDirectory = fastCacheActivityRoot.appendingPathComponent("sessions/2026/07/12", isDirectory: true)
+try FileManager.default.createDirectory(at: fastCacheActivityDirectory, withIntermediateDirectories: true)
+let expiringActivitySessionID = "019e073a-c032-74e2-966e-b85ede0c9cf2"
+let expiringActivityPath = fastCacheActivityDirectory.appendingPathComponent("rollout-2026-07-12T00-00-00-\(expiringActivitySessionID).jsonl")
+let expiringActivityTimestamp = ISO8601DateFormatter().string(from: now.addingTimeInterval(-590))
+try """
+{"timestamp":"\(expiringActivityTimestamp)","type":"response_item","payload":{"type":"message","role":"assistant","content":[]}}
+{"timestamp":"\(expiringActivityTimestamp)","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":1}}}}
+""".write(to: expiringActivityPath, atomically: true, encoding: .utf8)
+try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: expiringActivityPath.path)
+let fastCacheActivityStore = CodexUsageStore(codexDirectory: fastCacheActivityRoot, ripgrepCandidates: [])
+let initialActivitySnapshot = fastCacheActivityStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now
+)
+runner.check(
+    initialActivitySnapshot.tasks.first { $0.id == expiringActivitySessionID }?.status == .running,
+    "recent rollout activity should initially mark the task running"
+)
+let newFastCacheSessionID = "019e073a-c032-74e2-966e-b85ede0c9cf3"
+let newFastCachePath = fastCacheActivityDirectory.appendingPathComponent("rollout-2026-07-12T00-00-01-\(newFastCacheSessionID).jsonl")
+try #"{"timestamp":"\#(timestamp)","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":2}}}}"#
+    .write(to: newFastCachePath, atomically: true, encoding: .utf8)
+try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(1)], ofItemAtPath: newFastCachePath.path)
+let cacheStatsBeforeDirectoryChange = fastCacheActivityStore.sessionFileCacheStats()
+let directoryChangedSnapshot = fastCacheActivityStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: false,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now.addingTimeInterval(5)
+)
+runner.check(directoryChangedSnapshot.tasks.contains { $0.id == newFastCacheSessionID }, "new rollout files should invalidate cached path lists inside the 30 second window")
+runner.check(
+    fastCacheActivityStore.sessionFileCacheStats().fastSnapshotHits == cacheStatsBeforeDirectoryChange.fastSnapshotHits,
+    "directory changes should bypass the full fast snapshot cache"
+)
+let activityExpiredSnapshot = fastCacheActivityStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: false,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now.addingTimeInterval(25)
+)
+runner.check(
+    activityExpiredSnapshot.tasks.first { $0.id == expiringActivitySessionID }?.status == .recent,
+    "fast snapshot hits should recompute activity expiration from the requested time"
+)
+runner.check(
+    fastCacheActivityStore.sessionFileCacheStats().fastSnapshotHits == cacheStatsBeforeDirectoryChange.fastSnapshotHits + 1,
+    "unchanged directory state should reuse the refreshed snapshot inside 30 seconds"
 )
 
 if runner.failures > 0 {
