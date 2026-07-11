@@ -125,7 +125,10 @@ final class CodexUsageStore: @unchecked Sendable {
         "turn_cancelled"
     ]
     private let cacheLock = NSLock()
+    private let deltaCacheSetupLock = NSLock()
+    private let deltaWriteLock = NSLock()
     private var fastCache: FastSnapshotCache?
+    private var deltaCacheReady = false
     private var recentPathsCache: RecentPathsCache?
     private var recentTaskPathsCache: RecentPathsCache?
     private var appServerRateLimitCache = AppServerRateLimitCache()
@@ -1018,12 +1021,67 @@ final class CodexUsageStore: @unchecked Sendable {
         return nil
     }
 
-    private func ensureDeltaCacheSchema() {
+    @discardableResult
+    private func ensureDeltaCacheReady() -> Bool {
+        deltaCacheSetupLock.lock()
+        defer { deltaCacheSetupLock.unlock() }
+
+        if deltaCacheReady {
+            return true
+        }
+
         ensureDeltaDatabaseDirectory()
-        _ = try? Shell.sqliteExec(
+        do {
+            try Shell.sqliteExec(database: deltaDatabase, query: deltaSchemaSQL())
+
+            if deltaMetadataValue(for: "legacy_import_completed") != 1 {
+                try Shell.sqliteExec(database: deltaDatabase, query: legacyDeltaMigrationSQL())
+            }
+
+            if deltaMetadataValue(for: "history_compaction_completed") != 1 {
+                try Shell.sqliteExec(database: deltaDatabase, query: deltaHistoryCompactionSQL())
+            }
+
+            let currentSchemaVersion = deltaMetadataValue(for: "schema_version") ?? 0
+            var maintenanceStatements = [
+                """
+                CREATE INDEX IF NOT EXISTS idx_token_snapshot_history_observed_at
+                  ON token_snapshot_history(observed_at_ms);
+                """
+            ]
+            if currentSchemaVersion < 2 {
+                maintenanceStatements.append("ANALYZE token_snapshot_history;")
+                maintenanceStatements.append(
+                    """
+                    INSERT INTO delta_cache_metadata(key, value)
+                    VALUES('schema_version', 2)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+                    """
+                )
+            }
+            try Shell.sqliteExec(
+                database: deltaDatabase,
+                query: maintenanceStatements.joined(separator: "\n")
+            )
+            deltaCacheReady = true
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func ensureDeltaCacheSchema() {
+        _ = ensureDeltaCacheReady()
+    }
+
+    private func deltaMetadataValue(for key: String) -> Int64? {
+        let records = (try? Shell.sqliteJSON(
             database: deltaDatabase,
-            query: "\(deltaSchemaSQL())\n\(legacyDeltaMigrationSQL())"
-        )
+            query: "SELECT value FROM delta_cache_metadata WHERE key = \(sqliteLiteral(key)) LIMIT 1;",
+            as: [DeltaCacheMetadataRecord].self,
+            readOnly: true
+        )) ?? []
+        return records.first?.value
     }
 
     private func recentUsageRecencyExpression() -> String {
@@ -1385,9 +1443,12 @@ final class CodexUsageStore: @unchecked Sendable {
         let values = rows
             .joined(separator: ",\n")
             .replacingOccurrences(of: "__OBSERVED_AT_MS__", with: String(observedAtMs))
+        let pruneIntervalMs = Int64(24 * 60 * 60 * 1_000)
+        let retentionCutoffMs = observedAtMs - Int64(
+            UsageScanPolicy.deltaHistoryRetentionDays * 24 * 60 * 60 * 1_000
+        )
         let query = """
-        \(deltaSchemaSQL())
-        \(legacyDeltaMigrationSQL())
+        BEGIN IMMEDIATE;
         WITH current_rows(thread_id, tokens_used) AS (
           VALUES \(cleanupRows)
         )
@@ -1410,6 +1471,32 @@ final class CodexUsageStore: @unchecked Sendable {
             AND token_snapshot_history.tokens_used > current_rows.tokens_used
         );
 
+        WITH current_rows(thread_id, tokens_used, updated_at_ms, observed_at_ms) AS (
+          VALUES \(values)
+        )
+        INSERT INTO token_snapshot_history(thread_id, tokens_used, updated_at_ms, observed_at_ms)
+        SELECT thread_id, tokens_used, updated_at_ms, observed_at_ms
+        FROM current_rows
+        WHERE COALESCE(
+          (
+            SELECT token_snapshots.tokens_used
+            FROM token_snapshots
+            WHERE lower(token_snapshots.thread_id) = current_rows.thread_id
+            LIMIT 1
+          ),
+          (
+            SELECT token_snapshot_history.tokens_used
+            FROM token_snapshot_history
+            WHERE lower(token_snapshot_history.thread_id) = current_rows.thread_id
+            ORDER BY token_snapshot_history.observed_at_ms DESC
+            LIMIT 1
+          ),
+          -1
+        ) != current_rows.tokens_used
+        ON CONFLICT(thread_id, observed_at_ms) DO UPDATE SET
+          tokens_used = excluded.tokens_used,
+          updated_at_ms = excluded.updated_at_ms;
+
         INSERT INTO token_snapshots(thread_id, tokens_used, updated_at_ms, observed_at_ms)
         VALUES \(values)
         ON CONFLICT(thread_id) DO UPDATE SET
@@ -1417,18 +1504,30 @@ final class CodexUsageStore: @unchecked Sendable {
           updated_at_ms = excluded.updated_at_ms,
           observed_at_ms = excluded.observed_at_ms;
 
-        INSERT INTO token_snapshot_history(thread_id, tokens_used, updated_at_ms, observed_at_ms)
-        VALUES \(values)
-        ON CONFLICT(thread_id, observed_at_ms) DO UPDATE SET
-          tokens_used = excluded.tokens_used,
-          updated_at_ms = excluded.updated_at_ms;
-
         DELETE FROM token_snapshot_history
-        WHERE observed_at_ms < \(observedAtMs - Int64(UsageScanPolicy.deltaHistoryRetentionDays * 24 * 60 * 60 * 1_000));
+        WHERE observed_at_ms < \(retentionCutoffMs)
+          AND COALESCE(
+            (SELECT value FROM delta_cache_metadata WHERE key = 'last_history_prune_ms'),
+            0
+          ) <= \(observedAtMs - pruneIntervalMs);
+
+        INSERT INTO delta_cache_metadata(key, value)
+        SELECT 'last_history_prune_ms', \(observedAtMs)
+        WHERE COALESCE(
+          (SELECT value FROM delta_cache_metadata WHERE key = 'last_history_prune_ms'),
+          0
+        ) <= \(observedAtMs - pruneIntervalMs)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+        COMMIT;
         """
 
+        guard ensureDeltaCacheReady() else {
+            return false
+        }
+
+        deltaWriteLock.lock()
+        defer { deltaWriteLock.unlock() }
         do {
-            ensureDeltaDatabaseDirectory()
             try Shell.sqliteExec(database: deltaDatabase, query: query)
             return true
         } catch {
@@ -1456,41 +1555,92 @@ final class CodexUsageStore: @unchecked Sendable {
           observed_at_ms INTEGER NOT NULL,
           PRIMARY KEY(thread_id, observed_at_ms)
         );
+        CREATE TABLE IF NOT EXISTS delta_cache_metadata (
+          key TEXT PRIMARY KEY,
+          value INTEGER NOT NULL
+        );
         CREATE INDEX IF NOT EXISTS idx_token_snapshot_history_lookup
           ON token_snapshot_history(thread_id, observed_at_ms DESC);
         """
     }
 
     private func legacyDeltaMigrationSQL() -> String {
-        guard let legacyDeltaDatabase,
-              FileManager.default.fileExists(atPath: legacyDeltaDatabase) else {
-            return ""
-        }
+        let legacyExists = legacyDeltaDatabase.map(FileManager.default.fileExists(atPath:)) ?? false
+        let hasSnapshots = legacyDeltaDatabase.map {
+            legacyExists && legacyDeltaHasTable("token_snapshots", database: $0)
+        } ?? false
+        let hasHistory = legacyDeltaDatabase.map {
+            legacyExists && legacyDeltaHasTable("token_snapshot_history", database: $0)
+        } ?? false
+        let shouldAttach = hasSnapshots || hasHistory
 
-        let hasSnapshots = legacyDeltaHasTable("token_snapshots", database: legacyDeltaDatabase)
-        let hasHistory = legacyDeltaHasTable("token_snapshot_history", database: legacyDeltaDatabase)
-        guard hasSnapshots || hasHistory else {
-            return ""
+        var statements: [String] = []
+        if shouldAttach, let legacyDeltaDatabase {
+            statements.append("ATTACH DATABASE \(sqliteLiteral(legacyDeltaDatabase)) AS legacy_delta;")
         }
-
-        let legacy = sqliteLiteral(legacyDeltaDatabase)
-        var statements = ["ATTACH DATABASE \(legacy) AS legacy_delta;"]
+        statements.append("BEGIN IMMEDIATE;")
         if hasSnapshots {
             statements.append("""
-        INSERT OR IGNORE INTO token_snapshots(thread_id, tokens_used, updated_at_ms, observed_at_ms)
-        SELECT lower(thread_id), tokens_used, updated_at_ms, observed_at_ms
-        FROM legacy_delta.token_snapshots;
-        """)
+            INSERT OR IGNORE INTO token_snapshots(thread_id, tokens_used, updated_at_ms, observed_at_ms)
+            SELECT lower(thread_id), tokens_used, updated_at_ms, observed_at_ms
+            FROM legacy_delta.token_snapshots
+            WHERE NOT EXISTS (
+              SELECT 1 FROM main.delta_cache_metadata
+              WHERE key = 'legacy_import_completed' AND value >= 1
+            );
+            """)
         }
         if hasHistory {
             statements.append("""
-        INSERT OR IGNORE INTO token_snapshot_history(thread_id, tokens_used, updated_at_ms, observed_at_ms)
-        SELECT lower(thread_id), tokens_used, updated_at_ms, observed_at_ms
-        FROM legacy_delta.token_snapshot_history;
-        """)
+            INSERT OR IGNORE INTO token_snapshot_history(thread_id, tokens_used, updated_at_ms, observed_at_ms)
+            SELECT lower(thread_id), tokens_used, updated_at_ms, observed_at_ms
+            FROM legacy_delta.token_snapshot_history
+            WHERE NOT EXISTS (
+              SELECT 1 FROM main.delta_cache_metadata
+              WHERE key = 'legacy_import_completed' AND value >= 1
+            );
+            """)
         }
-        statements.append("DETACH DATABASE legacy_delta;")
+        statements.append("""
+        INSERT INTO delta_cache_metadata(key, value)
+        VALUES('legacy_import_completed', 1)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+        """)
+        statements.append("COMMIT;")
+        if shouldAttach {
+            statements.append("DETACH DATABASE legacy_delta;")
+        }
         return statements.joined(separator: "\n")
+    }
+
+    private func deltaHistoryCompactionSQL() -> String {
+        """
+        BEGIN IMMEDIATE;
+        DELETE FROM token_snapshot_history
+        WHERE rowid IN (
+          SELECT row_id
+          FROM (
+            SELECT
+              rowid AS row_id,
+              tokens_used,
+              LAG(tokens_used) OVER (
+                PARTITION BY lower(thread_id)
+                ORDER BY observed_at_ms, rowid
+              ) AS previous_tokens
+            FROM token_snapshot_history
+          )
+          WHERE previous_tokens = tokens_used
+        )
+          AND NOT EXISTS (
+            SELECT 1 FROM delta_cache_metadata
+            WHERE key = 'history_compaction_completed' AND value >= 1
+          );
+
+        INSERT INTO delta_cache_metadata(key, value)
+        VALUES('history_compaction_completed', 1)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+        COMMIT;
+        """
     }
 
     private func legacyDeltaHasTable(_ table: String, database: String) -> Bool {
@@ -4085,6 +4235,10 @@ private struct TokenDeltaAggregateRecord: Decodable {
 
 private struct SQLiteNameRecord: Decodable {
     let name: String
+}
+
+private struct DeltaCacheMetadataRecord: Decodable {
+    let value: Int64
 }
 
 private struct SessionTokenScanResult {

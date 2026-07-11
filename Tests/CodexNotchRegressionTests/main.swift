@@ -5127,6 +5127,44 @@ let pollutedDeltaRows = try Shell.sqliteJSON(
     readOnly: true
 ).first?.count ?? -1
 runner.check(pollutedDeltaRows == 0, "Swift delta cache should prune parent rows polluted by merged subagent token totals")
+let compactedDuplicateRows = try Shell.sqliteJSON(
+    database: deltaDatabase,
+    query: "select count(*) as count from token_snapshot_history where thread_id = '\(pollutedDeltaParentSessionID)' and tokens_used = 162000000;",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? -1
+runner.check(compactedDuplicateRows == 1, "delta cache upgrade should compact consecutive equal token history without changing rolling metrics")
+let historyRowsBeforeUnchangedRecord = try Shell.sqliteJSON(
+    database: deltaDatabase,
+    query: "select count(*) as count from token_snapshot_history;",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? -1
+runner.check(localStore.recordDeltaSnapshot(now: now.addingTimeInterval(3), range: .day), "unchanged Swift delta recording should succeed")
+let historyRowsAfterUnchangedRecord = try Shell.sqliteJSON(
+    database: deltaDatabase,
+    query: "select count(*) as count from token_snapshot_history;",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? -1
+runner.check(
+    historyRowsAfterUnchangedRecord == historyRowsBeforeUnchangedRecord,
+    "unchanged Swift delta recording should not append duplicate history rows"
+)
+let observedAtIndexCount = try Shell.sqliteJSON(
+    database: deltaDatabase,
+    query: "select count(*) as count from sqlite_master where type = 'index' and name = 'idx_token_snapshot_history_observed_at';",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? 0
+runner.check(observedAtIndexCount == 1, "delta history retention should have a standalone observed_at_ms index")
+let deltaMetadataTableCount = try Shell.sqliteJSON(
+    database: deltaDatabase,
+    query: "select count(*) as count from sqlite_master where type = 'table' and name = 'delta_cache_metadata';",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? 0
+runner.check(deltaMetadataTableCount == 1, "delta cache should persist upgrade and maintenance metadata")
 
 let nodeCompatibleData = SnapshotOutputFormatter.nodeCompatibleJSONData(
     for: localExportSnapshot,
@@ -5307,6 +5345,11 @@ let legacyStore = CodexUsageStore(
     ripgrepCandidates: []
 )
 runner.check(legacyStore.recordDeltaSnapshot(now: now, range: .day), "Swift delta recording should migrate legacy token history")
+let lateLegacyObservedMs = legacyBaselineMs + 1
+_ = try Shell.run("/usr/bin/sqlite3", [
+    legacyDeltaDatabase,
+    "insert into token_snapshot_history(thread_id, tokens_used, updated_at_ms, observed_at_ms) values('\(legacySessionID)', 1600, \(lateLegacyObservedMs), \(lateLegacyObservedMs));"
+])
 runner.check(legacyStore.recordDeltaSnapshot(now: now.addingTimeInterval(1), range: .day), "legacy migration should be idempotent on repeated records")
 let migratedHistoryRows = try Shell.sqliteJSON(
     database: migratedDeltaDatabase,
@@ -5315,6 +5358,13 @@ let migratedHistoryRows = try Shell.sqliteJSON(
     readOnly: true
 ).first?.count ?? 0
 runner.check(migratedHistoryRows >= 2, "migrated Swift cache should contain legacy and current token history rows")
+let lateLegacyImportRows = try Shell.sqliteJSON(
+    database: migratedDeltaDatabase,
+    query: "select count(*) as count from token_snapshot_history where thread_id = '\(legacySessionID)' and observed_at_ms = \(lateLegacyObservedMs);",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? -1
+runner.check(lateLegacyImportRows == 0, "legacy delta history should be imported only once after the completion marker is stored")
 
 let missingLegacyTablesRoot = URL(fileURLWithPath: NSTemporaryDirectory())
     .appendingPathComponent("CodexNotchMissingLegacyTables-\(UUID().uuidString)")
