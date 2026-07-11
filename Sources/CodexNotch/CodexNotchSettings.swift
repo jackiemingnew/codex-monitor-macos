@@ -1,5 +1,19 @@
 import Foundation
+import CryptoKit
 import ServiceManagement
+
+enum CodexRadarCredentialSource: Equatable, Sendable {
+    case environment
+    case secretStore
+    case none
+    case interactionRequired
+    case unavailable
+}
+
+struct CodexRadarCredential: Equatable, Sendable {
+    let token: String?
+    let source: CodexRadarCredentialSource
+}
 
 protocol LaunchAtLoginManaging {
     var isEnabled: Bool { get }
@@ -24,6 +38,7 @@ private struct SMAppServiceLaunchAtLoginManager: LaunchAtLoginManaging {
 
 @MainActor
 final class CodexNotchSettings: ObservableObject {
+    static let codexRadarEnvironmentKey = "CODEXRADAR_API_TOKEN"
     static let cliproxyKeychainService = "com.alight.codexnotch.cliproxy.management-key"
     static let cliproxyKeychainAccount = "default"
     static let newAPIKeychainService = "com.alight.codexnotch.newapi.password"
@@ -72,6 +87,7 @@ final class CodexNotchSettings: ObservableObject {
         static let secretStorageMode = "secretStorageMode"
         static let secretStorageMigrationState = "secretStorageMigrationState"
         static let legacySecretCleanupState = "legacySecretCleanupState"
+        static let legacyCodexRadarTokenCleanupState = "legacyCodexRadarTokenCleanupState"
     }
 
     private let defaults: UserDefaults
@@ -80,6 +96,8 @@ final class CodexNotchSettings: ObservableObject {
     private let initialManagementKey: String?
     private let initialNewAPIKey: String?
     private let initialSubAPIKey: String?
+    private let environment: [String: String]
+    private let codexRadarLegacyTokenFileURL: URL
     private var secretVault: SecretVault
     private var secretsLoaded = false
     private var isLoadingSecrets = false
@@ -383,6 +401,7 @@ final class CodexNotchSettings: ObservableObject {
     @Published private(set) var subAPIKeychainError: String?
     @Published private(set) var secretStorageMode: SecretStorageMode
     @Published private(set) var secretStorageError: String?
+    @Published private(set) var codexRadarCredentialError: String?
 
     var secretsAreLoaded: Bool {
         secretsLoaded
@@ -394,7 +413,9 @@ final class CodexNotchSettings: ObservableObject {
         initialNewAPIKey: String? = nil,
         initialSubAPIKey: String? = nil,
         secretStores: SecretStoreFactory = .live(),
-        launchAtLoginManager: LaunchAtLoginManaging = SMAppServiceLaunchAtLoginManager()
+        launchAtLoginManager: LaunchAtLoginManaging = SMAppServiceLaunchAtLoginManager(),
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        codexRadarLegacyTokenFileURL: URL = CodexNotchSettings.defaultCodexRadarTokenFileURL()
     ) {
         self.defaults = defaults
         self.launchAtLoginManager = launchAtLoginManager
@@ -402,6 +423,8 @@ final class CodexNotchSettings: ObservableObject {
         self.initialManagementKey = initialManagementKey
         self.initialNewAPIKey = initialNewAPIKey
         self.initialSubAPIKey = initialSubAPIKey
+        self.environment = environment
+        self.codexRadarLegacyTokenFileURL = codexRadarLegacyTokenFileURL
         let loadedSecretStorageMode = SecretStorageMode(rawValue: defaults.string(forKey: Keys.secretStorageMode) ?? "") ?? .keychain
         self.secretStorageMode = loadedSecretStorageMode
         var startupVault = SecretVault()
@@ -510,6 +533,79 @@ final class CodexNotchSettings: ObservableObject {
         self.isInitializing = false
     }
 
+    static func defaultCodexRadarTokenFileURL() -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
+        return base
+            .appendingPathComponent("CodexNotch", isDirectory: true)
+            .appendingPathComponent("CodexRadar", isDirectory: true)
+            .appendingPathComponent("token")
+    }
+
+    var codexRadarAPIToken: String {
+        secretVault.value(for: .codexRadarAPI)
+    }
+
+    func codexRadarCredential(accessMode: SecretStoreAccessMode) -> CodexRadarCredential {
+        if let token = Self.trimmedRadarToken(environment[Self.codexRadarEnvironmentKey]) {
+            return CodexRadarCredential(token: token, source: .environment)
+        }
+
+        if secretsLoaded {
+            return storedCodexRadarCredential(from: secretVault)
+        }
+
+        switch accessMode {
+        case .interactive:
+            guard loadSecretsIfNeeded() else {
+                return CodexRadarCredential(token: nil, source: .unavailable)
+            }
+            return storedCodexRadarCredential(from: secretVault)
+        case .nonInteractive:
+            do {
+                let vault = try secretStores.store(for: secretStorageMode).loadVault(accessMode: .nonInteractive)
+                let credential = storedCodexRadarCredential(from: vault)
+                if credential.token == nil,
+                   FileManager.default.fileExists(atPath: codexRadarLegacyTokenFileURL.path) {
+                    return CodexRadarCredential(token: nil, source: .interactionRequired)
+                }
+                return credential
+            } catch SecretStoreAccessError.interactionRequired {
+                return CodexRadarCredential(token: nil, source: .interactionRequired)
+            } catch {
+                codexRadarCredentialError = error.localizedDescription
+                return CodexRadarCredential(token: nil, source: .unavailable)
+            }
+        }
+    }
+
+    func setCodexRadarAPIToken(_ value: String) throws {
+        guard loadSecretsIfNeeded() else {
+            throw CodexRadarCredentialError.secretStoreUnavailable
+        }
+        var updatedVault = secretVault
+        updatedVault.set(Self.trimmedRadarToken(value) ?? "", for: .codexRadarAPI)
+        let store = secretStores.store(for: secretStorageMode)
+        try store.saveVault(updatedVault)
+        guard try store.loadVault() == updatedVault else {
+            throw SecretStorageMigrationError.verificationFailed
+        }
+        secretVault = updatedVault
+        codexRadarCredentialError = cleanupLegacyCodexRadarTokenIfPresent(expectedVault: updatedVault)
+    }
+
+    private func storedCodexRadarCredential(from vault: SecretVault) -> CodexRadarCredential {
+        guard let token = Self.trimmedRadarToken(vault.value(for: .codexRadarAPI)) else {
+            return CodexRadarCredential(token: nil, source: .none)
+        }
+        return CodexRadarCredential(token: token, source: .secretStore)
+    }
+
+    private static func trimmedRadarToken(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     func setLaunchAtLoginEnabled(_ enabled: Bool) {
         do {
             try launchAtLoginManager.setEnabled(enabled)
@@ -535,9 +631,12 @@ final class CodexNotchSettings: ObservableObject {
         do {
             let migrationRecoveryError = recoverPendingSecretStorageMigration()
             let legacyRecoveryError = recoverPendingLegacySecretCleanup()
+            let radarCleanupRecoveryError = recoverPendingLegacyCodexRadarTokenCleanup()
             var loadedVault = try secretStores.store(for: secretStorageMode).loadVault()
             var migratedSecretVault = false
             var migratedLegacyLocations: [LegacySecretLocation] = []
+            var shouldCleanupLegacyRadarToken = false
+            var radarConflictError: String?
             migratedSecretVault = Self.applyInitialOrLegacySecret(
                 initialValue: initialManagementKey,
                 key: .cliproxyManagement,
@@ -545,6 +644,19 @@ final class CodexNotchSettings: ObservableObject {
                 vault: &loadedVault,
                 migratedLocations: &migratedLegacyLocations
             ) || migratedSecretVault
+
+            if let legacyRadarToken = try loadLegacyCodexRadarToken() {
+                let storedRadarToken = Self.trimmedRadarToken(loadedVault.value(for: .codexRadarAPI))
+                if storedRadarToken == nil {
+                    loadedVault.set(legacyRadarToken, for: .codexRadarAPI)
+                    migratedSecretVault = true
+                    shouldCleanupLegacyRadarToken = true
+                } else if storedRadarToken == legacyRadarToken {
+                    shouldCleanupLegacyRadarToken = true
+                } else {
+                    radarConflictError = "旧 Radar token 与当前凭证不同，已保留旧文件；在设置中保存后将清理。"
+                }
+            }
             migratedSecretVault = Self.applyInitialOrLegacySecret(
                 initialValue: initialNewAPIKey,
                 key: .newAPIManagement,
@@ -629,12 +741,22 @@ final class CodexNotchSettings: ObservableObject {
                 }
             }
 
+            let radarCleanupError = shouldCleanupLegacyRadarToken
+                ? cleanupLegacyCodexRadarTokenIfPresent(expectedVault: loadedVault)
+                : nil
+
             let migratedLegacyCleanupError = recoverPendingLegacySecretCleanup()
             secretsLoaded = true
             secretStorageError = Self.joinedErrors([
                 migrationRecoveryError,
                 legacyRecoveryError,
-                migratedLegacyCleanupError
+                migratedLegacyCleanupError,
+                radarCleanupRecoveryError
+            ])
+            codexRadarCredentialError = Self.joinedErrors([
+                radarConflictError,
+                radarCleanupError,
+                radarCleanupRecoveryError
             ])
             return true
         } catch {
@@ -642,6 +764,7 @@ final class CodexNotchSettings: ObservableObject {
             cliproxyKeychainError = error.localizedDescription
             newAPIKeychainError = error.localizedDescription
             subAPIKeychainError = error.localizedDescription
+            codexRadarCredentialError = error.localizedDescription
             return false
         }
     }
@@ -987,6 +1110,71 @@ final class CodexNotchSettings: ObservableObject {
             defaults.set(encoded, forKey: Keys.legacySecretCleanupState)
         }
         return "部分旧版 Keychain 凭证清理失败，将在下次启动重试：\(errors.joined(separator: "；"))"
+    }
+
+    private func loadLegacyCodexRadarToken() throws -> String? {
+        guard FileManager.default.fileExists(atPath: codexRadarLegacyTokenFileURL.path) else {
+            return nil
+        }
+        let data = try Data(contentsOf: codexRadarLegacyTokenFileURL)
+        return Self.trimmedRadarToken(String(decoding: data, as: UTF8.self))
+    }
+
+    private func cleanupLegacyCodexRadarTokenIfPresent(expectedVault: SecretVault) -> String? {
+        guard FileManager.default.fileExists(atPath: codexRadarLegacyTokenFileURL.path) else {
+            defaults.removeObject(forKey: Keys.legacyCodexRadarTokenCleanupState)
+            return nil
+        }
+
+        do {
+            let fileData = try Data(contentsOf: codexRadarLegacyTokenFileURL)
+            let state = LegacyCodexRadarTokenCleanupState(
+                targetMode: secretStorageMode,
+                expectedVaultDigest: try expectedVault.migrationDigest(),
+                expectedFileDigest: Self.digest(fileData)
+            )
+            defaults.set(try JSONEncoder().encode(state), forKey: Keys.legacyCodexRadarTokenCleanupState)
+            return recoverPendingLegacyCodexRadarTokenCleanup()
+        } catch {
+            return "旧 Radar token 清理准备失败，已保留旧文件：\(error.localizedDescription)"
+        }
+    }
+
+    private func recoverPendingLegacyCodexRadarTokenCleanup() -> String? {
+        guard let data = defaults.data(forKey: Keys.legacyCodexRadarTokenCleanupState) else {
+            return nil
+        }
+        guard let state = try? JSONDecoder().decode(LegacyCodexRadarTokenCleanupState.self, from: data) else {
+            defaults.removeObject(forKey: Keys.legacyCodexRadarTokenCleanupState)
+            return "旧 Radar token 清理状态损坏，未删除旧文件。"
+        }
+        guard FileManager.default.fileExists(atPath: codexRadarLegacyTokenFileURL.path) else {
+            defaults.removeObject(forKey: Keys.legacyCodexRadarTokenCleanupState)
+            return nil
+        }
+
+        do {
+            let targetVault = try secretStores.store(for: state.targetMode).loadVault()
+            guard try targetVault.migrationDigest() == state.expectedVaultDigest else {
+                return "新版凭证库尚未通过校验，旧 Radar token 文件暂未删除。"
+            }
+            let currentFileData = try Data(contentsOf: codexRadarLegacyTokenFileURL)
+            guard Self.digest(currentFileData) == state.expectedFileDigest else {
+                return "旧 Radar token 文件已发生变化，已停止自动清理。"
+            }
+            try FileManager.default.removeItem(at: codexRadarLegacyTokenFileURL)
+            guard !FileManager.default.fileExists(atPath: codexRadarLegacyTokenFileURL.path) else {
+                throw CodexRadarCredentialError.legacyCleanupFailed
+            }
+            defaults.removeObject(forKey: Keys.legacyCodexRadarTokenCleanupState)
+            return nil
+        } catch {
+            return "旧 Radar token 文件清理失败，将在下次交互式加载时重试：\(error.localizedDescription)"
+        }
+    }
+
+    private static func digest(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     private static func joinedErrors(_ errors: [String?]) -> String? {
@@ -1460,6 +1648,26 @@ private struct LegacySecretCleanupState: Codable {
     let locations: [LegacySecretLocation]
     let targetMode: SecretStorageMode
     let expectedDigest: String
+}
+
+private struct LegacyCodexRadarTokenCleanupState: Codable {
+    let targetMode: SecretStorageMode
+    let expectedVaultDigest: String
+    let expectedFileDigest: String
+}
+
+private enum CodexRadarCredentialError: LocalizedError {
+    case secretStoreUnavailable
+    case legacyCleanupFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .secretStoreUnavailable:
+            "Radar token 凭证库不可用。"
+        case .legacyCleanupFailed:
+            "旧 Radar token 文件删除后仍然存在。"
+        }
+    }
 }
 
 private enum SecretStorageMigrationError: LocalizedError {

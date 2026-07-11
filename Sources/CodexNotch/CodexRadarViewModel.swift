@@ -1,6 +1,35 @@
 import Combine
 import Foundation
 
+enum CodexRadarCredentialRefreshPolicy {
+    static func fallbackReason(for source: CodexRadarCredentialSource) -> CodexRadarFallbackReason? {
+        switch source {
+        case .interactionRequired:
+            .credentialAuthorizationRequired
+        case .unavailable:
+            .credentialUnavailable
+        case .environment, .secretStore, .none:
+            nil
+        }
+    }
+
+    static func shouldForceAuthorizedRefresh(
+        currentSource: CodexRadarDataSource,
+        currentFallbackReason: CodexRadarFallbackReason?,
+        credential: CodexRadarCredential
+    ) -> Bool {
+        guard credential.token != nil, currentSource != .authorizedAPI else {
+            return false
+        }
+        switch currentFallbackReason {
+        case nil, .credentialAuthorizationRequired, .credentialUnavailable:
+            return true
+        case .invalidToken, .apiUnavailable:
+            return false
+        }
+    }
+}
+
 @MainActor
 final class CodexRadarViewModel: ObservableObject {
     @Published private(set) var snapshot: CodexRadarSnapshot = .disabled
@@ -46,7 +75,7 @@ final class CodexRadarViewModel: ObservableObject {
             return
         }
         lastManualRefreshAt = now
-        refreshFromNetwork(cancelInFlight: true)
+        refreshFromNetwork(cancelInFlight: true, accessMode: .interactive)
     }
 
     func refreshIfNeeded(now: Date = Date()) {
@@ -56,7 +85,7 @@ final class CodexRadarViewModel: ObservableObject {
         }
 
         if CodexRadarRefreshPolicy.shouldRefresh(lastFetchAt: snapshot.lastFetchAt, now: now) {
-            refreshFromNetwork()
+            refreshFromNetwork(accessMode: .nonInteractive)
         } else {
             scheduleNextRefresh(now: now)
         }
@@ -68,11 +97,25 @@ final class CodexRadarViewModel: ObservableObject {
             return
         }
 
-        if CodexRadarRefreshPolicy.shouldRefreshOnPresentation(lastFetchAt: snapshot.lastFetchAt, now: now) {
-            refreshFromNetwork()
+        let credential = settings.codexRadarCredential(accessMode: .interactive)
+        if CodexRadarCredentialRefreshPolicy.shouldForceAuthorizedRefresh(
+            currentSource: snapshot.dataSource,
+            currentFallbackReason: snapshot.fallbackReason,
+            credential: credential
+        ) {
+            refreshFromNetwork(accessMode: .interactive, credential: credential)
+        } else if CodexRadarRefreshPolicy.shouldRefreshOnPresentation(lastFetchAt: snapshot.lastFetchAt, now: now) {
+            refreshFromNetwork(accessMode: .interactive, credential: credential)
         } else {
             scheduleNextRefresh(now: now)
         }
+    }
+
+    func credentialsDidChange() {
+        guard settings.codexRadarEnabled else {
+            return
+        }
+        refreshFromNetwork(cancelInFlight: true, accessMode: .interactive)
     }
 
     private func loadCacheAndSchedule() {
@@ -104,7 +147,11 @@ final class CodexRadarViewModel: ObservableObject {
         refreshIfNeeded()
     }
 
-    private func refreshFromNetwork(cancelInFlight: Bool = false) {
+    private func refreshFromNetwork(
+        cancelInFlight: Bool = false,
+        accessMode: SecretStoreAccessMode,
+        credential providedCredential: CodexRadarCredential? = nil
+    ) {
         refreshTimer?.invalidate()
         refreshTimer = nil
 
@@ -123,6 +170,8 @@ final class CodexRadarViewModel: ObservableObject {
             return
         }
 
+        let credential = providedCredential ?? settings.codexRadarCredential(accessMode: accessMode)
+
         isRefreshing = true
         refreshGeneration += 1
         let generation = refreshGeneration
@@ -135,7 +184,17 @@ final class CodexRadarViewModel: ObservableObject {
 
         refreshTask = Task.detached(priority: .utility) {
             do {
-                var result = try await client.fetchSummary()
+                var result = try await client.fetchSummary(bearerToken: credential.token)
+                if result.source == .publicSummary, result.fallbackReason == nil {
+                    let fallbackReason = CodexRadarCredentialRefreshPolicy.fallbackReason(for: credential.source)
+                    if let fallbackReason {
+                        result = CodexRadarFetchResult(
+                            data: result.data,
+                            source: result.source,
+                            fallbackReason: fallbackReason
+                        )
+                    }
+                }
                 let fetchedAt = Date()
                 let nextSnapshot: CodexRadarSnapshot
                 do {

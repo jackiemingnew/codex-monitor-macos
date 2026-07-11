@@ -956,23 +956,6 @@ runner.check(
     "Codex Radar authorized API should reject userinfo spoofing"
 )
 
-let radarTokenDirectory = FileManager.default.temporaryDirectory
-    .appendingPathComponent("CodexRadarTokenProvider-\(UUID().uuidString)", isDirectory: true)
-let radarTokenFile = radarTokenDirectory.appendingPathComponent("token")
-let emptyRadarTokenProvider = CodexRadarTokenProvider(environment: [:], tokenFileURL: radarTokenFile)
-runner.check(emptyRadarTokenProvider.token() == nil, "Codex Radar token provider should return nil when no token is configured")
-try CodexRadarTokenProvider.saveToken("  local-token  ", to: radarTokenFile)
-let fileRadarTokenProvider = CodexRadarTokenProvider(environment: [:], tokenFileURL: radarTokenFile)
-runner.check(fileRadarTokenProvider.token() == "local-token", "Codex Radar token provider should read the local token file")
-let environmentRadarTokenProvider = CodexRadarTokenProvider(
-    environment: [CodexRadarTokenProvider.environmentKey: "  env-token  "],
-    tokenFileURL: radarTokenFile
-)
-runner.check(environmentRadarTokenProvider.token() == "env-token", "Codex Radar token provider should prefer the environment token")
-try CodexRadarTokenProvider.saveToken("", to: radarTokenFile)
-runner.check(!FileManager.default.fileExists(atPath: radarTokenFile.path), "Codex Radar empty token save should remove the local token file")
-try? FileManager.default.removeItem(at: radarTokenDirectory)
-
 func radarResponse(for request: URLRequest, status: Int, data: Data) -> (Data, URLResponse) {
     let response = HTTPURLResponse(
         url: request.url!,
@@ -985,39 +968,30 @@ func radarResponse(for request: URLRequest, status: Int, data: Data) -> (Data, U
 
 let authorizedRecorder = RequestPathRecorder()
 let authorizedRadarClient = CodexRadarClient(
-    tokenProvider: CodexRadarTokenProvider(
-        environment: [CodexRadarTokenProvider.environmentKey: "test-token"],
-        tokenFileURL: radarTokenFile
-    ),
     requestExecutor: { request in
         authorizedRecorder.append(request.url?.path ?? "")
         return radarResponse(for: request, status: 200, data: codexRadar56Fixture)
     }
 )
-let authorizedFetch = try waitForAsync { try await authorizedRadarClient.fetchSummary() }
+let authorizedFetch = try waitForAsync { try await authorizedRadarClient.fetchSummary(bearerToken: "test-token") }
 runner.check(authorizedFetch.source == .authorizedAPI, "Codex Radar should use the authorized API when a token is available")
 runner.check(authorizedFetch.fallbackReason == nil, "a successful authorized API request should not report fallback")
 runner.check(authorizedRecorder.paths == ["/api/v1/current"], "a successful API request should not call the public summary")
 
 let publicRecorder = RequestPathRecorder()
 let publicRadarClient = CodexRadarClient(
-    tokenProvider: CodexRadarTokenProvider(environment: [:], tokenFileURL: radarTokenFile),
     requestExecutor: { request in
         publicRecorder.append(request.url?.path ?? "")
         return radarResponse(for: request, status: 200, data: codexRadar56Fixture)
     }
 )
-let publicFetch = try waitForAsync { try await publicRadarClient.fetchSummary() }
+let publicFetch = try waitForAsync { try await publicRadarClient.fetchSummary(bearerToken: nil) }
 runner.check(publicFetch.source == .publicSummary, "Codex Radar should use the public summary when no token is configured")
 runner.check(publicFetch.fallbackReason == nil, "normal public mode should not be labeled as API fallback")
 runner.check(publicRecorder.paths == ["/current.json"], "no-token mode should not call the authorized API")
 
 let fallbackRecorder = RequestPathRecorder()
 let fallbackRadarClient = CodexRadarClient(
-    tokenProvider: CodexRadarTokenProvider(
-        environment: [CodexRadarTokenProvider.environmentKey: "expired-token"],
-        tokenFileURL: radarTokenFile
-    ),
     requestExecutor: { request in
         fallbackRecorder.append(request.url?.path ?? "")
         if request.url?.path == "/api/v1/current" {
@@ -1026,7 +1000,7 @@ let fallbackRadarClient = CodexRadarClient(
         return radarResponse(for: request, status: 200, data: codexRadar56Fixture)
     }
 )
-let fallbackFetch = try waitForAsync { try await fallbackRadarClient.fetchSummary() }
+let fallbackFetch = try waitForAsync { try await fallbackRadarClient.fetchSummary(bearerToken: "expired-token") }
 runner.check(fallbackFetch.source == .publicSummary, "an unauthorized API request should fall back to the public summary")
 runner.check(fallbackFetch.fallbackReason == .invalidToken, "401 fallback should identify an invalid token")
 runner.check(fallbackRecorder.paths == ["/api/v1/current", "/current.json"], "API fallback should make exactly one public request")
@@ -1035,6 +1009,34 @@ runner.check(CodexRadarClient.fallbackReason(for: CodexRadarClientError.httpStat
 runner.check(CodexRadarClient.fallbackReason(for: CodexRadarClientError.httpStatus(500)) == .apiUnavailable, "5xx should use the temporary API fallback")
 runner.check(CodexRadarClient.fallbackReason(for: URLError(.timedOut)) == .apiUnavailable, "timeouts should use the temporary API fallback")
 runner.check(CodexRadarClient.fallbackReason(for: CodexRadarClientError.disallowedURL) == nil, "URL allowlist failures must not silently fall back")
+runner.check(
+    CodexRadarCredentialRefreshPolicy.fallbackReason(for: .interactionRequired) == .credentialAuthorizationRequired,
+    "a blocked startup credential should report deferred authorization instead of an invalid token"
+)
+runner.check(
+    CodexRadarCredentialRefreshPolicy.shouldForceAuthorizedRefresh(
+        currentSource: .publicSummary,
+        currentFallbackReason: .credentialAuthorizationRequired,
+        credential: CodexRadarCredential(token: "available-token", source: .secretStore)
+    ),
+    "presenting Radar should immediately upgrade a Public snapshot when the user authorizes a token"
+)
+runner.check(
+    !CodexRadarCredentialRefreshPolicy.shouldForceAuthorizedRefresh(
+        currentSource: .authorizedAPI,
+        currentFallbackReason: nil,
+        credential: CodexRadarCredential(token: "available-token", source: .secretStore)
+    ),
+    "presenting Radar should not force another fetch when the current snapshot already uses the authorized API"
+)
+runner.check(
+    !CodexRadarCredentialRefreshPolicy.shouldForceAuthorizedRefresh(
+        currentSource: .publicSummary,
+        currentFallbackReason: .invalidToken,
+        credential: CodexRadarCredential(token: "invalid-token", source: .secretStore)
+    ),
+    "presenting Radar should not repeatedly retry a token that already fell back as invalid"
+)
 
 let fallbackSnapshot = try CodexRadarSnapshot.decodePublicSummary(
     from: codexRadar56Fixture,
@@ -1162,26 +1164,34 @@ enum CountingSecretStoreError: Error {
 final class CountingSecretStore: SecretStore {
     private var vault: SecretVault
     private let failOnLoad: Bool
+    private let failOnNonInteractiveLoad: Bool
     var failOnSave: Bool
     var failOnDelete: Bool
     private(set) var loadCount = 0
+    private(set) var loadAccessModes: [SecretStoreAccessMode] = []
     private(set) var saveCount = 0
     private(set) var deleteCount = 0
 
     init(
         vault: SecretVault = SecretVault(),
         failOnLoad: Bool = false,
+        failOnNonInteractiveLoad: Bool = false,
         failOnSave: Bool = false,
         failOnDelete: Bool = false
     ) {
         self.vault = vault
         self.failOnLoad = failOnLoad
+        self.failOnNonInteractiveLoad = failOnNonInteractiveLoad
         self.failOnSave = failOnSave
         self.failOnDelete = failOnDelete
     }
 
-    func loadVault() throws -> SecretVault {
+    func loadVault(accessMode: SecretStoreAccessMode) throws -> SecretVault {
         loadCount += 1
+        loadAccessModes.append(accessMode)
+        if failOnNonInteractiveLoad, accessMode == .nonInteractive {
+            throw SecretStoreAccessError.interactionRequired
+        }
         if failOnLoad {
             throw CountingSecretStoreError.load
         }
@@ -1292,8 +1302,10 @@ var secretVault = SecretVault()
 secretVault.set("clip-secret", for: .cliproxyManagement)
 secretVault.set("newapi-legacy", for: .newAPIManagement)
 secretVault.set("subapi-legacy", for: .subAPIManagement)
+secretVault.set("radar-secret", for: .codexRadarAPI)
 secretVault.set("account-secret", for: .balanceAccount(source: .newAPI, id: "account-1"))
 runner.check(secretVault.value(for: .cliproxyManagement) == "clip-secret", "secret vault should store CLIProxyAPI key")
+runner.check(secretVault.value(for: .codexRadarAPI) == "radar-secret", "secret vault should store the Codex Radar token")
 runner.check(secretVault.value(for: .balanceAccount(source: .newAPI, id: "account-1")) == "account-secret", "secret vault should store account secret")
 secretVault.set("", for: .balanceAccount(source: .newAPI, id: "account-1"))
 runner.check(secretVault.value(for: .balanceAccount(source: .newAPI, id: "account-1")).isEmpty, "empty secret should remove vault entry")
@@ -1368,6 +1380,183 @@ runner.check(lazyStartupKeychainStore.loadCount == 1, "explicit secret load shou
 runner.check(lazyStartupSettings.cliproxyManagementKey == "lazy-clip-secret", "explicit secret load should populate CLIProxyAPI key")
 runner.check(lazyStartupSettings.secretsAreLoaded, "explicit secret load should mark settings secrets as loaded")
 lazyStartupDefaults.removePersistentDomain(forName: lazyStartupSuiteName)
+
+let radarCredentialDirectory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("CodexRadarCredential-\(UUID().uuidString)", isDirectory: true)
+let radarCredentialLegacyFile = radarCredentialDirectory.appendingPathComponent("token")
+var protectedRadarVault = SecretVault()
+protectedRadarVault.set("vault-radar-token", for: .codexRadarAPI)
+let protectedRadarStore = CountingSecretStore(
+    vault: protectedRadarVault,
+    failOnNonInteractiveLoad: true
+)
+let protectedRadarSuiteName = "CodexRadarProtectedCredential-\(UUID().uuidString)"
+let protectedRadarDefaults = runner.require(
+    UserDefaults(suiteName: protectedRadarSuiteName),
+    "protected Radar credential defaults should be available"
+)
+protectedRadarDefaults.removePersistentDomain(forName: protectedRadarSuiteName)
+let protectedRadarSettings = CodexNotchSettings(
+    defaults: protectedRadarDefaults,
+    secretStores: SecretStoreFactory(keychain: protectedRadarStore, database: MemorySecretStore()),
+    launchAtLoginManager: FakeLaunchAtLoginManager(),
+    environment: [:],
+    codexRadarLegacyTokenFileURL: radarCredentialLegacyFile
+)
+let backgroundRadarCredential = protectedRadarSettings.codexRadarCredential(accessMode: .nonInteractive)
+runner.check(backgroundRadarCredential.token == nil, "background Radar credential reads must not force Keychain authorization")
+runner.check(backgroundRadarCredential.source == .interactionRequired, "blocked background Keychain reads should request deferred authorization")
+runner.check(!protectedRadarSettings.secretsAreLoaded, "non-interactive Radar reads must not mark the full vault as loaded")
+runner.check(protectedRadarStore.loadAccessModes == [.nonInteractive], "startup Radar reads should explicitly disable authentication UI")
+let interactiveRadarCredential = protectedRadarSettings.codexRadarCredential(accessMode: .interactive)
+runner.check(interactiveRadarCredential.token == "vault-radar-token", "user-initiated Radar reads should load the stored token")
+runner.check(interactiveRadarCredential.source == .secretStore, "user-initiated Radar reads should report the unified secret store")
+runner.check(protectedRadarSettings.secretsAreLoaded, "interactive Radar reads should load the shared vault")
+
+let environmentRadarStore = CountingSecretStore(vault: protectedRadarVault, failOnNonInteractiveLoad: true)
+let environmentRadarSettings = CodexNotchSettings(
+    defaults: protectedRadarDefaults,
+    secretStores: SecretStoreFactory(keychain: environmentRadarStore, database: MemorySecretStore()),
+    launchAtLoginManager: FakeLaunchAtLoginManager(),
+    environment: [CodexNotchSettings.codexRadarEnvironmentKey: "  env-radar-token  "],
+    codexRadarLegacyTokenFileURL: radarCredentialLegacyFile
+)
+let environmentRadarCredential = environmentRadarSettings.codexRadarCredential(accessMode: .nonInteractive)
+runner.check(environmentRadarCredential.token == "env-radar-token", "Radar environment token should remain the highest-priority temporary override")
+runner.check(environmentRadarCredential.source == .environment, "Radar environment overrides should expose their source")
+runner.check(environmentRadarStore.loadCount == 0, "Radar environment overrides should not touch Keychain")
+
+try FileManager.default.createDirectory(at: radarCredentialDirectory, withIntermediateDirectories: true)
+try Data("  migrated-radar-token  \n".utf8).write(to: radarCredentialLegacyFile, options: .atomic)
+let migratedRadarStore = CountingSecretStore()
+let migratedRadarSuiteName = "CodexRadarLegacyMigration-\(UUID().uuidString)"
+let migratedRadarDefaults = runner.require(
+    UserDefaults(suiteName: migratedRadarSuiteName),
+    "legacy Radar migration defaults should be available"
+)
+migratedRadarDefaults.removePersistentDomain(forName: migratedRadarSuiteName)
+let migratedRadarSettings = CodexNotchSettings(
+    defaults: migratedRadarDefaults,
+    secretStores: SecretStoreFactory(keychain: migratedRadarStore, database: MemorySecretStore()),
+    launchAtLoginManager: FakeLaunchAtLoginManager(),
+    environment: [:],
+    codexRadarLegacyTokenFileURL: radarCredentialLegacyFile
+)
+let migratedRadarCredential = migratedRadarSettings.codexRadarCredential(accessMode: .interactive)
+runner.check(migratedRadarCredential.token == "migrated-radar-token", "interactive Radar access should migrate the legacy token file")
+runner.check(!FileManager.default.fileExists(atPath: radarCredentialLegacyFile.path), "verified Radar migration should delete the legacy token file")
+let migratedRadarVault = try migratedRadarStore.loadVault()
+runner.check(migratedRadarVault.value(for: .codexRadarAPI) == "migrated-radar-token", "Radar migration should persist the token in SecretVault")
+
+let retryRadarDirectory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("CodexRadarMigrationRetry-\(UUID().uuidString)", isDirectory: true)
+let retryRadarLegacyFile = retryRadarDirectory.appendingPathComponent("token")
+try FileManager.default.createDirectory(at: retryRadarDirectory, withIntermediateDirectories: true)
+try Data("retry-radar-token\n".utf8).write(to: retryRadarLegacyFile, options: .atomic)
+let retryRadarStore = CountingSecretStore(failOnSave: true)
+let retryRadarSuiteName = "CodexRadarMigrationRetry-\(UUID().uuidString)"
+let retryRadarDefaults = runner.require(
+    UserDefaults(suiteName: retryRadarSuiteName),
+    "Radar migration retry defaults should be available"
+)
+retryRadarDefaults.removePersistentDomain(forName: retryRadarSuiteName)
+let failedRadarMigrationSettings = CodexNotchSettings(
+    defaults: retryRadarDefaults,
+    secretStores: SecretStoreFactory(keychain: retryRadarStore, database: MemorySecretStore()),
+    launchAtLoginManager: FakeLaunchAtLoginManager(),
+    environment: [:],
+    codexRadarLegacyTokenFileURL: retryRadarLegacyFile
+)
+let failedRadarMigrationCredential = failedRadarMigrationSettings.codexRadarCredential(accessMode: .interactive)
+runner.check(failedRadarMigrationCredential.token == nil, "a failed Radar vault write must not publish an unverified migrated token")
+runner.check(FileManager.default.fileExists(atPath: retryRadarLegacyFile.path), "a failed Radar vault write must preserve the legacy token file")
+retryRadarStore.failOnSave = false
+let recoveredRadarMigrationSettings = CodexNotchSettings(
+    defaults: retryRadarDefaults,
+    secretStores: SecretStoreFactory(keychain: retryRadarStore, database: MemorySecretStore()),
+    launchAtLoginManager: FakeLaunchAtLoginManager(),
+    environment: [:],
+    codexRadarLegacyTokenFileURL: retryRadarLegacyFile
+)
+let recoveredRadarMigrationCredential = recoveredRadarMigrationSettings.codexRadarCredential(accessMode: .interactive)
+runner.check(recoveredRadarMigrationCredential.token == "retry-radar-token", "Radar migration should recover after a failed target write")
+runner.check(!FileManager.default.fileExists(atPath: retryRadarLegacyFile.path), "recovered Radar migration should clean the verified legacy file")
+
+let cleanupRetryDirectory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("CodexRadarCleanupRetry-\(UUID().uuidString)", isDirectory: true)
+let cleanupRetryLegacyFile = cleanupRetryDirectory.appendingPathComponent("token")
+try FileManager.default.createDirectory(at: cleanupRetryDirectory, withIntermediateDirectories: true)
+try Data("cleanup-retry-token\n".utf8).write(to: cleanupRetryLegacyFile, options: .atomic)
+let cleanupRetryStore = CountingSecretStore()
+let cleanupRetrySuiteName = "CodexRadarCleanupRetry-\(UUID().uuidString)"
+let cleanupRetryDefaults = runner.require(
+    UserDefaults(suiteName: cleanupRetrySuiteName),
+    "Radar cleanup retry defaults should be available"
+)
+cleanupRetryDefaults.removePersistentDomain(forName: cleanupRetrySuiteName)
+try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: cleanupRetryDirectory.path)
+let failedRadarCleanupSettings = CodexNotchSettings(
+    defaults: cleanupRetryDefaults,
+    secretStores: SecretStoreFactory(keychain: cleanupRetryStore, database: MemorySecretStore()),
+    launchAtLoginManager: FakeLaunchAtLoginManager(),
+    environment: [:],
+    codexRadarLegacyTokenFileURL: cleanupRetryLegacyFile
+)
+let failedRadarCleanupCredential = failedRadarCleanupSettings.codexRadarCredential(accessMode: .interactive)
+runner.check(failedRadarCleanupCredential.token == "cleanup-retry-token", "a verified Radar vault write should remain usable when legacy cleanup fails")
+runner.check(FileManager.default.fileExists(atPath: cleanupRetryLegacyFile.path), "failed Radar cleanup should preserve the legacy file for retry")
+runner.check(failedRadarCleanupSettings.codexRadarCredentialError?.contains("重试") == true, "failed Radar cleanup should remain visible and retryable")
+try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: cleanupRetryDirectory.path)
+let recoveredRadarCleanupSettings = CodexNotchSettings(
+    defaults: cleanupRetryDefaults,
+    secretStores: SecretStoreFactory(keychain: cleanupRetryStore, database: MemorySecretStore()),
+    launchAtLoginManager: FakeLaunchAtLoginManager(),
+    environment: [:],
+    codexRadarLegacyTokenFileURL: cleanupRetryLegacyFile
+)
+let recoveredRadarCleanupCredential = recoveredRadarCleanupSettings.codexRadarCredential(accessMode: .interactive)
+runner.check(recoveredRadarCleanupCredential.token == "cleanup-retry-token", "Radar cleanup retry should preserve the migrated token")
+runner.check(!FileManager.default.fileExists(atPath: cleanupRetryLegacyFile.path), "Radar cleanup retry should remove the verified legacy file")
+
+try Data("conflicting-file-token\n".utf8).write(to: radarCredentialLegacyFile, options: .atomic)
+var conflictRadarVault = SecretVault()
+conflictRadarVault.set("existing-vault-token", for: .codexRadarAPI)
+let conflictRadarStore = CountingSecretStore(vault: conflictRadarVault)
+let conflictRadarSettings = CodexNotchSettings(
+    defaults: migratedRadarDefaults,
+    secretStores: SecretStoreFactory(keychain: conflictRadarStore, database: MemorySecretStore()),
+    launchAtLoginManager: FakeLaunchAtLoginManager(),
+    environment: [:],
+    codexRadarLegacyTokenFileURL: radarCredentialLegacyFile
+)
+let conflictRadarCredential = conflictRadarSettings.codexRadarCredential(accessMode: .interactive)
+runner.check(conflictRadarCredential.token == "existing-vault-token", "an existing vault token should win over a conflicting legacy file")
+runner.check(FileManager.default.fileExists(atPath: radarCredentialLegacyFile.path), "a conflicting legacy Radar token must be preserved for explicit resolution")
+runner.check(conflictRadarSettings.codexRadarCredentialError != nil, "a conflicting legacy Radar token should produce an actionable settings error")
+try conflictRadarSettings.setCodexRadarAPIToken("replacement-token")
+runner.check(!FileManager.default.fileExists(atPath: radarCredentialLegacyFile.path), "explicit Radar token save should clean a conflicting legacy file after verification")
+let replacedRadarVault = try conflictRadarStore.loadVault()
+runner.check(replacedRadarVault.value(for: .codexRadarAPI) == "replacement-token", "explicit Radar token save should update the unified vault")
+conflictRadarStore.failOnSave = true
+do {
+    try conflictRadarSettings.setCodexRadarAPIToken("unverified-token")
+    runner.check(false, "an explicit Radar token write failure should throw")
+} catch {
+    runner.check(true, "an explicit Radar token write failure should remain visible")
+}
+runner.check(
+    conflictRadarSettings.codexRadarCredential(accessMode: .interactive).token == "replacement-token",
+    "a failed explicit Radar token write must not publish the unverified in-memory value"
+)
+conflictRadarStore.failOnSave = false
+
+protectedRadarDefaults.removePersistentDomain(forName: protectedRadarSuiteName)
+migratedRadarDefaults.removePersistentDomain(forName: migratedRadarSuiteName)
+retryRadarDefaults.removePersistentDomain(forName: retryRadarSuiteName)
+cleanupRetryDefaults.removePersistentDomain(forName: cleanupRetrySuiteName)
+try? FileManager.default.removeItem(at: radarCredentialDirectory)
+try? FileManager.default.removeItem(at: retryRadarDirectory)
+try? FileManager.default.removeItem(at: cleanupRetryDirectory)
 
 let settings = CodexNotchSettings(
     defaults: settingsDefaults,
@@ -1527,6 +1716,8 @@ let databaseModeSettings = CodexNotchSettings(
     secretStores: SecretStoreFactory(keychain: keychainStoreForDatabaseMode, database: databaseStoreForDatabaseMode),
     launchAtLoginManager: FakeLaunchAtLoginManager()
 )
+runner.check(databaseModeSettings.loadSecretsIfNeeded(), "database migration setup should load the source vault")
+try databaseModeSettings.setCodexRadarAPIToken("database-radar-token")
 databaseModeSettings.setSecretStorageMode(.database)
 runner.check(databaseModeSettings.secretStorageMode == .database, "verified secret migration should switch storage mode")
 runner.check(keychainStoreForDatabaseMode.deleteCount == 1, "secret migration should delete the source vault")
@@ -1554,6 +1745,10 @@ runner.check(reloadedDatabaseModeSettings.loadSecretsIfNeeded(), "database mode 
 runner.check(reloadedDatabaseModeSettings.cliproxyManagementKey == "clip-secret", "database mode should reload CLIProxyAPI key")
 runner.check(reloadedDatabaseModeSettings.newAPIManagementKey == "newapi-secret", "database mode should reload NewAPI key")
 runner.check(reloadedDatabaseModeSettings.subAPIManagementKey == "subapi-secret", "database mode should reload Sub2API key")
+runner.check(
+    reloadedDatabaseModeSettings.codexRadarCredential(accessMode: .nonInteractive).token == "database-radar-token",
+    "database mode should reload the unified Radar token without authentication UI"
+)
 runner.check(
     reloadedDatabaseModeSettings.balanceAccounts(for: .newAPI).first?.secret == "db-account-secret",
     "database mode should reload account secret"

@@ -25,9 +25,26 @@ struct SecretKey: Hashable, Codable {
     static let cliproxyManagement = SecretKey(rawValue: "cliproxy.management")
     static let newAPIManagement = SecretKey(rawValue: "newapi.management")
     static let subAPIManagement = SecretKey(rawValue: "subapi.management")
+    static let codexRadarAPI = SecretKey(rawValue: "codexradar.api")
 
     static func balanceAccount(source: BalanceMonitorSource, id: String) -> SecretKey {
         SecretKey(rawValue: "\(source.rawValue).account.\(id)")
+    }
+}
+
+enum SecretStoreAccessMode: Equatable, Sendable {
+    case interactive
+    case nonInteractive
+}
+
+enum SecretStoreAccessError: LocalizedError {
+    case interactionRequired
+
+    var errorDescription: String? {
+        switch self {
+        case .interactionRequired:
+            "钥匙串需要用户授权。"
+        }
     }
 }
 
@@ -63,9 +80,15 @@ struct SecretVault: Codable, Equatable {
 }
 
 protocol SecretStore {
-    func loadVault() throws -> SecretVault
+    func loadVault(accessMode: SecretStoreAccessMode) throws -> SecretVault
     func saveVault(_ vault: SecretVault) throws
     func deleteVault() throws
+}
+
+extension SecretStore {
+    func loadVault() throws -> SecretVault {
+        try loadVault(accessMode: .interactive)
+    }
 }
 
 struct SecretStoreFactory {
@@ -93,8 +116,17 @@ struct KeychainSecretStore: SecretStore {
     static let service = "com.alight.codexnotch.secret-vault"
     static let account = "default"
 
-    func loadVault() throws -> SecretVault {
-        let encoded = try KeychainStore.read(service: Self.service, account: Self.account)
+    func loadVault(accessMode: SecretStoreAccessMode) throws -> SecretVault {
+        let encoded: String
+        do {
+            encoded = try KeychainStore.read(
+                service: Self.service,
+                account: Self.account,
+                accessMode: accessMode
+            )
+        } catch KeychainStore.Error.interactionRequired {
+            throw SecretStoreAccessError.interactionRequired
+        }
         guard !encoded.isEmpty else {
             return SecretVault()
         }
@@ -120,7 +152,7 @@ final class MemorySecretStore: SecretStore {
         self.vault = vault
     }
 
-    func loadVault() throws -> SecretVault {
+    func loadVault(accessMode: SecretStoreAccessMode) throws -> SecretVault {
         vault
     }
 
@@ -158,7 +190,7 @@ struct DatabaseSecretStore: SecretStore {
             .appendingPathComponent("secrets.sqlite3")
     }
 
-    func loadVault() throws -> SecretVault {
+    func loadVault(accessMode: SecretStoreAccessMode) throws -> SecretVault {
         try withConnection { connection in
             let statement = try prepare(
                 "SELECT payload FROM secret_vault WHERE id = ? LIMIT 1;",
