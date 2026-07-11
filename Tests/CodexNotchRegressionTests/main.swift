@@ -190,6 +190,41 @@ runner.check(
     IslandMetrics.clampedOverlayCenterX(920, in: overlayScreenFrame) == 920,
     "overlay drag should preserve an in-bounds horizontal offset"
 )
+var overlayDragSession = OverlayDragSession(pointerX: 720, centerX: 720)
+runner.check(
+    overlayDragSession.update(pointerX: 820, in: overlayScreenFrame) == 820,
+    "overlay drag should follow global pointer movement one-to-one"
+)
+runner.check(
+    overlayDragSession.update(pointerX: 1_500, in: overlayScreenFrame) == 1_180,
+    "overlay drag should clamp at the right edge"
+)
+runner.check(
+    overlayDragSession.update(pointerX: 1_499, in: overlayScreenFrame) == 1_179,
+    "overlay drag should leave a clamped edge after one point of reverse movement"
+)
+let normalizedOverlayPosition = IslandMetrics.normalizedOverlayPosition(
+    centerX: 920,
+    in: overlayScreenFrame
+)
+runner.check(
+    abs(IslandMetrics.overlayCenterX(normalizedPosition: normalizedOverlayPosition, in: overlayScreenFrame) - 920) < 0.001,
+    "normalized overlay position should round-trip on the same screen"
+)
+let widerOverlayScreenFrame = CGRect(x: 0, y: 0, width: 1_728, height: 1_117)
+let restoredWiderCenter = IslandMetrics.overlayCenterX(
+    normalizedPosition: normalizedOverlayPosition,
+    in: widerOverlayScreenFrame
+)
+runner.check(
+    abs(IslandMetrics.normalizedOverlayPosition(centerX: restoredWiderCenter, in: widerOverlayScreenFrame) - normalizedOverlayPosition) < 0.001,
+    "normalized overlay position should survive a screen width change"
+)
+let narrowOverlayScreenFrame = CGRect(x: 0, y: 0, width: 400, height: 800)
+runner.check(
+    IslandMetrics.overlayCenterX(normalizedPosition: 1, in: narrowOverlayScreenFrame) == narrowOverlayScreenFrame.midX,
+    "screens narrower than the detail panel should force the overlay to center"
+)
 runner.check(fullCodexDetailHeight == 528, "five-row Codex detail with Spark and period usage should be 528 points tall")
 runner.check(fullCodexDetailHeight - codexDetailWithoutSpark == 40, "Spark strip should add 40 points including its section gap")
 runner.check(fullCodexDetailHeight - codexDetailWithoutPeriod == 56, "period footer should add 56 points including its section gap")
@@ -1579,6 +1614,22 @@ runner.check(settings.usageRefreshInterval == 300, "saving unchanged refresh int
 runner.check(settings.watcherRefreshInterval == 180, "saving unchanged refresh intervals should keep the folded low-power watcher default")
 runner.check(settings.fileChangeRefreshMinimumGap == 15, "saving unchanged refresh intervals should keep the folded low-power debounce default")
 runner.check(settings.codexRadarEnabled, "Codex Radar should default to enabled")
+runner.check(settings.overlayHorizontalPosition == 0, "overlay position should default to the primary screen center")
+settings.setOverlayHorizontalPosition(0.42)
+let overlayPositionReloadedSettings = CodexNotchSettings(
+    defaults: settingsDefaults,
+    secretStores: SecretStoreFactory(keychain: MemorySecretStore(), database: MemorySecretStore()),
+    launchAtLoginManager: FakeLaunchAtLoginManager()
+)
+runner.check(
+    abs(overlayPositionReloadedSettings.overlayHorizontalPosition - 0.42) < 0.001,
+    "overlay position should persist across app restarts"
+)
+overlayPositionReloadedSettings.setOverlayHorizontalPosition(4)
+runner.check(overlayPositionReloadedSettings.overlayHorizontalPosition == 1, "persisted overlay position should clamp to the right edge")
+overlayPositionReloadedSettings.resetOverlayHorizontalPosition()
+runner.check(overlayPositionReloadedSettings.overlayHorizontalPosition == 0, "reset should return the overlay to the default center")
+runner.check(settingsDefaults.object(forKey: "overlayHorizontalPosition") == nil, "reset should clear the persisted overlay position")
 runner.check(!settings.showSparkQuota, "Spark quota display should default to disabled")
 runner.check(!settings.showContextMetrics, "context metrics display should default to disabled")
 settings.activeRefreshInterval = 2

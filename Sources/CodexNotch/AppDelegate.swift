@@ -275,8 +275,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-private final class CollapsedHostingView<Content: View>: NSHostingView<Content> {
+private final class CollapsedHostingView<Content: View>: NSHostingView<Content>, NSGestureRecognizerDelegate {
     var onClick: (() -> Void)?
+    var onDragBegan: ((CGFloat) -> Void)?
     var onDragChanged: ((CGFloat) -> Void)?
     var onDragEnded: ((CGFloat) -> Void)?
 
@@ -287,11 +288,21 @@ private final class CollapsedHostingView<Content: View>: NSHostingView<Content> 
     func configureInteractions() {
         let panGesture = NSPanGestureRecognizer(target: self, action: #selector(handlePanGesture(_:)))
         panGesture.buttonMask = 0x1
+        panGesture.delegate = self
         addGestureRecognizer(panGesture)
 
         let clickGesture = NSClickGestureRecognizer(target: self, action: #selector(handleClickGesture(_:)))
         clickGesture.buttonMask = 0x1
+        clickGesture.delegate = self
         addGestureRecognizer(clickGesture)
+    }
+
+    func gestureRecognizer(
+        _ gestureRecognizer: NSGestureRecognizer,
+        shouldRequireFailureOf otherGestureRecognizer: NSGestureRecognizer
+    ) -> Bool {
+        gestureRecognizer is NSClickGestureRecognizer
+            && otherGestureRecognizer is NSPanGestureRecognizer
     }
 
     override func resetCursorRects() {
@@ -307,12 +318,14 @@ private final class CollapsedHostingView<Content: View>: NSHostingView<Content> 
     }
 
     @objc private func handlePanGesture(_ gesture: NSPanGestureRecognizer) {
-        let translationX = gesture.translation(in: self).x
+        let pointerX = NSEvent.mouseLocation.x
         switch gesture.state {
-        case .began, .changed:
-            onDragChanged?(translationX)
+        case .began:
+            onDragBegan?(pointerX)
+        case .changed:
+            onDragChanged?(pointerX)
         case .ended, .cancelled:
-            onDragEnded?(translationX)
+            onDragEnded?(pointerX)
         default:
             break
         }
@@ -342,8 +355,8 @@ final class NotchOverlayController {
     )
     private var cancellables: Set<AnyCancellable> = []
     private var eventMonitors: [Any] = []
-    private var horizontalOffset: CGFloat = 0
-    private var dragStartCenterX: CGFloat?
+    private var overlayHorizontalPosition: CGFloat = 0
+    private var dragSession: OverlayDragSession?
 
     init() {
         window = NSPanel(
@@ -357,6 +370,7 @@ final class NotchOverlayController {
             backing: .buffered,
             defer: false
         )
+        overlayHorizontalPosition = settings.overlayHorizontalPosition
 
         configureWindow()
         configureContent()
@@ -396,6 +410,9 @@ final class NotchOverlayController {
             settings: settings,
             onSettings: { [weak self] in
                 self?.showSettings()
+            },
+            onResetPosition: { [weak self] in
+                self?.resetOverlayPosition()
             }
         )
         let hostingView = CollapsedHostingView(rootView: view)
@@ -407,11 +424,14 @@ final class NotchOverlayController {
                 self.overlayState.isExpanded.toggle()
             }
         }
-        hostingView.onDragChanged = { [weak self] translationX in
-            self?.moveOverlay(translationX: translationX, ended: false)
+        hostingView.onDragBegan = { [weak self] pointerX in
+            self?.beginOverlayDrag(pointerX: pointerX)
         }
-        hostingView.onDragEnded = { [weak self] translationX in
-            self?.moveOverlay(translationX: translationX, ended: true)
+        hostingView.onDragChanged = { [weak self] pointerX in
+            self?.moveOverlay(pointerX: pointerX, ended: false)
+        }
+        hostingView.onDragEnded = { [weak self] pointerX in
+            self?.moveOverlay(pointerX: pointerX, ended: true)
         }
         hostingView.configureInteractions()
         hostingView.frame = NSRect(
@@ -541,6 +561,7 @@ final class NotchOverlayController {
                 guard let self else {
                     return
                 }
+                self.dragSession = nil
                 self.updateFrames()
             }
             .store(in: &cancellables)
@@ -644,23 +665,45 @@ final class NotchOverlayController {
         window.orderFrontRegardless()
     }
 
-    private func moveOverlay(translationX: CGFloat, ended: Bool) {
+    private func beginOverlayDrag(pointerX: CGFloat) {
         guard let screen = primaryDisplayScreen() ?? NSScreen.screens.first else {
             return
         }
-        if dragStartCenterX == nil {
-            dragStartCenterX = IslandMetrics.clampedOverlayCenterX(
-                screen.frame.midX + horizontalOffset,
-                in: screen.frame
-            )
+        let centerX = IslandMetrics.overlayCenterX(
+            normalizedPosition: overlayHorizontalPosition,
+            in: screen.frame
+        )
+        dragSession = OverlayDragSession(pointerX: pointerX, centerX: centerX)
+    }
+
+    private func moveOverlay(pointerX: CGFloat, ended: Bool) {
+        guard let screen = primaryDisplayScreen() ?? NSScreen.screens.first else {
+            return
         }
-        let proposedCenterX = (dragStartCenterX ?? screen.frame.midX) + translationX
-        let centerX = IslandMetrics.clampedOverlayCenterX(proposedCenterX, in: screen.frame)
-        horizontalOffset = centerX - screen.frame.midX
+        if dragSession == nil {
+            beginOverlayDrag(pointerX: pointerX)
+        }
+        guard var session = dragSession else {
+            return
+        }
+        let centerX = session.update(pointerX: pointerX, in: screen.frame)
+        dragSession = session
+        overlayHorizontalPosition = IslandMetrics.normalizedOverlayPosition(
+            centerX: centerX,
+            in: screen.frame
+        )
         updateFrames()
         if ended {
-            dragStartCenterX = nil
+            dragSession = nil
+            settings.setOverlayHorizontalPosition(overlayHorizontalPosition)
         }
+    }
+
+    private func resetOverlayPosition() {
+        dragSession = nil
+        overlayHorizontalPosition = 0
+        settings.resetOverlayHorizontalPosition()
+        updateFrames()
     }
 
     private func updateFrames() {
@@ -669,11 +712,10 @@ final class NotchOverlayController {
         }
 
         let detailHeight = detailWindow == nil && !overlayState.isExpanded ? localDetailHeight : currentDetailHeight
-        let centerX = IslandMetrics.clampedOverlayCenterX(
-            screen.frame.midX + horizontalOffset,
+        let centerX = IslandMetrics.overlayCenterX(
+            normalizedPosition: overlayHorizontalPosition,
             in: screen.frame
         )
-        horizontalOffset = centerX - screen.frame.midX
         let collapsedX = centerX - IslandMetrics.collapsedWidth / 2
         let detailX = centerX - IslandMetrics.width / 2
         let islandY = screen.frame.maxY - IslandMetrics.collapsedHeight
