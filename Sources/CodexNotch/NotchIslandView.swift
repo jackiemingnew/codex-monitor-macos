@@ -148,35 +148,15 @@ struct NotchIslandView: View {
     }
 
     private var effectiveDisplaySource: NotchDisplaySource {
-        let selected = settings.notchDisplaySource
-        if selected == .automatic {
-            let externalSources: [(NotchDisplaySource, RemoteAlertSeverity)] = [
-                settings.remoteMonitorEnabled ? (.remoteCodex, remoteViewModel.snapshot.panelSeverity) : nil,
-                settings.newAPIMonitorEnabled ? (.newAPI, newAPIViewModel.snapshot.panelSeverity) : nil,
-                settings.subAPIMonitorEnabled ? (.subAPI, subAPIViewModel.snapshot.panelSeverity) : nil
-            ].compactMap { $0 }
-            if let alert = externalSources
-                .filter({ $0.1 != .none })
-                .sorted(by: { $0.1 > $1.1 })
-                .first {
-                return alert.0
-            }
-            return .codex
-        }
-        return isDisplaySourceEnabled(selected) ? selected : .codex
-    }
-
-    private func isDisplaySourceEnabled(_ source: NotchDisplaySource) -> Bool {
-        switch source {
-        case .automatic, .codex:
-            true
-        case .remoteCodex:
-            settings.remoteMonitorEnabled
-        case .newAPI:
-            settings.newAPIMonitorEnabled
-        case .subAPI:
-            settings.subAPIMonitorEnabled
-        }
+        HUDDisplaySourceResolver.resolve(
+            selected: settings.notchDisplaySource,
+            remoteEnabled: settings.remoteMonitorEnabled,
+            remoteSeverity: remoteViewModel.snapshot.panelSeverity,
+            newAPIEnabled: settings.newAPIMonitorEnabled,
+            newAPISeverity: newAPIViewModel.snapshot.panelSeverity,
+            subAPIEnabled: settings.subAPIMonitorEnabled,
+            subAPISeverity: subAPIViewModel.snapshot.panelSeverity
+        )
     }
 
     private var collapsedTitle: String {

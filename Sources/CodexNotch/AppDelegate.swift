@@ -283,6 +283,7 @@ private final class CollapsedHostingView<Content: View>: NSHostingView<Content>,
     var onResetPosition: (() -> Void)?
     var onSettings: (() -> Void)?
     var onRefresh: (() -> Void)?
+    var onMoveToMenuBar: (() -> Void)?
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
         true
@@ -321,6 +322,12 @@ private final class CollapsedHostingView<Content: View>: NSHostingView<Content>,
         let menu = NSMenu()
         menu.autoenablesItems = false
         menu.addItem(menuItem(
+            title: "移到菜单栏",
+            systemImage: "menubar.rectangle",
+            action: #selector(moveToMenuBar)
+        ))
+        menu.addItem(.separator())
+        menu.addItem(menuItem(
             title: "返回默认位置",
             systemImage: "arrow.counterclockwise",
             action: #selector(resetPosition)
@@ -352,6 +359,10 @@ private final class CollapsedHostingView<Content: View>: NSHostingView<Content>,
         onRefresh?()
     }
 
+    @objc private func moveToMenuBar() {
+        onMoveToMenuBar?()
+    }
+
     @objc private func quit() {
         NSApp.terminate(nil)
     }
@@ -375,6 +386,12 @@ private final class CollapsedHostingView<Content: View>: NSHostingView<Content>,
         default:
             break
         }
+    }
+}
+
+private final class StatusItemHostingView<Content: View>: NSHostingView<Content> {
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
     }
 }
 
@@ -404,6 +421,7 @@ final class NotchOverlayController {
     private var overlayHorizontalPosition: CGFloat = 0
     private var dragSession: OverlayDragSession?
     private var selectedDetailPage: DetailPage = .codex
+    private var statusItem: NSStatusItem?
 
     init() {
         window = NSPanel(
@@ -429,7 +447,7 @@ final class NotchOverlayController {
     }
 
     func show() {
-        window.orderFrontRegardless()
+        applyDisplayMode()
     }
 
     private func configureWindow() {
@@ -483,6 +501,9 @@ final class NotchOverlayController {
         hostingView.onRefresh = { [weak self] in
             self?.viewModel.refreshAll()
         }
+        hostingView.onMoveToMenuBar = { [weak self] in
+            self?.settings.hudDisplayMode = .menuBar
+        }
         hostingView.configureInteractions()
         hostingView.frame = NSRect(
             x: 0,
@@ -493,6 +514,117 @@ final class NotchOverlayController {
         hostingView.wantsLayer = true
         hostingView.layer?.backgroundColor = NSColor.clear.cgColor
         window.contentView = hostingView
+    }
+
+    private func applyDisplayMode() {
+        dragSession = nil
+        overlayState.isExpanded = false
+        if let detailWindow, window.childWindows?.contains(detailWindow) == true {
+            window.removeChildWindow(detailWindow)
+        }
+        detailWindow?.orderOut(nil)
+
+        switch settings.hudDisplayMode {
+        case .floatingHUD:
+            removeStatusItem()
+            updateFrames()
+            window.orderFrontRegardless()
+        case .menuBar:
+            window.orderOut(nil)
+            configureStatusItem()
+            updateFrames()
+        }
+    }
+
+    private func configureStatusItem() {
+        guard statusItem == nil else {
+            return
+        }
+
+        let item = NSStatusBar.system.statusItem(withLength: MenuBarMetrics.width)
+        guard let button = item.button else {
+            NSStatusBar.system.removeStatusItem(item)
+            return
+        }
+
+        button.title = ""
+        button.image = nil
+        button.target = self
+        button.action = #selector(handleStatusItemAction(_:))
+        button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        button.toolTip = "codex监测：左键打开详情，右键打开菜单"
+        button.setAccessibilityLabel("codex监测菜单栏状态")
+
+        let statusView = MenuBarStatusView(
+            viewModel: viewModel,
+            remoteViewModel: remoteViewModel,
+            newAPIViewModel: newAPIViewModel,
+            subAPIViewModel: subAPIViewModel,
+            settings: settings
+        )
+        let hostingView = StatusItemHostingView(rootView: statusView)
+        hostingView.frame = NSRect(x: 0, y: 0, width: MenuBarMetrics.width, height: MenuBarMetrics.height)
+        hostingView.autoresizingMask = [.width, .height]
+        button.addSubview(hostingView)
+        statusItem = item
+    }
+
+    private func removeStatusItem() {
+        guard let statusItem else {
+            return
+        }
+        NSStatusBar.system.removeStatusItem(statusItem)
+        self.statusItem = nil
+    }
+
+    @objc private func handleStatusItemAction(_ sender: NSStatusBarButton) {
+        guard let event = NSApp.currentEvent else {
+            return
+        }
+        if event.type == .rightMouseUp {
+            NSMenu.popUpContextMenu(makeStatusItemMenu(), with: event, for: sender)
+            return
+        }
+        overlayState.isExpanded.toggle()
+    }
+
+    private func makeStatusItemMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        menu.addItem(statusMenuItem(
+            title: "切换到浮动 HUD",
+            systemImage: "macwindow",
+            action: #selector(useFloatingHUD)
+        ))
+        menu.addItem(.separator())
+        menu.addItem(statusMenuItem(title: "设置", systemImage: "gearshape", action: #selector(openSettingsFromMenu)))
+        menu.addItem(statusMenuItem(title: "刷新", systemImage: "arrow.clockwise", action: #selector(refreshFromMenu)))
+        menu.addItem(.separator())
+        menu.addItem(statusMenuItem(title: "退出 codex监测", systemImage: "power", action: #selector(quitFromMenu)))
+        return menu
+    }
+
+    private func statusMenuItem(title: String, systemImage: String, action: Selector) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        item.image = NSImage(systemSymbolName: systemImage, accessibilityDescription: title)
+        return item
+    }
+
+    @objc private func useFloatingHUD() {
+        settings.hudDisplayMode = .floatingHUD
+    }
+
+    @objc private func openSettingsFromMenu() {
+        showSettings()
+    }
+
+    @objc private func refreshFromMenu() {
+        viewModel.refreshAll()
+    }
+
+    @objc private func quitFromMenu() {
+        NSApp.terminate(nil)
     }
 
     private func ensureDetailWindow() -> NSPanel {
@@ -558,6 +690,14 @@ final class NotchOverlayController {
     }
 
     private func observeState() {
+        settings.$hudDisplayMode
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] _ in
+                self?.applyDisplayMode()
+            }
+            .store(in: &cancellables)
+
         overlayState.$isExpanded
             .removeDuplicates()
             .sink { [weak self] isExpanded in
@@ -662,7 +802,9 @@ final class NotchOverlayController {
         }
 
         let location = NSEvent.mouseLocation
-        if window.frame.contains(location) || detailWindow?.frame.contains(location) == true {
+        if (settings.hudDisplayMode == .floatingHUD && window.frame.contains(location))
+            || detailWindow?.frame.contains(location) == true
+            || statusItemScreenFrame?.contains(location) == true {
             return
         }
         overlayState.isExpanded = false
@@ -675,14 +817,24 @@ final class NotchOverlayController {
             let detailWindow = ensureDetailWindow()
             updateFrames()
             refreshDetailData()
-            if window.childWindows?.contains(detailWindow) != true {
-                window.addChildWindow(detailWindow, ordered: .below)
+            switch settings.hudDisplayMode {
+            case .floatingHUD:
+                if window.childWindows?.contains(detailWindow) != true {
+                    window.addChildWindow(detailWindow, ordered: .below)
+                }
+                detailWindow.order(.below, relativeTo: window.windowNumber)
+                window.orderFrontRegardless()
+            case .menuBar:
+                if window.childWindows?.contains(detailWindow) == true {
+                    window.removeChildWindow(detailWindow)
+                }
+                detailWindow.orderFrontRegardless()
             }
-            detailWindow.order(.below, relativeTo: window.windowNumber)
-            window.orderFrontRegardless()
         } else {
             if let detailWindow {
-                window.removeChildWindow(detailWindow)
+                if window.childWindows?.contains(detailWindow) == true {
+                    window.removeChildWindow(detailWindow)
+                }
                 detailWindow.orderOut(nil)
             }
         }
@@ -721,11 +873,16 @@ final class NotchOverlayController {
         }
 
         let detailWindow = ensureDetailWindow()
-        if window.childWindows?.contains(detailWindow) != true {
-            window.addChildWindow(detailWindow, ordered: .below)
+        switch settings.hudDisplayMode {
+        case .floatingHUD:
+            if window.childWindows?.contains(detailWindow) != true {
+                window.addChildWindow(detailWindow, ordered: .below)
+            }
+            detailWindow.order(.below, relativeTo: window.windowNumber)
+            window.orderFrontRegardless()
+        case .menuBar:
+            detailWindow.orderFrontRegardless()
         }
-        detailWindow.order(.below, relativeTo: window.windowNumber)
-        window.orderFrontRegardless()
     }
 
     private func beginOverlayDrag(pointerX: CGFloat) {
@@ -770,18 +927,30 @@ final class NotchOverlayController {
     }
 
     private func updateFrames() {
-        guard let screen = primaryDisplayScreen() ?? NSScreen.screens.first else {
+        guard let screen = displayScreen() else {
             return
         }
 
         let detailHeight = detailWindow == nil && !overlayState.isExpanded ? localDetailHeight : currentDetailHeight
-        let centerX = IslandMetrics.overlayCenterX(
+        let floatingCenterX = IslandMetrics.overlayCenterX(
             normalizedPosition: overlayHorizontalPosition,
             in: screen.frame
         )
-        let collapsedX = centerX - IslandMetrics.collapsedWidth / 2
-        let detailX = centerX - IslandMetrics.width / 2
+        let detailCenterX = switch settings.hudDisplayMode {
+        case .floatingHUD:
+            floatingCenterX
+        case .menuBar:
+            IslandMetrics.clampedOverlayCenterX(statusItemScreenFrame?.midX ?? screen.frame.midX, in: screen.frame)
+        }
+        let collapsedX = floatingCenterX - IslandMetrics.collapsedWidth / 2
+        let detailX = detailCenterX - IslandMetrics.width / 2
         let islandY = screen.frame.maxY - IslandMetrics.collapsedHeight
+        let detailY = switch settings.hudDisplayMode {
+        case .floatingHUD:
+            islandY - detailHeight + IslandMetrics.detailOverlap
+        case .menuBar:
+            screen.visibleFrame.maxY - detailHeight
+        }
         let islandFrame = NSRect(
             x: collapsedX,
             y: islandY,
@@ -790,7 +959,7 @@ final class NotchOverlayController {
         )
         let detailFrame = NSRect(
             x: detailX,
-            y: islandY - detailHeight + IslandMetrics.detailOverlap,
+            y: detailY,
             width: IslandMetrics.width,
             height: detailHeight
         )
@@ -804,6 +973,23 @@ final class NotchOverlayController {
         )
         detailWindow?.setFrame(detailFrame, display: true, animate: false)
         detailWindow?.contentView?.frame = NSRect(x: 0, y: 0, width: IslandMetrics.width, height: detailHeight)
+    }
+
+    private func displayScreen() -> NSScreen? {
+        if settings.hudDisplayMode == .menuBar,
+           let screen = statusItem?.button?.window?.screen {
+            return screen
+        }
+        return primaryDisplayScreen() ?? NSScreen.screens.first
+    }
+
+    private var statusItemScreenFrame: NSRect? {
+        guard let button = statusItem?.button,
+              let buttonWindow = button.window else {
+            return nil
+        }
+        let frameInWindow = button.convert(button.bounds, to: nil)
+        return buttonWindow.convertToScreen(frameInWindow)
     }
 
     private func primaryDisplayScreen() -> NSScreen? {

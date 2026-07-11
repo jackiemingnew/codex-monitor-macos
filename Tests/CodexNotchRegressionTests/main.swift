@@ -1626,6 +1626,40 @@ runner.check(settings.watcherRefreshInterval == 180, "saving unchanged refresh i
 runner.check(settings.fileChangeRefreshMinimumGap == 15, "saving unchanged refresh intervals should keep the folded low-power debounce default")
 runner.check(settings.codexRadarEnabled, "Codex Radar should default to enabled")
 runner.check(!settings.codexRadarUsesAuthorizedAPI, "Codex Radar should default to Public without reading Keychain")
+runner.check(settings.hudDisplayMode == .floatingHUD, "HUD should default to the existing floating presentation")
+runner.check(HUDDisplayMode.allCases == [.floatingHUD, .menuBar], "HUD should expose floating and menu-bar display modes")
+runner.check(
+    HUDDisplaySourceResolver.resolve(
+        selected: .automatic,
+        remoteEnabled: true,
+        remoteSeverity: .warning,
+        newAPIEnabled: true,
+        newAPISeverity: .error,
+        subAPIEnabled: false,
+        subAPISeverity: .none
+    ) == .newAPI,
+    "automatic HUD source selection should stay consistent across floating and menu-bar modes"
+)
+runner.check(
+    HUDDisplaySourceResolver.resolve(
+        selected: .newAPI,
+        remoteEnabled: false,
+        remoteSeverity: .none,
+        newAPIEnabled: false,
+        newAPISeverity: .none,
+        subAPIEnabled: false,
+        subAPISeverity: .none
+    ) == .codex,
+    "a disabled explicit HUD source should fall back to Codex in both display modes"
+)
+settings.hudDisplayMode = .menuBar
+let menuBarModeReloadedSettings = CodexNotchSettings(
+    defaults: settingsDefaults,
+    secretStores: SecretStoreFactory(keychain: MemorySecretStore(), database: MemorySecretStore()),
+    launchAtLoginManager: FakeLaunchAtLoginManager()
+)
+runner.check(menuBarModeReloadedSettings.hudDisplayMode == .menuBar, "menu-bar HUD mode should persist across launches")
+settings.hudDisplayMode = .floatingHUD
 runner.check(settings.overlayHorizontalPosition == 0, "overlay position should default to the primary screen center")
 settings.setOverlayHorizontalPosition(0.42)
 let overlayPositionReloadedSettings = CodexNotchSettings(

@@ -18,6 +18,7 @@ This project uses public `DESIGN.md` systems from `VoltAgent/awesome-design-md` 
 
 - Native macOS utility, not web app chrome.
 - HUD first: translucent near-black panels, compact tables, small status chips, and restrained depth.
+- The floating HUD is the default identity. The optional menu-bar mode removes the pill surface, uses a high-contrast custom monitor mark, and prioritizes the remaining 5-hour quota; full metrics remain available in the detail panel.
 - Developer tool: values, quota windows, task rows, and error states must be more legible than decorative.
 - Quiet polish: surface hierarchy should come from opacity, hairline borders, and spacing, not from colorful decoration.
 

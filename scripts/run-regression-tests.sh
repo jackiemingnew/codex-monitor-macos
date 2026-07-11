@@ -23,6 +23,7 @@ swiftc \
   "${ROOT_DIR}/Sources/CodexNotch/DisplayRedactor.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/NetworkSecurityPolicy.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/IslandMetrics.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/HUDDisplayModel.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/Shell.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/CodexRuntimeLocator.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/KeychainStore.swift" \
