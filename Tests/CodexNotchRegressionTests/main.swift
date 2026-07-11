@@ -1629,6 +1629,14 @@ runner.check(!settings.codexRadarUsesAuthorizedAPI, "Codex Radar should default 
 runner.check(settings.hudDisplayMode == .floatingHUD, "HUD should default to the existing floating presentation")
 runner.check(HUDDisplayMode.allCases == [.floatingHUD, .menuBar], "HUD should expose floating and menu-bar display modes")
 runner.check(
+    HUDPresentationVisibility(mode: .floatingHUD) == HUDPresentationVisibility(showsFloatingHUD: true, showsMenuBarItem: false),
+    "floating mode should expose only the floating HUD entry point"
+)
+runner.check(
+    HUDPresentationVisibility(mode: .menuBar) == HUDPresentationVisibility(showsFloatingHUD: false, showsMenuBarItem: true),
+    "menu-bar mode should expose only the status item entry point"
+)
+runner.check(
     HUDDisplaySourceResolver.resolve(
         selected: .automatic,
         remoteEnabled: true,

@@ -46,3 +46,22 @@ enum HUDDisplaySourceResolver {
         }
     }
 }
+
+struct HUDPresentationVisibility: Equatable {
+    let showsFloatingHUD: Bool
+    let showsMenuBarItem: Bool
+
+    init(showsFloatingHUD: Bool, showsMenuBarItem: Bool) {
+        self.showsFloatingHUD = showsFloatingHUD
+        self.showsMenuBarItem = showsMenuBarItem
+    }
+
+    init(mode: HUDDisplayMode) {
+        switch mode {
+        case .floatingHUD:
+            self.init(showsFloatingHUD: true, showsMenuBarItem: false)
+        case .menuBar:
+            self.init(showsFloatingHUD: false, showsMenuBarItem: true)
+        }
+    }
+}
