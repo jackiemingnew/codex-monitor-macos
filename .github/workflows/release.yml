@@ -32,6 +32,7 @@ jobs:
           DEVELOPER_ID_CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_CERTIFICATE_PASSWORD }}
           APPLE_API_PRIVATE_KEY_BASE64: ${{ secrets.APPLE_API_PRIVATE_KEY_BASE64 }}
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
         run: |
           set -euo pipefail
           version="$(tr -d '[:space:]' < VERSION)"
@@ -43,7 +44,8 @@ jobs:
             DEVELOPER_ID_CERTIFICATE_BASE64 \
             DEVELOPER_ID_CERTIFICATE_PASSWORD \
             APPLE_API_PRIVATE_KEY_BASE64 \
-            APPLE_API_KEY_ID; do
+            APPLE_API_KEY_ID \
+            APPLE_API_ISSUER_ID; do
             [[ -n "${!name:-}" ]] || {
               echo "Missing required GitHub Actions secret: $name" >&2
               exit 1

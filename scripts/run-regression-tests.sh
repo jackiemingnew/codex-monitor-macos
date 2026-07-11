@@ -12,6 +12,8 @@ fi
 
 unset CODEX_USAGE_DELTA_DB
 
+bash "$ROOT_DIR/scripts/test-notarize-release-contract.sh"
+
 swift build -c release --build-path "${BUILD_DIR}/package-build"
 
 swiftc \
