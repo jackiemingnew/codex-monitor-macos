@@ -415,7 +415,7 @@ final class CodexNotchSettings: ObservableObject {
         secretStores: SecretStoreFactory = .live(),
         launchAtLoginManager: LaunchAtLoginManaging = SMAppServiceLaunchAtLoginManager(),
         environment: [String: String] = ProcessInfo.processInfo.environment,
-        codexRadarLegacyTokenFileURL: URL = CodexNotchSettings.defaultCodexRadarTokenFileURL()
+        codexRadarLegacyTokenFileURL: URL? = nil
     ) {
         self.defaults = defaults
         self.launchAtLoginManager = launchAtLoginManager
@@ -425,6 +425,7 @@ final class CodexNotchSettings: ObservableObject {
         self.initialSubAPIKey = initialSubAPIKey
         self.environment = environment
         self.codexRadarLegacyTokenFileURL = codexRadarLegacyTokenFileURL
+            ?? Self.defaultCodexRadarTokenFileURL()
         let loadedSecretStorageMode = SecretStorageMode(rawValue: defaults.string(forKey: Keys.secretStorageMode) ?? "") ?? .keychain
         self.secretStorageMode = loadedSecretStorageMode
         var startupVault = SecretVault()
