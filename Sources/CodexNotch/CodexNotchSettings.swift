@@ -2,6 +2,22 @@ import Foundation
 import CryptoKit
 import ServiceManagement
 
+enum HUDDisplayMode: String, CaseIterable, Identifiable {
+    case floatingHUD
+    case menuBar
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .floatingHUD:
+            "浮动 HUD"
+        case .menuBar:
+            "菜单栏"
+        }
+    }
+}
+
 enum CodexRadarCredentialSource: Equatable, Sendable {
     case environment
     case secretStore
@@ -57,6 +73,7 @@ final class CodexNotchSettings: ObservableObject {
         static let codexRadarEnabled = "codexRadarEnabled"
         static let codexRadarUsesAuthorizedAPI = "codexRadarUsesAuthorizedAPI"
         static let enablePulse = "enablePulse"
+        static let hudDisplayMode = "hudDisplayMode"
         static let overlayHorizontalPosition = "overlayHorizontalPosition"
         static let taskHistoryRange = "taskHistoryRange"
         static let notchDisplaySource = "notchDisplaySource"
@@ -174,6 +191,12 @@ final class CodexNotchSettings: ObservableObject {
     @Published var enablePulse: Bool {
         didSet {
             defaults.set(enablePulse, forKey: Keys.enablePulse)
+        }
+    }
+
+    @Published var hudDisplayMode: HUDDisplayMode {
+        didSet {
+            defaults.set(hudDisplayMode.rawValue, forKey: Keys.hudDisplayMode)
         }
     }
 
@@ -462,6 +485,7 @@ final class CodexNotchSettings: ObservableObject {
         self.codexRadarEnabled = defaults.object(forKey: Keys.codexRadarEnabled) as? Bool ?? true
         self.codexRadarUsesAuthorizedAPI = defaults.object(forKey: Keys.codexRadarUsesAuthorizedAPI) as? Bool ?? false
         self.enablePulse = defaults.object(forKey: Keys.enablePulse) as? Bool ?? true
+        self.hudDisplayMode = HUDDisplayMode(rawValue: defaults.string(forKey: Keys.hudDisplayMode) ?? "") ?? .floatingHUD
         self.overlayHorizontalPosition = Self.clampedOverlayHorizontalPosition(
             defaults.object(forKey: Keys.overlayHorizontalPosition) as? Double ?? 0
         )

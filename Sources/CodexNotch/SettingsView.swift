@@ -147,6 +147,7 @@ private struct SettingsDraft: Equatable {
     var subAPIThresholds = BalanceThresholdConfiguration()
     var launchAtLoginEnabled = false
     var enablePulse = true
+    var hudDisplayMode: HUDDisplayMode = .floatingHUD
     var secretStorageMode: SecretStorageMode = .keychain
 
     @MainActor
@@ -193,6 +194,7 @@ private struct SettingsDraft: Equatable {
         subAPIThresholds = settings.balanceDefaultThresholds(for: .subAPI)
         launchAtLoginEnabled = settings.launchAtLoginEnabled
         enablePulse = settings.enablePulse
+        hudDisplayMode = settings.hudDisplayMode
         secretStorageMode = settings.secretStorageMode
     }
 
@@ -602,13 +604,22 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var launchAndAppearanceContent: some View {
-        Section("刘海显示") {
+        Section("顶部显示") {
+            Picker(selection: $draft.hudDisplayMode) {
+                ForEach(HUDDisplayMode.allCases) { mode in
+                    Text(mode.label).tag(mode)
+                }
+            } label: {
+                HelpLabel(title: "显示模式", help: "浮动 HUD 保留当前刘海胶囊；菜单栏模式只显示状态标志和 5 小时剩余百分比，完整指标仍可在详情页查看。切换只在点击保存后生效。")
+            }
+            .pickerStyle(.segmented)
+
             Picker(selection: $draft.notchDisplaySource) {
                 ForEach(NotchDisplaySource.allCases) { source in
                     Text(source.label).tag(source)
                 }
             } label: {
-                HelpLabel(title: "显示来源", help: "选择收起状态下刘海左右区域显示哪一种监控数据。自动模式会优先显示有提醒的外部监控，否则显示 Codex。")
+                HelpLabel(title: "显示来源", help: "选择顶部收起状态显示哪一种监控数据。自动模式会优先显示有提醒的外部监控，否则显示 Codex。")
             }
             .pickerStyle(.menu)
         }
@@ -1696,6 +1707,7 @@ struct SettingsView: View {
         settings.showPeriodUsage = next.showPeriodUsage
         settings.showSparkQuota = next.showSparkQuota
         settings.showContextMetrics = next.showContextMetrics
+        settings.hudDisplayMode = next.hudDisplayMode
         settings.codexRadarEnabled = next.codexRadarEnabled
         let radarModeChanged = next.codexRadarUsesAuthorizedAPI != settings.codexRadarUsesAuthorizedAPI
         let radarTokenChanged = codexRadarTokenLoadedForEditing
