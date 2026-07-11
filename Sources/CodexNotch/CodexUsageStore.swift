@@ -35,6 +35,8 @@ private enum UsageScanPolicy {
 typealias AppServerRateLimitLoader = @Sendable (Date) throws -> RateLimitSnapshot
 
 final class CodexUsageStore: @unchecked Sendable {
+    static let fastSnapshotCacheMaxAge: TimeInterval = 30
+
     private struct SessionLineEvent {
         let timestamp: Date
         let topLevelType: String?
@@ -125,13 +127,20 @@ final class CodexUsageStore: @unchecked Sendable {
         "turn_cancelled"
     ]
     private let cacheLock = NSLock()
+    private let deltaCacheSetupLock = NSLock()
+    private let deltaWriteLock = NSLock()
     private var fastCache: FastSnapshotCache?
+    private var deltaCacheReady = false
     private var recentPathsCache: RecentPathsCache?
     private var recentTaskPathsCache: RecentPathsCache?
     private var appServerRateLimitCache = AppServerRateLimitCache()
     private var periodUsageCache: PeriodUsageCache?
     private var sessionTokenTotalCache: [String: SessionTokenTotalCache] = [:]
     private var sessionContextUsageCache: [String: SessionContextUsageCache] = [:]
+    private var sessionPrefixFactsCache: [String: SessionPrefixFactsCache] = [:]
+    private var sessionRateLimitCache: [String: SessionRateLimitCache] = [:]
+    private var sessionActivityCache: [String: SessionActivityCache] = [:]
+    private var sessionFileCacheCounters = SessionFileCacheCounters()
 
     init(
         codexDirectory: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex"),
@@ -206,6 +215,23 @@ final class CodexUsageStore: @unchecked Sendable {
             .appendingPathComponent("CodexNotch", isDirectory: true)
             .appendingPathComponent("usage-deltas.sqlite")
             .path
+    }
+
+    func sessionFileCacheStats() -> SessionFileCacheStats {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        let paths = Set(sessionTokenTotalCache.keys)
+            .union(sessionContextUsageCache.keys)
+            .union(sessionPrefixFactsCache.keys)
+            .union(sessionRateLimitCache.keys)
+            .union(sessionActivityCache.keys)
+        return SessionFileCacheStats(
+            prefixScans: sessionFileCacheCounters.prefixScans,
+            rateLimitScans: sessionFileCacheCounters.rateLimitScans,
+            activityScans: sessionFileCacheCounters.activityScans,
+            fastSnapshotHits: sessionFileCacheCounters.fastSnapshotHits,
+            entryCount: paths.count
+        )
     }
 
     private static func defaultAppServerCacheURL() -> URL {
@@ -330,6 +356,14 @@ final class CodexUsageStore: @unchecked Sendable {
                 includeContextUsage: includeContextUsage,
                 contextTaskLimit: contextTaskLimit
             )
+            let retainedSessionPaths = Set(
+                recentTaskSessionPaths(limit: max(TaskHistoryRange.month.queryLimit * 3, 80))
+                    + recentSessionPaths(limit: max(TaskHistoryRange.month.queryLimit * 3, 80))
+                    + displayThreads.map(\.rolloutPath)
+                    + usageDeltaThreads.map(\.rolloutPath)
+                    + rateLimitPaths
+            ).filter { !$0.isEmpty && FileManager.default.fileExists(atPath: $0) }
+            trimSessionFileCaches(retaining: retainedSessionPaths)
             cacheFastSnapshot(
                 threads: displayThreads,
                 usageThreads: usageDeltaThreads,
@@ -341,7 +375,8 @@ final class CodexUsageStore: @unchecked Sendable {
                 signaturePaths: rateLimitPaths,
                 rateLimitSourceName: rateLimitResult.source,
                 rateLimitSource: rateLimitSource,
-                taskHistoryRange: taskHistoryRange
+                taskHistoryRange: taskHistoryRange,
+                now: now
             )
             let snapshotDurationMs = elapsedMilliseconds(since: snapshotStartedAt)
 
@@ -600,23 +635,39 @@ final class CodexUsageStore: @unchecked Sendable {
         guard let cache,
               cache.rateLimitSource == rateLimitSource,
               cache.taskHistoryRange == taskHistoryRange,
-              now.timeIntervalSince(cache.createdAt) < 1.5,
-              makeSignature(for: cache.rolloutPaths) == cache.signature else {
+              now.timeIntervalSince(cache.createdAt) >= 0,
+              now.timeIntervalSince(cache.createdAt) < Self.fastSnapshotCacheMaxAge else {
             return nil
         }
 
+        let currentSignature = makeSignature(for: cache.rolloutPaths)
+        guard currentSignature == cache.signature else {
+            if let currentSignature,
+               sessionDirectorySignatureChanged(from: cache.signature, to: currentSignature) {
+                invalidateRecentSessionPathCaches()
+            }
+            return nil
+        }
+
+        cacheLock.lock()
+        sessionFileCacheCounters.fastSnapshotHits += 1
+        cacheLock.unlock()
+
+        let snapshotStartedAt = Date()
         let usage = fallbackUsage ?? cache.periodUsage
         let cumulativeUsage = loadCumulativeUsage()
         let recentUsage = loadRecentUsage(now: now)
-        let dailyUsage = cache.dailyUsage
-        let snapshotStartedAt = Date()
+        let dailyUsage = loadDailyUsage(for: cache.usageThreads, now: now)
+        let activeThreadIDs = ((try? loadActiveThreadIDs(now: now)) ?? [])
+            .union(activeSessionThreadIDs(from: cache.threads, now: now))
+            .union(loadActiveSubagentParentThreads(now: now).map(\.id))
         let deltaStartedAt = Date()
         let deltas = loadTokenDeltas(for: cache.threads, now: now)
         let aggregateDeltas = loadAggregateTokenDeltas(for: cache.threads, now: now)
         let deltaDurationMs = elapsedMilliseconds(since: deltaStartedAt)
         let taskResult = buildTasks(
             from: cache.threads,
-            activeThreadIDs: cache.activeThreadIDs,
+            activeThreadIDs: activeThreadIDs,
             deltas: deltas,
             todayTotalTokens: dailyUsage.usageTodayTokens,
             now: now,
@@ -665,16 +716,28 @@ final class CodexUsageStore: @unchecked Sendable {
         signaturePaths: [String],
         rateLimitSourceName: String,
         rateLimitSource: RateLimitSourcePreference,
-        taskHistoryRange: TaskHistoryRange
+        taskHistoryRange: TaskHistoryRange,
+        now: Date
     ) {
-        let rolloutPaths = Array(Set(signaturePaths + threads.map(\.rolloutPath)).filter { !$0.isEmpty }).sorted()
+        let knownRolloutPaths = Set(signaturePaths + threads.map(\.rolloutPath)).filter { !$0.isEmpty }
+        let rolloutDirectories = knownRolloutPaths.map {
+            URL(fileURLWithPath: $0).deletingLastPathComponent().path
+        }
+        let rolloutPaths = Array(
+            knownRolloutPaths
+                .union(rolloutDirectories)
+                .union([
+                    codexDirectory.appendingPathComponent("sessions", isDirectory: true).path,
+                    codexDirectory.appendingPathComponent("archived_sessions", isDirectory: true).path
+                ])
+        ).sorted()
         guard let signature = makeSignature(for: rolloutPaths) else {
             return
         }
 
         cacheLock.lock()
         fastCache = FastSnapshotCache(
-            createdAt: Date(),
+            createdAt: now,
             signature: signature,
             rolloutPaths: rolloutPaths,
             threads: threads,
@@ -689,6 +752,41 @@ final class CodexUsageStore: @unchecked Sendable {
             taskHistoryRange: taskHistoryRange
         )
         cacheLock.unlock()
+    }
+
+    private func trimSessionFileCaches(retaining paths: Set<String>) {
+        let canonicalPaths = Set(paths.map { fileSignature($0).path })
+        cacheLock.lock()
+        sessionTokenTotalCache = sessionTokenTotalCache.filter { canonicalPaths.contains($0.key) }
+        sessionContextUsageCache = sessionContextUsageCache.filter { canonicalPaths.contains($0.key) }
+        sessionPrefixFactsCache = sessionPrefixFactsCache.filter { canonicalPaths.contains($0.key) }
+        sessionRateLimitCache = sessionRateLimitCache.filter { canonicalPaths.contains($0.key) }
+        sessionActivityCache = sessionActivityCache.filter { canonicalPaths.contains($0.key) }
+        cacheLock.unlock()
+    }
+
+    private func invalidateRecentSessionPathCaches() {
+        cacheLock.lock()
+        recentPathsCache = nil
+        recentTaskPathsCache = nil
+        cacheLock.unlock()
+    }
+
+    private func sessionDirectorySignatureChanged(
+        from previous: StoreSignature,
+        to current: StoreSignature
+    ) -> Bool {
+        let previousFiles = Dictionary(uniqueKeysWithValues: previous.files.map { ($0.path, $0) })
+        return current.files.contains { file in
+            let isSessionDirectory = !file.path.hasSuffix(".jsonl")
+                && (
+                    file.path.hasSuffix("/sessions")
+                        || file.path.contains("/sessions/")
+                        || file.path.hasSuffix("/archived_sessions")
+                        || file.path.contains("/archived_sessions/")
+                )
+            return isSessionDirectory && previousFiles[file.path] != file
+        }
     }
 
     private func loadRecentThreads(range: TaskHistoryRange = .threeDays, now: Date = Date()) throws -> [ThreadRecord] {
@@ -1018,12 +1116,67 @@ final class CodexUsageStore: @unchecked Sendable {
         return nil
     }
 
-    private func ensureDeltaCacheSchema() {
+    @discardableResult
+    private func ensureDeltaCacheReady() -> Bool {
+        deltaCacheSetupLock.lock()
+        defer { deltaCacheSetupLock.unlock() }
+
+        if deltaCacheReady {
+            return true
+        }
+
         ensureDeltaDatabaseDirectory()
-        _ = try? Shell.sqliteExec(
+        do {
+            try Shell.sqliteExec(database: deltaDatabase, query: deltaSchemaSQL())
+
+            if deltaMetadataValue(for: "legacy_import_completed") != 1 {
+                try Shell.sqliteExec(database: deltaDatabase, query: legacyDeltaMigrationSQL())
+            }
+
+            if deltaMetadataValue(for: "history_compaction_completed") != 1 {
+                try Shell.sqliteExec(database: deltaDatabase, query: deltaHistoryCompactionSQL())
+            }
+
+            let currentSchemaVersion = deltaMetadataValue(for: "schema_version") ?? 0
+            var maintenanceStatements = [
+                """
+                CREATE INDEX IF NOT EXISTS idx_token_snapshot_history_observed_at
+                  ON token_snapshot_history(observed_at_ms);
+                """
+            ]
+            if currentSchemaVersion < 2 {
+                maintenanceStatements.append("ANALYZE token_snapshot_history;")
+                maintenanceStatements.append(
+                    """
+                    INSERT INTO delta_cache_metadata(key, value)
+                    VALUES('schema_version', 2)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+                    """
+                )
+            }
+            try Shell.sqliteExec(
+                database: deltaDatabase,
+                query: maintenanceStatements.joined(separator: "\n")
+            )
+            deltaCacheReady = true
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func ensureDeltaCacheSchema() {
+        _ = ensureDeltaCacheReady()
+    }
+
+    private func deltaMetadataValue(for key: String) -> Int64? {
+        let records = (try? Shell.sqliteJSON(
             database: deltaDatabase,
-            query: "\(deltaSchemaSQL())\n\(legacyDeltaMigrationSQL())"
-        )
+            query: "SELECT value FROM delta_cache_metadata WHERE key = \(sqliteLiteral(key)) LIMIT 1;",
+            as: [DeltaCacheMetadataRecord].self,
+            readOnly: true
+        )) ?? []
+        return records.first?.value
     }
 
     private func recentUsageRecencyExpression() -> String {
@@ -1385,9 +1538,12 @@ final class CodexUsageStore: @unchecked Sendable {
         let values = rows
             .joined(separator: ",\n")
             .replacingOccurrences(of: "__OBSERVED_AT_MS__", with: String(observedAtMs))
+        let pruneIntervalMs = Int64(24 * 60 * 60 * 1_000)
+        let retentionCutoffMs = observedAtMs - Int64(
+            UsageScanPolicy.deltaHistoryRetentionDays * 24 * 60 * 60 * 1_000
+        )
         let query = """
-        \(deltaSchemaSQL())
-        \(legacyDeltaMigrationSQL())
+        BEGIN IMMEDIATE;
         WITH current_rows(thread_id, tokens_used) AS (
           VALUES \(cleanupRows)
         )
@@ -1410,6 +1566,32 @@ final class CodexUsageStore: @unchecked Sendable {
             AND token_snapshot_history.tokens_used > current_rows.tokens_used
         );
 
+        WITH current_rows(thread_id, tokens_used, updated_at_ms, observed_at_ms) AS (
+          VALUES \(values)
+        )
+        INSERT INTO token_snapshot_history(thread_id, tokens_used, updated_at_ms, observed_at_ms)
+        SELECT thread_id, tokens_used, updated_at_ms, observed_at_ms
+        FROM current_rows
+        WHERE COALESCE(
+          (
+            SELECT token_snapshots.tokens_used
+            FROM token_snapshots
+            WHERE lower(token_snapshots.thread_id) = current_rows.thread_id
+            LIMIT 1
+          ),
+          (
+            SELECT token_snapshot_history.tokens_used
+            FROM token_snapshot_history
+            WHERE lower(token_snapshot_history.thread_id) = current_rows.thread_id
+            ORDER BY token_snapshot_history.observed_at_ms DESC
+            LIMIT 1
+          ),
+          -1
+        ) != current_rows.tokens_used
+        ON CONFLICT(thread_id, observed_at_ms) DO UPDATE SET
+          tokens_used = excluded.tokens_used,
+          updated_at_ms = excluded.updated_at_ms;
+
         INSERT INTO token_snapshots(thread_id, tokens_used, updated_at_ms, observed_at_ms)
         VALUES \(values)
         ON CONFLICT(thread_id) DO UPDATE SET
@@ -1417,18 +1599,30 @@ final class CodexUsageStore: @unchecked Sendable {
           updated_at_ms = excluded.updated_at_ms,
           observed_at_ms = excluded.observed_at_ms;
 
-        INSERT INTO token_snapshot_history(thread_id, tokens_used, updated_at_ms, observed_at_ms)
-        VALUES \(values)
-        ON CONFLICT(thread_id, observed_at_ms) DO UPDATE SET
-          tokens_used = excluded.tokens_used,
-          updated_at_ms = excluded.updated_at_ms;
-
         DELETE FROM token_snapshot_history
-        WHERE observed_at_ms < \(observedAtMs - Int64(UsageScanPolicy.deltaHistoryRetentionDays * 24 * 60 * 60 * 1_000));
+        WHERE observed_at_ms < \(retentionCutoffMs)
+          AND COALESCE(
+            (SELECT value FROM delta_cache_metadata WHERE key = 'last_history_prune_ms'),
+            0
+          ) <= \(observedAtMs - pruneIntervalMs);
+
+        INSERT INTO delta_cache_metadata(key, value)
+        SELECT 'last_history_prune_ms', \(observedAtMs)
+        WHERE COALESCE(
+          (SELECT value FROM delta_cache_metadata WHERE key = 'last_history_prune_ms'),
+          0
+        ) <= \(observedAtMs - pruneIntervalMs)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+        COMMIT;
         """
 
+        guard ensureDeltaCacheReady() else {
+            return false
+        }
+
+        deltaWriteLock.lock()
+        defer { deltaWriteLock.unlock() }
         do {
-            ensureDeltaDatabaseDirectory()
             try Shell.sqliteExec(database: deltaDatabase, query: query)
             return true
         } catch {
@@ -1456,41 +1650,92 @@ final class CodexUsageStore: @unchecked Sendable {
           observed_at_ms INTEGER NOT NULL,
           PRIMARY KEY(thread_id, observed_at_ms)
         );
+        CREATE TABLE IF NOT EXISTS delta_cache_metadata (
+          key TEXT PRIMARY KEY,
+          value INTEGER NOT NULL
+        );
         CREATE INDEX IF NOT EXISTS idx_token_snapshot_history_lookup
           ON token_snapshot_history(thread_id, observed_at_ms DESC);
         """
     }
 
     private func legacyDeltaMigrationSQL() -> String {
-        guard let legacyDeltaDatabase,
-              FileManager.default.fileExists(atPath: legacyDeltaDatabase) else {
-            return ""
-        }
+        let legacyExists = legacyDeltaDatabase.map(FileManager.default.fileExists(atPath:)) ?? false
+        let hasSnapshots = legacyDeltaDatabase.map {
+            legacyExists && legacyDeltaHasTable("token_snapshots", database: $0)
+        } ?? false
+        let hasHistory = legacyDeltaDatabase.map {
+            legacyExists && legacyDeltaHasTable("token_snapshot_history", database: $0)
+        } ?? false
+        let shouldAttach = hasSnapshots || hasHistory
 
-        let hasSnapshots = legacyDeltaHasTable("token_snapshots", database: legacyDeltaDatabase)
-        let hasHistory = legacyDeltaHasTable("token_snapshot_history", database: legacyDeltaDatabase)
-        guard hasSnapshots || hasHistory else {
-            return ""
+        var statements: [String] = []
+        if shouldAttach, let legacyDeltaDatabase {
+            statements.append("ATTACH DATABASE \(sqliteLiteral(legacyDeltaDatabase)) AS legacy_delta;")
         }
-
-        let legacy = sqliteLiteral(legacyDeltaDatabase)
-        var statements = ["ATTACH DATABASE \(legacy) AS legacy_delta;"]
+        statements.append("BEGIN IMMEDIATE;")
         if hasSnapshots {
             statements.append("""
-        INSERT OR IGNORE INTO token_snapshots(thread_id, tokens_used, updated_at_ms, observed_at_ms)
-        SELECT lower(thread_id), tokens_used, updated_at_ms, observed_at_ms
-        FROM legacy_delta.token_snapshots;
-        """)
+            INSERT OR IGNORE INTO token_snapshots(thread_id, tokens_used, updated_at_ms, observed_at_ms)
+            SELECT lower(thread_id), tokens_used, updated_at_ms, observed_at_ms
+            FROM legacy_delta.token_snapshots
+            WHERE NOT EXISTS (
+              SELECT 1 FROM main.delta_cache_metadata
+              WHERE key = 'legacy_import_completed' AND value >= 1
+            );
+            """)
         }
         if hasHistory {
             statements.append("""
-        INSERT OR IGNORE INTO token_snapshot_history(thread_id, tokens_used, updated_at_ms, observed_at_ms)
-        SELECT lower(thread_id), tokens_used, updated_at_ms, observed_at_ms
-        FROM legacy_delta.token_snapshot_history;
-        """)
+            INSERT OR IGNORE INTO token_snapshot_history(thread_id, tokens_used, updated_at_ms, observed_at_ms)
+            SELECT lower(thread_id), tokens_used, updated_at_ms, observed_at_ms
+            FROM legacy_delta.token_snapshot_history
+            WHERE NOT EXISTS (
+              SELECT 1 FROM main.delta_cache_metadata
+              WHERE key = 'legacy_import_completed' AND value >= 1
+            );
+            """)
         }
-        statements.append("DETACH DATABASE legacy_delta;")
+        statements.append("""
+        INSERT INTO delta_cache_metadata(key, value)
+        VALUES('legacy_import_completed', 1)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+        """)
+        statements.append("COMMIT;")
+        if shouldAttach {
+            statements.append("DETACH DATABASE legacy_delta;")
+        }
         return statements.joined(separator: "\n")
+    }
+
+    private func deltaHistoryCompactionSQL() -> String {
+        """
+        BEGIN IMMEDIATE;
+        DELETE FROM token_snapshot_history
+        WHERE rowid IN (
+          SELECT row_id
+          FROM (
+            SELECT
+              rowid AS row_id,
+              tokens_used,
+              LAG(tokens_used) OVER (
+                PARTITION BY lower(thread_id)
+                ORDER BY observed_at_ms, rowid
+              ) AS previous_tokens
+            FROM token_snapshot_history
+          )
+          WHERE previous_tokens = tokens_used
+        )
+          AND NOT EXISTS (
+            SELECT 1 FROM delta_cache_metadata
+            WHERE key = 'history_compaction_completed' AND value >= 1
+          );
+
+        INSERT INTO delta_cache_metadata(key, value)
+        VALUES('history_compaction_completed', 1)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+        COMMIT;
+        """
     }
 
     private func legacyDeltaHasTable(_ table: String, database: String) -> Bool {
@@ -2208,36 +2453,61 @@ final class CodexUsageStore: @unchecked Sendable {
             return false
         }
 
-        guard let text = fileSuffix(from: path, maxBytes: 256 * 1024) else {
+        let signature = fileSignature(path)
+        let cacheKey = signature.path
+        cacheLock.lock()
+        let cached = sessionActivityCache[cacheKey]
+        cacheLock.unlock()
+
+        let facts: SessionActivityCache
+        if let cached, cached.signature == signature {
+            facts = cached
+        } else {
+            let text = fileSuffix(from: path, maxBytes: 256 * 1024)
+            var latestActivity: Date?
+            var latestDone: Date?
+
+            if let text {
+                for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+                    let lineText = String(line)
+                    guard let event = sessionLineEvent(fromJSONLine: lineText) else {
+                        continue
+                    }
+
+                    if sessionLineMarksCompletion(event) {
+                        latestDone = maxDate(latestDone, event.timestamp)
+                    }
+
+                    if sessionLineMarksActivity(event) {
+                        latestActivity = maxDate(latestActivity, event.timestamp)
+                    }
+                }
+            }
+
+            facts = SessionActivityCache(
+                signature: signature,
+                latestActivity: latestActivity,
+                latestDone: latestDone,
+                readSucceeded: text != nil
+            )
+            cacheLock.lock()
+            sessionActivityCache[cacheKey] = facts
+            sessionFileCacheCounters.activityScans += 1
+            cacheLock.unlock()
+        }
+
+        guard facts.readSucceeded else {
             return nowEpoch - fallbackUpdatedAt < 12
         }
 
-        var latestActivity: Date?
-        var latestDone: Date?
-
-        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
-            let lineText = String(line)
-            guard let event = sessionLineEvent(fromJSONLine: lineText) else {
-                continue
-            }
-
-            if sessionLineMarksCompletion(event) {
-                latestDone = maxDate(latestDone, event.timestamp)
-            }
-
-            if sessionLineMarksActivity(event) {
-                latestActivity = maxDate(latestActivity, event.timestamp)
-            }
-        }
-
-        if let latestActivity {
-            let done = latestDone ?? .distantPast
+        if let latestActivity = facts.latestActivity {
+            let done = facts.latestDone ?? .distantPast
             if latestActivity > done,
                now.timeIntervalSince(latestActivity) < TimeInterval(UsageScanPolicy.runningActivityWindow) {
                 return true
             }
             if now.timeIntervalSince(latestActivity) < 12,
-               latestDone == nil {
+               facts.latestDone == nil {
                 return true
             }
         }
@@ -2312,10 +2582,68 @@ final class CodexUsageStore: @unchecked Sendable {
     }
 
     private func sessionTitle(from path: String) -> String? {
-        guard let text = filePrefix(from: path, maxBytes: 256 * 1024) else {
-            return nil
+        sessionPrefixFacts(from: path).title
+    }
+
+    private func sessionPrefixFacts(from path: String) -> SessionPrefixFacts {
+        let empty = SessionPrefixFacts(meta: nil, runtime: nil, title: nil)
+        let signature = fileSignature(path)
+        guard signature.exists else {
+            return empty
+        }
+        let cacheKey = signature.path
+
+        cacheLock.lock()
+        let cached = sessionPrefixFactsCache[cacheKey]
+        cacheLock.unlock()
+        if let cached, cached.signature == signature {
+            return cached.facts
         }
 
+        let scanLimit: UInt64 = 1_024 * 1_024
+        let isAppend = cached?.signature.inode == signature.inode
+            && (cached?.signature.size ?? 0) <= signature.size
+            && (cached?.signature.modifiedAtNanoseconds ?? 0) <= signature.modifiedAtNanoseconds
+        if let cached,
+           isAppend,
+           cached.scannedBytes >= scanLimit
+                || (cached.facts.meta != nil && cached.facts.runtime != nil && cached.facts.title != nil) {
+            let retained = SessionPrefixFactsCache(
+                signature: signature,
+                scannedBytes: cached.scannedBytes,
+                facts: cached.facts
+            )
+            cacheLock.lock()
+            sessionPrefixFactsCache[cacheKey] = retained
+            cacheLock.unlock()
+            return retained.facts
+        }
+
+        let text = filePrefix(from: path, maxBytes: Int(scanLimit))
+        let parsed = SessionPrefixFacts(
+            meta: text.flatMap(parseSessionMeta(from:)),
+            runtime: text.flatMap(parseSessionRuntimeInfo(from:)),
+            title: text.flatMap(parseSessionTitle(from:))
+        )
+        let facts = isAppend
+            ? SessionPrefixFacts(
+                meta: cached?.facts.meta ?? parsed.meta,
+                runtime: cached?.facts.runtime ?? parsed.runtime,
+                title: cached?.facts.title ?? parsed.title
+            )
+            : parsed
+        cacheLock.lock()
+        sessionPrefixFactsCache[cacheKey] = SessionPrefixFactsCache(
+            signature: signature,
+            scannedBytes: min(signature.size, scanLimit),
+            facts: facts
+        )
+        sessionFileCacheCounters.prefixScans += 1
+        cacheLock.unlock()
+        return facts
+    }
+
+    private func parseSessionTitle(from text: String) -> String? {
         for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
             guard line.contains(#""role":"user""#) || line.contains(#""role": "user""#),
                   let data = String(line).data(using: .utf8),
@@ -2391,15 +2719,16 @@ final class CodexUsageStore: @unchecked Sendable {
         guard signature.exists else {
             return nil
         }
+        let cacheKey = signature.path
 
         cacheLock.lock()
-        if let cached = sessionTokenTotalCache[path],
+        if let cached = sessionTokenTotalCache[cacheKey],
            cached.signature == signature {
             cacheLock.unlock()
             return cached.foundTokenEvent ? cached.tokens : nil
         }
 
-        let cached = sessionTokenTotalCache[path]
+        let cached = sessionTokenTotalCache[cacheKey]
         cacheLock.unlock()
 
         let scanStart: UInt64
@@ -2408,7 +2737,9 @@ final class CodexUsageStore: @unchecked Sendable {
         let hadTokenEvent: Bool
         if let cached,
            cached.bytesScanned < signature.size,
-           cached.signature.modifiedAt <= signature.modifiedAt {
+           cached.signature.inode == signature.inode,
+           cached.signature.size <= signature.size,
+           cached.signature.modifiedAtNanoseconds <= signature.modifiedAtNanoseconds {
             scanStart = cached.bytesScanned
             initialTotal = cached.tokens
             initialPendingLine = cached.pendingLine
@@ -2432,7 +2763,7 @@ final class CodexUsageStore: @unchecked Sendable {
         }
 
         cacheLock.lock()
-        sessionTokenTotalCache[path] = SessionTokenTotalCache(
+        sessionTokenTotalCache[cacheKey] = SessionTokenTotalCache(
             signature: signature,
             bytesScanned: scan.bytesScanned,
             tokens: scan.tokens,
@@ -2558,10 +2889,10 @@ final class CodexUsageStore: @unchecked Sendable {
     }
 
     private func sessionMeta(from path: String) -> SessionMetaInfo? {
-        guard let text = filePrefix(from: path, maxBytes: 256 * 1024) else {
-            return nil
-        }
+        sessionPrefixFacts(from: path).meta
+    }
 
+    private func parseSessionMeta(from text: String) -> SessionMetaInfo? {
         for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
             guard line.contains(#""session_meta""#) else {
                 continue
@@ -2640,10 +2971,10 @@ final class CodexUsageStore: @unchecked Sendable {
     }
 
     private func sessionRuntimeInfo(from path: String) -> SessionRuntimeInfo? {
-        guard let text = filePrefix(from: path, maxBytes: 1_024 * 1_024) else {
-            return nil
-        }
+        sessionPrefixFacts(from: path).runtime
+    }
 
+    private func parseSessionRuntimeInfo(from text: String) -> SessionRuntimeInfo? {
         for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
             guard line.contains(#""turn_context""#),
                   let data = String(line).data(using: .utf8),
@@ -3599,6 +3930,31 @@ final class CodexUsageStore: @unchecked Sendable {
     }
 
     private func readRateLimitSnapshot(from rolloutPath: String) -> RateLimitSnapshot? {
+        let signature = fileSignature(rolloutPath)
+        guard signature.exists else {
+            return nil
+        }
+        let cacheKey = signature.path
+
+        cacheLock.lock()
+        let cached = sessionRateLimitCache[cacheKey]
+        cacheLock.unlock()
+        if let cached, cached.signature == signature {
+            return cached.snapshot
+        }
+
+        let snapshot = scanRateLimitSnapshot(from: rolloutPath)
+        cacheLock.lock()
+        sessionRateLimitCache[cacheKey] = SessionRateLimitCache(
+            signature: signature,
+            snapshot: snapshot
+        )
+        sessionFileCacheCounters.rateLimitScans += 1
+        cacheLock.unlock()
+        return snapshot
+    }
+
+    private func scanRateLimitSnapshot(from rolloutPath: String) -> RateLimitSnapshot? {
         guard let output = tokenCountLines(from: rolloutPath, lineLimit: 600) else {
             return nil
         }
@@ -3705,8 +4061,9 @@ final class CodexUsageStore: @unchecked Sendable {
         guard signature.exists else {
             return (nil, false)
         }
+        let cacheKey = signature.path
         cacheLock.lock()
-        let cached = sessionContextUsageCache[rolloutPath]
+        let cached = sessionContextUsageCache[cacheKey]
         cacheLock.unlock()
 
         if let cached, cached.signature == signature {
@@ -3715,7 +4072,7 @@ final class CodexUsageStore: @unchecked Sendable {
 
         let usage = scanContextUsage(from: rolloutPath)
         cacheLock.lock()
-        sessionContextUsageCache[rolloutPath] = SessionContextUsageCache(signature: signature, usage: usage)
+        sessionContextUsageCache[cacheKey] = SessionContextUsageCache(signature: signature, usage: usage)
         cacheLock.unlock()
         return (usage, true)
     }
@@ -3860,13 +4217,46 @@ final class CodexUsageStore: @unchecked Sendable {
     }
 
     private func fileSignature(_ path: String) -> FileSignature {
-        guard let attributes = try? FileManager.default.attributesOfItem(atPath: path) else {
-            return FileSignature(path: path, exists: false, size: 0, modifiedAt: 0)
+        let canonicalPath = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+        var fileInfo = stat()
+        let status = canonicalPath.withCString { pointer in
+            Darwin.lstat(pointer, &fileInfo)
+        }
+        guard status == 0 else {
+            return FileSignature(
+                path: canonicalPath,
+                exists: false,
+                inode: 0,
+                size: 0,
+                modifiedAtNanoseconds: 0,
+                directoryFingerprint: 0
+            )
         }
 
-        let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
-        let modifiedAt = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-        return FileSignature(path: path, exists: true, size: size, modifiedAt: modifiedAt)
+        let size = fileInfo.st_size > 0 ? UInt64(fileInfo.st_size) : 0
+        let modifiedAtNanoseconds = Int64(fileInfo.st_mtimespec.tv_sec) * 1_000_000_000
+            + Int64(fileInfo.st_mtimespec.tv_nsec)
+        let isDirectory = (fileInfo.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR)
+        return FileSignature(
+            path: canonicalPath,
+            exists: true,
+            inode: UInt64(fileInfo.st_ino),
+            size: size,
+            modifiedAtNanoseconds: modifiedAtNanoseconds,
+            directoryFingerprint: isDirectory ? directoryFingerprint(canonicalPath) : 0
+        )
+    }
+
+    private func directoryFingerprint(_ path: String) -> UInt64 {
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: path) else {
+            return 0
+        }
+
+        return entries.sorted().reduce(UInt64(1_469_598_103_934_665_603)) { partial, entry in
+            entry.utf8.reduce(partial) { hash, byte in
+                (hash ^ UInt64(byte)) &* 1_099_511_628_211
+            } ^ 0xff
+        }
     }
 
     private func sqliteLiteral(_ value: String) -> String {
@@ -4045,6 +4435,45 @@ private struct SessionContextUsageCache {
     let usage: TokenContextUsage?
 }
 
+struct SessionFileCacheStats {
+    let prefixScans: Int
+    let rateLimitScans: Int
+    let activityScans: Int
+    let fastSnapshotHits: Int
+    let entryCount: Int
+}
+
+private struct SessionFileCacheCounters {
+    var prefixScans = 0
+    var rateLimitScans = 0
+    var activityScans = 0
+    var fastSnapshotHits = 0
+}
+
+private struct SessionPrefixFacts {
+    let meta: SessionMetaInfo?
+    let runtime: SessionRuntimeInfo?
+    let title: String?
+}
+
+private struct SessionPrefixFactsCache {
+    let signature: FileSignature
+    let scannedBytes: UInt64
+    let facts: SessionPrefixFacts
+}
+
+private struct SessionRateLimitCache {
+    let signature: FileSignature
+    let snapshot: RateLimitSnapshot?
+}
+
+private struct SessionActivityCache {
+    let signature: FileSignature
+    let latestActivity: Date?
+    let latestDone: Date?
+    let readSucceeded: Bool
+}
+
 private struct TokenDeltaWindow {
     let delta10mTokens: Int?
     let delta1hTokens: Int?
@@ -4085,6 +4514,10 @@ private struct TokenDeltaAggregateRecord: Decodable {
 
 private struct SQLiteNameRecord: Decodable {
     let name: String
+}
+
+private struct DeltaCacheMetadataRecord: Decodable {
+    let value: Int64
 }
 
 private struct SessionTokenScanResult {
@@ -4178,6 +4611,8 @@ private struct StoreSignature: Equatable {
 private struct FileSignature: Equatable {
     let path: String
     let exists: Bool
+    let inode: UInt64
     let size: UInt64
-    let modifiedAt: TimeInterval
+    let modifiedAtNanoseconds: Int64
+    let directoryFingerprint: UInt64
 }

@@ -5127,6 +5127,72 @@ let pollutedDeltaRows = try Shell.sqliteJSON(
     readOnly: true
 ).first?.count ?? -1
 runner.check(pollutedDeltaRows == 0, "Swift delta cache should prune parent rows polluted by merged subagent token totals")
+let compactedDuplicateRows = try Shell.sqliteJSON(
+    database: deltaDatabase,
+    query: "select count(*) as count from token_snapshot_history where thread_id = '\(pollutedDeltaParentSessionID)' and tokens_used = 162000000;",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? -1
+runner.check(compactedDuplicateRows == 1, "delta cache upgrade should compact consecutive equal token history without changing rolling metrics")
+let historyRowsBeforeUnchangedRecord = try Shell.sqliteJSON(
+    database: deltaDatabase,
+    query: "select count(*) as count from token_snapshot_history;",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? -1
+runner.check(localStore.recordDeltaSnapshot(now: now.addingTimeInterval(3), range: .day), "unchanged Swift delta recording should succeed")
+let historyRowsAfterUnchangedRecord = try Shell.sqliteJSON(
+    database: deltaDatabase,
+    query: "select count(*) as count from token_snapshot_history;",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? -1
+runner.check(
+    historyRowsAfterUnchangedRecord == historyRowsBeforeUnchangedRecord,
+    "unchanged Swift delta recording should not append duplicate history rows"
+)
+let observedAtIndexCount = try Shell.sqliteJSON(
+    database: deltaDatabase,
+    query: "select count(*) as count from sqlite_master where type = 'index' and name = 'idx_token_snapshot_history_observed_at';",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? 0
+runner.check(observedAtIndexCount == 1, "delta history retention should have a standalone observed_at_ms index")
+let deltaMetadataTableCount = try Shell.sqliteJSON(
+    database: deltaDatabase,
+    query: "select count(*) as count from sqlite_master where type = 'table' and name = 'delta_cache_metadata';",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? 0
+runner.check(deltaMetadataTableCount == 1, "delta cache should persist upgrade and maintenance metadata")
+let expiredMaintenanceThreadID = "delta-maintenance-expired"
+let expiredMaintenanceObservedMs = observedNowMs - Int64(32 * 24 * 60 * 60 * 1_000)
+_ = try Shell.run("/usr/bin/sqlite3", [
+    deltaDatabase,
+    "insert into token_snapshot_history(thread_id, tokens_used, updated_at_ms, observed_at_ms) values('\(expiredMaintenanceThreadID)', 1, \(expiredMaintenanceObservedMs), \(expiredMaintenanceObservedMs));"
+])
+runner.check(
+    localStore.recordDeltaSnapshot(now: now.addingTimeInterval(60 * 60), range: .month),
+    "delta recording inside the maintenance interval should succeed"
+)
+let expiredRowsBeforeDailyPrune = try Shell.sqliteJSON(
+    database: deltaDatabase,
+    query: "select count(*) as count from token_snapshot_history where thread_id = '\(expiredMaintenanceThreadID)';",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? -1
+runner.check(expiredRowsBeforeDailyPrune == 1, "retention cleanup should not rescan history more than once per day")
+runner.check(
+    localStore.recordDeltaSnapshot(now: now.addingTimeInterval(25 * 60 * 60), range: .month),
+    "delta recording after the maintenance interval should succeed"
+)
+let expiredRowsAfterDailyPrune = try Shell.sqliteJSON(
+    database: deltaDatabase,
+    query: "select count(*) as count from token_snapshot_history where thread_id = '\(expiredMaintenanceThreadID)';",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? -1
+runner.check(expiredRowsAfterDailyPrune == 0, "retention cleanup should prune expired history after one day")
 
 let nodeCompatibleData = SnapshotOutputFormatter.nodeCompatibleJSONData(
     for: localExportSnapshot,
@@ -5307,6 +5373,11 @@ let legacyStore = CodexUsageStore(
     ripgrepCandidates: []
 )
 runner.check(legacyStore.recordDeltaSnapshot(now: now, range: .day), "Swift delta recording should migrate legacy token history")
+let lateLegacyObservedMs = legacyBaselineMs + 1
+_ = try Shell.run("/usr/bin/sqlite3", [
+    legacyDeltaDatabase,
+    "insert into token_snapshot_history(thread_id, tokens_used, updated_at_ms, observed_at_ms) values('\(legacySessionID)', 1600, \(lateLegacyObservedMs), \(lateLegacyObservedMs));"
+])
 runner.check(legacyStore.recordDeltaSnapshot(now: now.addingTimeInterval(1), range: .day), "legacy migration should be idempotent on repeated records")
 let migratedHistoryRows = try Shell.sqliteJSON(
     database: migratedDeltaDatabase,
@@ -5315,6 +5386,32 @@ let migratedHistoryRows = try Shell.sqliteJSON(
     readOnly: true
 ).first?.count ?? 0
 runner.check(migratedHistoryRows >= 2, "migrated Swift cache should contain legacy and current token history rows")
+let lateLegacyImportRows = try Shell.sqliteJSON(
+    database: migratedDeltaDatabase,
+    query: "select count(*) as count from token_snapshot_history where thread_id = '\(legacySessionID)' and observed_at_ms = \(lateLegacyObservedMs);",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? -1
+runner.check(lateLegacyImportRows == 0, "legacy delta history should be imported only once after the completion marker is stored")
+let migratedRowsBeforeTokenChange = migratedHistoryRows
+_ = try Shell.run("/usr/bin/sqlite3", [
+    legacyStateDatabase,
+    "update threads set tokens_used = 2100, updated_at = \(Int(now.timeIntervalSince1970) + 2) where id = '\(legacySessionID)';"
+])
+runner.check(
+    legacyStore.recordDeltaSnapshot(now: now.addingTimeInterval(2), range: .day),
+    "a real token change should record a new delta history point"
+)
+let migratedRowsAfterTokenChange = try Shell.sqliteJSON(
+    database: migratedDeltaDatabase,
+    query: "select count(*) as count from token_snapshot_history where thread_id = '\(legacySessionID)';",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? 0
+runner.check(
+    migratedRowsAfterTokenChange == migratedRowsBeforeTokenChange + 1,
+    "one real token change should append exactly one delta history row"
+)
 
 let missingLegacyTablesRoot = URL(fileURLWithPath: NSTemporaryDirectory())
     .appendingPathComponent("CodexNotchMissingLegacyTables-\(UUID().uuidString)")
@@ -5365,6 +5462,88 @@ let missingLegacyStore = CodexUsageStore(
     ripgrepCandidates: []
 )
 runner.check(missingLegacyStore.recordDeltaSnapshot(now: now, range: .day), "legacy cache without token tables should not block Swift delta recording")
+
+let retryLegacyRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("CodexNotchRetryLegacyMigration-\(UUID().uuidString)")
+try FileManager.default.createDirectory(at: retryLegacyRoot, withIntermediateDirectories: true)
+defer {
+    try? FileManager.default.removeItem(at: retryLegacyRoot)
+}
+let retryLegacySessionID = "019e073a-c032-74e2-966e-b85ede0c9cf1"
+let retryLegacyState = retryLegacyRoot.appendingPathComponent("state_5.sqlite").path
+let retryLegacyLogs = retryLegacyRoot.appendingPathComponent("logs_2.sqlite").path
+_ = try Shell.run("/usr/bin/sqlite3", [
+    retryLegacyState,
+    """
+    create table threads(
+      id text,
+      title text,
+      tokens_used integer,
+      model text,
+      reasoning_effort text,
+      rollout_path text,
+      created_at integer,
+      updated_at integer,
+      archived integer default 0
+    );
+    insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, created_at, updated_at, archived)
+    values('\(retryLegacySessionID)', 'Retry legacy migration', 100, 'gpt-5.5', 'high', '', \(Int(now.timeIntervalSince1970)), \(Int(now.timeIntervalSince1970)), 0);
+    """
+])
+_ = try Shell.run("/usr/bin/sqlite3", [
+    retryLegacyLogs,
+    "create table logs(thread_id text, ts integer, target text, feedback_log_body text);"
+])
+let retryLegacyDirectory = retryLegacyRoot.appendingPathComponent("context-guard", isDirectory: true)
+try FileManager.default.createDirectory(at: retryLegacyDirectory, withIntermediateDirectories: true)
+let retryLegacyDatabase = retryLegacyDirectory.appendingPathComponent("usage-deltas.sqlite").path
+_ = try Shell.run("/usr/bin/sqlite3", [
+    retryLegacyDatabase,
+    "create table token_snapshot_history(thread_id text primary key);"
+])
+let retryMigratedDatabase = retryLegacyRoot.appendingPathComponent("SwiftCache/usage-deltas.sqlite").path
+let retryLegacyStore = CodexUsageStore(
+    codexDirectory: retryLegacyRoot,
+    deltaDatabase: retryMigratedDatabase,
+    ripgrepCandidates: []
+)
+runner.check(
+    !retryLegacyStore.recordDeltaSnapshot(now: now, range: .day),
+    "a malformed legacy token table should fail without marking migration complete"
+)
+let failedLegacyMarkerRows = (try? Shell.sqliteJSON(
+    database: retryMigratedDatabase,
+    query: "select count(*) as count from delta_cache_metadata where key = 'legacy_import_completed';",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count) ?? -1
+runner.check(failedLegacyMarkerRows == 0, "failed legacy migration should leave its completion marker unset")
+_ = try Shell.run("/usr/bin/sqlite3", [
+    retryLegacyDatabase,
+    """
+    drop table token_snapshot_history;
+    create table token_snapshot_history (
+      thread_id text not null,
+      tokens_used integer not null,
+      updated_at_ms integer not null,
+      observed_at_ms integer not null,
+      primary key(thread_id, observed_at_ms)
+    );
+    insert into token_snapshot_history(thread_id, tokens_used, updated_at_ms, observed_at_ms)
+    values('\(retryLegacySessionID)', 50, \(legacyBaselineMs), \(legacyBaselineMs));
+    """
+])
+runner.check(
+    retryLegacyStore.recordDeltaSnapshot(now: now.addingTimeInterval(1), range: .day),
+    "legacy migration should retry after the source table is repaired"
+)
+let retriedLegacyRows = try Shell.sqliteJSON(
+    database: retryMigratedDatabase,
+    query: "select count(*) as count from token_snapshot_history where thread_id = '\(retryLegacySessionID)' and tokens_used = 50;",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? 0
+runner.check(retriedLegacyRows == 1, "retried legacy migration should import the repaired history exactly once")
 
 let largeUsageRoot = URL(fileURLWithPath: NSTemporaryDirectory())
     .appendingPathComponent("CodexNotchLargeUsage-\(UUID().uuidString)")
@@ -5496,6 +5675,280 @@ let secondTokenSnapshot = tokenCacheStore.loadSnapshot(
     now: now.addingTimeInterval(1)
 )
 runner.check(secondTokenSnapshot.tasks.first { $0.id == tokenCacheSessionID }?.tokenCount == 150, "appending after an initially unterminated token line should not double count the pending line")
+runner.check(CodexUsageStore.fastSnapshotCacheMaxAge == 30, "fast snapshot cache should use the agreed 30 second upper bound")
+let cacheStatsAfterChangedFile = tokenCacheStore.sessionFileCacheStats()
+let unchangedTokenSnapshot = tokenCacheStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now.addingTimeInterval(2)
+)
+runner.check(unchangedTokenSnapshot.tasks.first { $0.id == tokenCacheSessionID }?.tokenCount == 150, "unchanged rollout refresh should preserve token totals")
+let cacheStatsAfterUnchangedFile = tokenCacheStore.sessionFileCacheStats()
+runner.check(
+    cacheStatsAfterUnchangedFile.prefixScans == cacheStatsAfterChangedFile.prefixScans,
+    "unchanged rollout refresh should not rescan session metadata prefixes"
+)
+runner.check(
+    cacheStatsAfterUnchangedFile.rateLimitScans == cacheStatsAfterChangedFile.rateLimitScans,
+    "unchanged rollout refresh should not rescan rate-limit tails"
+)
+runner.check(
+    cacheStatsAfterUnchangedFile.activityScans == cacheStatsAfterChangedFile.activityScans,
+    "unchanged rollout refresh should not rescan activity tails"
+)
+let rateLimitAppendLine = #"{"timestamp":"\#(timestamp)","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":0}},"rate_limits":{"limit_id":"codex","primary":{"used_percent":25},"secondary":{"used_percent":40}}}}"# + "\n"
+if let handle = try? FileHandle(forWritingTo: tokenCachePath) {
+    try handle.seekToEnd()
+    try handle.write(contentsOf: Data(rateLimitAppendLine.utf8))
+    try handle.close()
+}
+try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(3)], ofItemAtPath: tokenCachePath.path)
+let appendedRateLimitSnapshot = tokenCacheStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now.addingTimeInterval(3)
+)
+runner.check(appendedRateLimitSnapshot.primaryPercent == 75, "appending rate-limit data should invalidate the changed rollout cache")
+let cacheStatsAfterAppendedFile = tokenCacheStore.sessionFileCacheStats()
+runner.check(
+    cacheStatsAfterAppendedFile.prefixScans == cacheStatsAfterUnchangedFile.prefixScans + 1,
+    "one appended rollout should trigger one metadata prefix rescan"
+)
+runner.check(
+    cacheStatsAfterAppendedFile.rateLimitScans == cacheStatsAfterUnchangedFile.rateLimitScans + 1,
+    "one appended rollout should trigger one rate-limit tail rescan"
+)
+runner.check(
+    cacheStatsAfterAppendedFile.activityScans == cacheStatsAfterUnchangedFile.activityScans + 1,
+    "one appended rollout should trigger one activity tail rescan"
+)
+
+let tokenCacheAttributes = try FileManager.default.attributesOfItem(atPath: tokenCachePath.path)
+let tokenCacheSize = (tokenCacheAttributes[.size] as? NSNumber)?.intValue ?? 0
+let tokenCacheModifiedAt = tokenCacheAttributes[.modificationDate] as? Date ?? now
+let tokenCacheInode = (tokenCacheAttributes[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0
+let replacementTokenPath = tokenCacheSessionDirectory.appendingPathComponent("replacement-\(UUID().uuidString).jsonl")
+let replacementTokenLine = #"{"timestamp":"\#(timestamp)","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":300}}}}"# + "\n"
+var replacementTokenData = Data(replacementTokenLine.utf8)
+runner.check(replacementTokenData.count <= tokenCacheSize, "replacement token fixture should fit the original byte size")
+if replacementTokenData.count < tokenCacheSize {
+    replacementTokenData.append(Data(repeating: UInt8(ascii: " "), count: tokenCacheSize - replacementTokenData.count))
+}
+try replacementTokenData.write(to: replacementTokenPath)
+try FileManager.default.setAttributes([.modificationDate: tokenCacheModifiedAt], ofItemAtPath: replacementTokenPath.path)
+let replacementTokenAttributes = try FileManager.default.attributesOfItem(atPath: replacementTokenPath.path)
+let replacementTokenInode = (replacementTokenAttributes[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0
+runner.check(replacementTokenInode != tokenCacheInode, "replacement token fixture should use a different inode")
+try FileManager.default.removeItem(at: tokenCachePath)
+try FileManager.default.moveItem(at: replacementTokenPath, to: tokenCachePath)
+let replacedTokenSnapshot = tokenCacheStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now.addingTimeInterval(4)
+)
+runner.check(
+    replacedTokenSnapshot.tasks.first { $0.id == tokenCacheSessionID }?.tokenCount == 300,
+    "same-size same-mtime rollout replacement should invalidate token caches by inode"
+)
+let cacheStatsBeforeFastHit = tokenCacheStore.sessionFileCacheStats()
+let withinFastCacheWindow = tokenCacheStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: false,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now.addingTimeInterval(33)
+)
+runner.check(withinFastCacheWindow.tasks.first { $0.id == tokenCacheSessionID }?.tokenCount == 300, "29 second fast-cache hit should preserve snapshot output")
+let cacheStatsAfterFastHit = tokenCacheStore.sessionFileCacheStats()
+runner.check(
+    cacheStatsAfterFastHit.fastSnapshotHits == cacheStatsBeforeFastHit.fastSnapshotHits + 1,
+    "unchanged snapshots should reuse the full cache inside 30 seconds"
+)
+_ = tokenCacheStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: false,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now.addingTimeInterval(35)
+)
+let cacheStatsAfterFastExpiry = tokenCacheStore.sessionFileCacheStats()
+runner.check(
+    cacheStatsAfterFastExpiry.fastSnapshotHits == cacheStatsAfterFastHit.fastSnapshotHits,
+    "fast snapshot cache should expire after 30 seconds"
+)
+_ = tokenCacheStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now.addingTimeInterval(36)
+)
+let cacheStatsAfterForcedRefresh = tokenCacheStore.sessionFileCacheStats()
+runner.check(
+    cacheStatsAfterForcedRefresh.fastSnapshotHits == cacheStatsAfterFastExpiry.fastSnapshotHits,
+    "forced refresh should bypass the 30 second fast snapshot cache"
+)
+try FileManager.default.removeItem(at: tokenCachePath)
+_ = tokenCacheStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now.addingTimeInterval(37)
+)
+runner.check(tokenCacheStore.sessionFileCacheStats().entryCount == 0, "session caches should evict files outside the current scan set")
+
+let fastCacheActivityRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("CodexNotchFastCacheActivity-\(UUID().uuidString)")
+try FileManager.default.createDirectory(at: fastCacheActivityRoot, withIntermediateDirectories: true)
+defer {
+    try? FileManager.default.removeItem(at: fastCacheActivityRoot)
+}
+let fastCacheActivityState = fastCacheActivityRoot.appendingPathComponent("state_5.sqlite").path
+let fastCacheActivityLogs = fastCacheActivityRoot.appendingPathComponent("logs_2.sqlite").path
+_ = try Shell.run("/usr/bin/sqlite3", [
+    fastCacheActivityState,
+    """
+    create table threads(
+      id text,
+      title text,
+      tokens_used integer,
+      model text,
+      reasoning_effort text,
+      rollout_path text,
+      created_at integer,
+      updated_at integer,
+      archived integer default 0
+    );
+    """
+])
+_ = try Shell.run("/usr/bin/sqlite3", [
+    fastCacheActivityLogs,
+    "create table logs(thread_id text, ts integer, target text, feedback_log_body text);"
+])
+let fastCacheActivityDirectory = fastCacheActivityRoot.appendingPathComponent("sessions/2026/07/12", isDirectory: true)
+try FileManager.default.createDirectory(at: fastCacheActivityDirectory, withIntermediateDirectories: true)
+let expiringActivitySessionID = "019e073a-c032-74e2-966e-b85ede0c9cf2"
+let expiringActivityPath = fastCacheActivityDirectory.appendingPathComponent("rollout-2026-07-12T00-00-00-\(expiringActivitySessionID).jsonl")
+let expiringActivityTimestamp = ISO8601DateFormatter().string(from: now.addingTimeInterval(-590))
+try """
+{"timestamp":"\(expiringActivityTimestamp)","type":"response_item","payload":{"type":"message","role":"assistant","content":[]}}
+{"timestamp":"\(expiringActivityTimestamp)","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":1}}}}
+""".write(to: expiringActivityPath, atomically: true, encoding: .utf8)
+try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: expiringActivityPath.path)
+let fastCacheActivityStore = CodexUsageStore(codexDirectory: fastCacheActivityRoot, ripgrepCandidates: [])
+let initialActivitySnapshot = fastCacheActivityStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now
+)
+runner.check(
+    initialActivitySnapshot.tasks.first { $0.id == expiringActivitySessionID }?.status == .running,
+    "recent rollout activity should initially mark the task running"
+)
+let newFastCacheSessionID = "019e073a-c032-74e2-966e-b85ede0c9cf3"
+let newFastCachePath = fastCacheActivityDirectory.appendingPathComponent("rollout-2026-07-12T00-00-01-\(newFastCacheSessionID).jsonl")
+try #"{"timestamp":"\#(timestamp)","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":2}}}}"#
+    .write(to: newFastCachePath, atomically: true, encoding: .utf8)
+try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(1)], ofItemAtPath: newFastCachePath.path)
+let cacheStatsBeforeDirectoryChange = fastCacheActivityStore.sessionFileCacheStats()
+let directoryChangedSnapshot = fastCacheActivityStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: false,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now.addingTimeInterval(5)
+)
+runner.check(directoryChangedSnapshot.tasks.contains { $0.id == newFastCacheSessionID }, "new rollout files should invalidate cached path lists inside the 30 second window")
+runner.check(
+    fastCacheActivityStore.sessionFileCacheStats().fastSnapshotHits == cacheStatsBeforeDirectoryChange.fastSnapshotHits,
+    "directory changes should bypass the full fast snapshot cache"
+)
+let activityExpiredSnapshot = fastCacheActivityStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: false,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now.addingTimeInterval(25)
+)
+runner.check(
+    activityExpiredSnapshot.tasks.first { $0.id == expiringActivitySessionID }?.status == .recent,
+    "fast snapshot hits should recompute activity expiration from the requested time"
+)
+runner.check(
+    fastCacheActivityStore.sessionFileCacheStats().fastSnapshotHits == cacheStatsBeforeDirectoryChange.fastSnapshotHits + 1,
+    "unchanged directory state should reuse the refreshed snapshot inside 30 seconds"
+)
+
+let archivedSubagentCacheRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("CodexNotchArchivedSubagentCache-\(UUID().uuidString)")
+try FileManager.default.createDirectory(at: archivedSubagentCacheRoot, withIntermediateDirectories: true)
+defer {
+    try? FileManager.default.removeItem(at: archivedSubagentCacheRoot)
+}
+let archivedSubagentState = archivedSubagentCacheRoot.appendingPathComponent("state_5.sqlite").path
+let archivedSubagentLogs = archivedSubagentCacheRoot.appendingPathComponent("logs_2.sqlite").path
+let archivedSubagentSessionID = "019e073a-c032-74e2-966e-b85ede0c9cf4"
+let archivedSubagentParentID = "019e073a-c032-74e2-966e-b85ede0c9cf5"
+let archivedSubagentDirectory = archivedSubagentCacheRoot.appendingPathComponent("archived_sessions/2026/07/12", isDirectory: true)
+try FileManager.default.createDirectory(at: archivedSubagentDirectory, withIntermediateDirectories: true)
+let archivedSubagentPath = archivedSubagentDirectory.appendingPathComponent("rollout-2026-07-12T00-00-02-\(archivedSubagentSessionID).jsonl")
+try """
+{"timestamp":"\(timestamp)","type":"session_meta","payload":{"thread_source":"subagent","parent_thread_id":"\(archivedSubagentParentID)"}}
+""".write(to: archivedSubagentPath, atomically: true, encoding: .utf8)
+try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: archivedSubagentPath.path)
+_ = try Shell.run("/usr/bin/sqlite3", [
+    archivedSubagentState,
+    """
+    create table threads(
+      id text,
+      title text,
+      tokens_used integer,
+      model text,
+      reasoning_effort text,
+      rollout_path text,
+      created_at integer,
+      updated_at integer,
+      recency_at integer,
+      archived integer default 0
+    );
+    insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, created_at, updated_at, recency_at, archived)
+    values('\(archivedSubagentSessionID)', 'Archived child', 1, 'gpt-5.5', 'high', '\(archivedSubagentPath.path)', \(Int(now.timeIntervalSince1970)), \(Int(now.timeIntervalSince1970)), \(Int(now.timeIntervalSince1970)), 1);
+    """
+])
+_ = try Shell.run("/usr/bin/sqlite3", [
+    archivedSubagentLogs,
+    "create table logs(thread_id text, ts integer, target text, feedback_log_body text);"
+])
+let archivedSubagentCacheStore = CodexUsageStore(codexDirectory: archivedSubagentCacheRoot, ripgrepCandidates: [])
+_ = archivedSubagentCacheStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now
+)
+let archivedCacheStatsAfterFirstRefresh = archivedSubagentCacheStore.sessionFileCacheStats()
+_ = archivedSubagentCacheStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now.addingTimeInterval(1)
+)
+let archivedCacheStatsAfterSecondRefresh = archivedSubagentCacheStore.sessionFileCacheStats()
+runner.check(
+    archivedCacheStatsAfterSecondRefresh.prefixScans == archivedCacheStatsAfterFirstRefresh.prefixScans,
+    "filtered archived subagent files should remain cached across unchanged full refreshes"
+)
 
 if runner.failures > 0 {
     FileHandle.standardError.write(Data("\(runner.failures) regression test(s) failed\n".utf8))
