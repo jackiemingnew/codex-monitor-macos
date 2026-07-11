@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-private enum DetailPage: String, CaseIterable, Identifiable {
+enum DetailPage: String, CaseIterable, Identifiable {
     case codex
     case codexRadar
     case remoteCodex
@@ -333,6 +333,7 @@ struct DetailPanelView: View {
     let onNewAPIRefresh: () -> Void
     let onSubAPIRefresh: () -> Void
     let onCodexRadarRefresh: () -> Void
+    let onPageSelected: (DetailPage) -> Void
     @State private var detailPage: DetailPage = .codex
 
     private var snapshot: UsageSnapshot {
@@ -378,6 +379,12 @@ struct DetailPanelView: View {
         }
         .frame(width: IslandMetrics.width, height: detailHeight)
         .clipShape(BottomRoundedRectangle(radius: MonitorTheme.Radius.detailBottom))
+        .onAppear {
+            onPageSelected(selectedPage)
+        }
+        .onChange(of: selectedPage) { _, page in
+            onPageSelected(page)
+        }
     }
 
     private var displayedTasks: [CodexTask] {

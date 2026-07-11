@@ -403,6 +403,7 @@ final class NotchOverlayController {
     private var eventMonitors: [Any] = []
     private var overlayHorizontalPosition: CGFloat = 0
     private var dragSession: OverlayDragSession?
+    private var selectedDetailPage: DetailPage = .codex
 
     init() {
         window = NSPanel(
@@ -542,6 +543,9 @@ final class NotchOverlayController {
             },
             onCodexRadarRefresh: { [weak self] in
                 self?.codexRadarViewModel.refreshNow()
+            },
+            onPageSelected: { [weak self] page in
+                self?.selectedDetailPage = page
             }
         )
         let detailHostingView = NSHostingView(rootView: detailView)
@@ -685,19 +689,29 @@ final class NotchOverlayController {
     }
 
     private func refreshDetailData() {
-        viewModel.refreshAll(forceRateLimitRefresh: false)
-
-        if settings.remoteMonitorEnabled {
-            remoteViewModel.refreshNow()
-        }
-        if settings.newAPIMonitorEnabled {
-            newAPIViewModel.refreshNow()
-        }
-        if settings.subAPIMonitorEnabled {
-            subAPIViewModel.refreshNow()
-        }
-        if settings.codexRadarEnabled {
+        switch selectedDetailPage {
+        case .codex:
+            viewModel.refreshAll(forceRateLimitRefresh: false)
+        case .codexRadar:
+            guard settings.codexRadarEnabled else {
+                return
+            }
             codexRadarViewModel.refreshWhenPresented()
+        case .remoteCodex:
+            guard settings.remoteMonitorEnabled else {
+                return
+            }
+            remoteViewModel.refreshNow()
+        case .newAPI:
+            guard settings.newAPIMonitorEnabled else {
+                return
+            }
+            newAPIViewModel.refreshNow()
+        case .subAPI:
+            guard settings.subAPIMonitorEnabled else {
+                return
+            }
+            subAPIViewModel.refreshNow()
         }
     }
 

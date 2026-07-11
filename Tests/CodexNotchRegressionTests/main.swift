@@ -1438,6 +1438,11 @@ let protectedRadarSettings = CodexNotchSettings(
     environment: [:],
     codexRadarLegacyTokenFileURL: radarCredentialLegacyFile
 )
+let defaultPublicRadarCredential = protectedRadarSettings.codexRadarCredential(accessMode: .nonInteractive)
+runner.check(defaultPublicRadarCredential.token == nil, "Radar should default to the public source without a bearer token")
+runner.check(defaultPublicRadarCredential.source == .none, "default Radar access should report the public credential source")
+runner.check(protectedRadarStore.loadCount == 0, "default Radar access should not read Keychain")
+protectedRadarSettings.codexRadarUsesAuthorizedAPI = true
 let backgroundRadarCredential = protectedRadarSettings.codexRadarCredential(accessMode: .nonInteractive)
 runner.check(backgroundRadarCredential.token == nil, "background Radar credential reads must not force Keychain authorization")
 runner.check(backgroundRadarCredential.source == .interactionRequired, "blocked background Keychain reads should request deferred authorization")
@@ -1477,6 +1482,7 @@ let migratedRadarSettings = CodexNotchSettings(
     environment: [:],
     codexRadarLegacyTokenFileURL: radarCredentialLegacyFile
 )
+migratedRadarSettings.codexRadarUsesAuthorizedAPI = true
 let migratedRadarCredential = migratedRadarSettings.codexRadarCredential(accessMode: .interactive)
 runner.check(migratedRadarCredential.token == "migrated-radar-token", "interactive Radar access should migrate the legacy token file")
 runner.check(!FileManager.default.fileExists(atPath: radarCredentialLegacyFile.path), "verified Radar migration should delete the legacy token file")
@@ -1502,6 +1508,7 @@ let failedRadarMigrationSettings = CodexNotchSettings(
     environment: [:],
     codexRadarLegacyTokenFileURL: retryRadarLegacyFile
 )
+failedRadarMigrationSettings.codexRadarUsesAuthorizedAPI = true
 let failedRadarMigrationCredential = failedRadarMigrationSettings.codexRadarCredential(accessMode: .interactive)
 runner.check(failedRadarMigrationCredential.token == nil, "a failed Radar vault write must not publish an unverified migrated token")
 runner.check(FileManager.default.fileExists(atPath: retryRadarLegacyFile.path), "a failed Radar vault write must preserve the legacy token file")
@@ -1513,6 +1520,7 @@ let recoveredRadarMigrationSettings = CodexNotchSettings(
     environment: [:],
     codexRadarLegacyTokenFileURL: retryRadarLegacyFile
 )
+recoveredRadarMigrationSettings.codexRadarUsesAuthorizedAPI = true
 let recoveredRadarMigrationCredential = recoveredRadarMigrationSettings.codexRadarCredential(accessMode: .interactive)
 runner.check(recoveredRadarMigrationCredential.token == "retry-radar-token", "Radar migration should recover after a failed target write")
 runner.check(!FileManager.default.fileExists(atPath: retryRadarLegacyFile.path), "recovered Radar migration should clean the verified legacy file")
@@ -1537,6 +1545,7 @@ let failedRadarCleanupSettings = CodexNotchSettings(
     environment: [:],
     codexRadarLegacyTokenFileURL: cleanupRetryLegacyFile
 )
+failedRadarCleanupSettings.codexRadarUsesAuthorizedAPI = true
 let failedRadarCleanupCredential = failedRadarCleanupSettings.codexRadarCredential(accessMode: .interactive)
 runner.check(failedRadarCleanupCredential.token == "cleanup-retry-token", "a verified Radar vault write should remain usable when legacy cleanup fails")
 runner.check(FileManager.default.fileExists(atPath: cleanupRetryLegacyFile.path), "failed Radar cleanup should preserve the legacy file for retry")
@@ -1549,6 +1558,7 @@ let recoveredRadarCleanupSettings = CodexNotchSettings(
     environment: [:],
     codexRadarLegacyTokenFileURL: cleanupRetryLegacyFile
 )
+recoveredRadarCleanupSettings.codexRadarUsesAuthorizedAPI = true
 let recoveredRadarCleanupCredential = recoveredRadarCleanupSettings.codexRadarCredential(accessMode: .interactive)
 runner.check(recoveredRadarCleanupCredential.token == "cleanup-retry-token", "Radar cleanup retry should preserve the migrated token")
 runner.check(!FileManager.default.fileExists(atPath: cleanupRetryLegacyFile.path), "Radar cleanup retry should remove the verified legacy file")
@@ -1564,6 +1574,7 @@ let conflictRadarSettings = CodexNotchSettings(
     environment: [:],
     codexRadarLegacyTokenFileURL: radarCredentialLegacyFile
 )
+conflictRadarSettings.codexRadarUsesAuthorizedAPI = true
 let conflictRadarCredential = conflictRadarSettings.codexRadarCredential(accessMode: .interactive)
 runner.check(conflictRadarCredential.token == "existing-vault-token", "an existing vault token should win over a conflicting legacy file")
 runner.check(FileManager.default.fileExists(atPath: radarCredentialLegacyFile.path), "a conflicting legacy Radar token must be preserved for explicit resolution")
@@ -1614,6 +1625,7 @@ runner.check(settings.usageRefreshInterval == 300, "saving unchanged refresh int
 runner.check(settings.watcherRefreshInterval == 180, "saving unchanged refresh intervals should keep the folded low-power watcher default")
 runner.check(settings.fileChangeRefreshMinimumGap == 15, "saving unchanged refresh intervals should keep the folded low-power debounce default")
 runner.check(settings.codexRadarEnabled, "Codex Radar should default to enabled")
+runner.check(!settings.codexRadarUsesAuthorizedAPI, "Codex Radar should default to Public without reading Keychain")
 runner.check(settings.overlayHorizontalPosition == 0, "overlay position should default to the primary screen center")
 settings.setOverlayHorizontalPosition(0.42)
 let overlayPositionReloadedSettings = CodexNotchSettings(
