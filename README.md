@@ -7,6 +7,22 @@
   <a href="#english">English</a>
 </p>
 
+## 功能示意 / Screenshots
+
+<p align="center">
+  <img src="docs/images/screenshots/menu-bar-codex-detail.png" width="49%" alt="菜单栏模式与 Codex 详情 / Menu bar mode and Codex details">
+  <img src="docs/images/screenshots/codex-radar.png" width="49%" alt="Codex Radar 降智与额度雷达 / Codex Radar model and quota signals">
+</p>
+<p align="center">
+  <sub>菜单栏模式与 Codex 详情 / Menu bar mode and Codex details · Codex Radar</sub>
+</p>
+<p align="center">
+  <img src="docs/images/screenshots/display-mode-settings.png" width="82%" alt="浮动 HUD 与菜单栏显示模式设置 / Floating HUD and menu bar display settings">
+</p>
+<p align="center">
+  <sub>浮动 HUD 与菜单栏模式可在设置中切换 / Switch between the floating HUD and menu bar mode in Settings</sub>
+</p>
+
 <a id="中文"></a>
 
 ## 中文
