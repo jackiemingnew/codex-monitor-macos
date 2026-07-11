@@ -315,7 +315,7 @@ private final class CollapsedHostingView<Content: View>: NSHostingView<Content>,
     }
 
     override func rightMouseDown(with event: NSEvent) {
-        NSMenu.popUpContextMenu(makeContextMenu(), with: event, for: self)
+        makeContextMenu().popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
     }
 
     private func makeContextMenu() -> NSMenu {
@@ -422,6 +422,7 @@ final class NotchOverlayController {
     private var dragSession: OverlayDragSession?
     private var selectedDetailPage: DetailPage = .codex
     private var statusItem: NSStatusItem?
+    private var statusItemHostingView: NSView?
 
     init() {
         window = NSPanel(
@@ -447,7 +448,7 @@ final class NotchOverlayController {
     }
 
     func show() {
-        applyDisplayMode()
+        applyDisplayMode(settings.hudDisplayMode)
     }
 
     private func configureWindow() {
@@ -502,7 +503,7 @@ final class NotchOverlayController {
             self?.viewModel.refreshAll()
         }
         hostingView.onMoveToMenuBar = { [weak self] in
-            self?.settings.hudDisplayMode = .menuBar
+            self?.scheduleDisplayMode(.menuBar)
         }
         hostingView.configureInteractions()
         hostingView.frame = NSRect(
@@ -516,21 +517,21 @@ final class NotchOverlayController {
         window.contentView = hostingView
     }
 
-    private func applyDisplayMode() {
+    private func applyDisplayMode(_ mode: HUDDisplayMode) {
+        let visibility = HUDPresentationVisibility(mode: mode)
         dragSession = nil
         overlayState.isExpanded = false
         if let detailWindow, window.childWindows?.contains(detailWindow) == true {
             window.removeChildWindow(detailWindow)
         }
         detailWindow?.orderOut(nil)
+        window.orderOut(nil)
+        removeStatusItem()
 
-        switch settings.hudDisplayMode {
-        case .floatingHUD:
-            removeStatusItem()
+        if visibility.showsFloatingHUD {
             updateFrames()
             window.orderFrontRegardless()
-        case .menuBar:
-            window.orderOut(nil)
+        } else if visibility.showsMenuBarItem {
             configureStatusItem()
             updateFrames()
         }
@@ -566,15 +567,21 @@ final class NotchOverlayController {
         hostingView.frame = NSRect(x: 0, y: 0, width: MenuBarMetrics.width, height: MenuBarMetrics.height)
         hostingView.autoresizingMask = [.width, .height]
         button.addSubview(hostingView)
+        statusItemHostingView = hostingView
         statusItem = item
     }
 
     private func removeStatusItem() {
-        guard let statusItem else {
+        guard let item = statusItem else {
             return
         }
-        NSStatusBar.system.removeStatusItem(statusItem)
-        self.statusItem = nil
+        statusItem = nil
+        item.isVisible = false
+        item.button?.target = nil
+        item.button?.action = nil
+        statusItemHostingView?.removeFromSuperview()
+        statusItemHostingView = nil
+        NSStatusBar.system.removeStatusItem(item)
     }
 
     @objc private func handleStatusItemAction(_ sender: NSStatusBarButton) {
@@ -582,7 +589,7 @@ final class NotchOverlayController {
             return
         }
         if event.type == .rightMouseUp {
-            NSMenu.popUpContextMenu(makeStatusItemMenu(), with: event, for: sender)
+            makeStatusItemMenu().popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
             return
         }
         overlayState.isExpanded.toggle()
@@ -612,7 +619,13 @@ final class NotchOverlayController {
     }
 
     @objc private func useFloatingHUD() {
-        settings.hudDisplayMode = .floatingHUD
+        scheduleDisplayMode(.floatingHUD)
+    }
+
+    private func scheduleDisplayMode(_ mode: HUDDisplayMode) {
+        DispatchQueue.main.async { [weak self] in
+            self?.settings.hudDisplayMode = mode
+        }
     }
 
     @objc private func openSettingsFromMenu() {
@@ -693,8 +706,13 @@ final class NotchOverlayController {
         settings.$hudDisplayMode
             .removeDuplicates()
             .dropFirst()
-            .sink { [weak self] _ in
-                self?.applyDisplayMode()
+            .sink { [weak self] mode in
+                DispatchQueue.main.async {
+                    guard let self, self.settings.hudDisplayMode == mode else {
+                        return
+                    }
+                    self.applyDisplayMode(mode)
+                }
             }
             .store(in: &cancellables)
 
