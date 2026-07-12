@@ -385,6 +385,8 @@ final class CodexUsageStore: @unchecked Sendable {
                 secondaryPercent: rateLimitResult.snapshot.secondaryDisplayPercent(now: now),
                 primaryResetsAt: rateLimitResult.snapshot.primaryResetsAt,
                 secondaryResetsAt: rateLimitResult.snapshot.secondaryResetsAt,
+                primaryWindowMinutes: rateLimitResult.snapshot.primaryWindowMinutes,
+                secondaryWindowMinutes: rateLimitResult.snapshot.secondaryWindowMinutes,
                 cumulativeUsage: cumulativeUsage,
                 recentUsage: recentUsage,
                 dailyUsage: dailyUsage,
@@ -680,6 +682,8 @@ final class CodexUsageStore: @unchecked Sendable {
             secondaryPercent: cache.rateLimits.secondaryDisplayPercent(now: now),
             primaryResetsAt: cache.rateLimits.primaryResetsAt,
             secondaryResetsAt: cache.rateLimits.secondaryResetsAt,
+            primaryWindowMinutes: cache.rateLimits.primaryWindowMinutes,
+            secondaryWindowMinutes: cache.rateLimits.secondaryWindowMinutes,
             cumulativeUsage: cumulativeUsage,
             recentUsage: recentUsage,
             dailyUsage: dailyUsage,
@@ -3164,6 +3168,7 @@ final class CodexUsageStore: @unchecked Sendable {
     private struct RateLimitWindowDecision {
         let percent: Int?
         let resetsAt: Int?
+        let windowMinutes: Int?
         let reason: String
         let usesOfficial: Bool
     }
@@ -3295,14 +3300,33 @@ final class CodexUsageStore: @unchecked Sendable {
     ) -> MainRateLimitMerge {
         let localSnapshot = local.snapshot
         let primary = authoritativeRateLimitWindow(
-            official: (appServer.snapshot.primaryPercent, appServer.snapshot.primaryResetsAt),
-            fallback: (localSnapshot.primaryPercent, localSnapshot.primaryResetsAt),
+            official: (
+                appServer.snapshot.primaryPercent,
+                appServer.snapshot.primaryResetsAt,
+                appServer.snapshot.primaryWindowMinutes
+            ),
+            fallback: (
+                localSnapshot.primaryPercent,
+                localSnapshot.primaryResetsAt,
+                localSnapshot.primaryWindowMinutes
+            ),
             officialReason: "app_server_\(appServer.freshness.rawValue)",
             now: now
         )
+        let secondaryFallback = isWeeklyOnlyMainRateLimit(appServer.snapshot)
+            ? (percent: nil, resetsAt: nil, windowMinutes: nil)
+            : (
+                percent: localSnapshot.secondaryPercent,
+                resetsAt: localSnapshot.secondaryResetsAt,
+                windowMinutes: localSnapshot.secondaryWindowMinutes
+            )
         let secondary = authoritativeRateLimitWindow(
-            official: (appServer.snapshot.secondaryPercent, appServer.snapshot.secondaryResetsAt),
-            fallback: (localSnapshot.secondaryPercent, localSnapshot.secondaryResetsAt),
+            official: (
+                appServer.snapshot.secondaryPercent,
+                appServer.snapshot.secondaryResetsAt,
+                appServer.snapshot.secondaryWindowMinutes
+            ),
+            fallback: secondaryFallback,
             officialReason: "app_server_\(appServer.freshness.rawValue)",
             now: now
         )
@@ -3313,6 +3337,8 @@ final class CodexUsageStore: @unchecked Sendable {
                 secondaryPercent: secondary.percent,
                 primaryResetsAt: primary.resetsAt,
                 secondaryResetsAt: secondary.resetsAt,
+                primaryWindowMinutes: primary.windowMinutes,
+                secondaryWindowMinutes: secondary.windowMinutes,
                 capturedAt: appServer.snapshot.capturedAt ?? localSnapshot.capturedAt,
                 isPrimaryCodexLimit: appServer.snapshot.isPrimaryCodexLimit || localSnapshot.isPrimaryCodexLimit,
                 sparkQuotaWindows: appServer.snapshot.sparkQuotaWindows
@@ -3323,17 +3349,27 @@ final class CodexUsageStore: @unchecked Sendable {
         )
     }
 
+    private func isWeeklyOnlyMainRateLimit(_ snapshot: RateLimitSnapshot) -> Bool {
+        snapshot.primaryWindowMinutes == 10_080
+            && snapshot.secondaryPercent == nil
+            && snapshot.secondaryResetsAt == nil
+            && snapshot.secondaryWindowMinutes == nil
+    }
+
     private func authoritativeRateLimitWindow(
-        official: (percent: Int?, resetsAt: Int?),
-        fallback: (percent: Int?, resetsAt: Int?),
+        official: (percent: Int?, resetsAt: Int?, windowMinutes: Int?),
+        fallback: (percent: Int?, resetsAt: Int?, windowMinutes: Int?),
         officialReason: String,
         now: Date
     ) -> RateLimitWindowDecision {
-        if official.percent == nil, official.resetsAt == nil {
+        if official.percent == nil, official.resetsAt == nil, official.windowMinutes == nil {
             return RateLimitWindowDecision(
                 percent: fallback.percent,
                 resetsAt: fallback.resetsAt,
-                reason: fallback.percent == nil && fallback.resetsAt == nil ? "unavailable" : "local_jsonl_only",
+                windowMinutes: fallback.windowMinutes,
+                reason: fallback.percent == nil && fallback.resetsAt == nil && fallback.windowMinutes == nil
+                    ? "unavailable"
+                    : "local_jsonl_only",
                 usesOfficial: false
             )
         }
@@ -3342,6 +3378,7 @@ final class CodexUsageStore: @unchecked Sendable {
         return RateLimitWindowDecision(
             percent: official.percent,
             resetsAt: official.resetsAt,
+            windowMinutes: official.windowMinutes,
             reason: resetNeedsConfirmation ? "\(officialReason)_pending_reset_refresh" : officialReason,
             usesOfficial: true
         )
@@ -3535,6 +3572,16 @@ final class CodexUsageStore: @unchecked Sendable {
                 snapshot: generation.snapshot,
                 reason: "single_generation",
                 support: generation.support
+            )
+        }
+
+        if let newestGeneration = generations.max(by: {
+            ($0.snapshot.capturedAt ?? .distantPast) < ($1.snapshot.capturedAt ?? .distantPast)
+        }), isWeeklyOnlyMainRateLimit(newestGeneration.snapshot) {
+            return LocalGenerationDecision(
+                snapshot: newestGeneration.snapshot,
+                reason: "latest_weekly_only_topology",
+                support: newestGeneration.support
             )
         }
 
@@ -3817,6 +3864,8 @@ final class CodexUsageStore: @unchecked Sendable {
                 secondaryPercent: remainingPercent(fromUsedPercent: snapshot.secondary?.usedPercent),
                 primaryResetsAt: snapshot.primary?.resetsAt,
                 secondaryResetsAt: snapshot.secondary?.resetsAt,
+                primaryWindowMinutes: snapshot.primary?.durationMinutes,
+                secondaryWindowMinutes: snapshot.secondary?.durationMinutes,
                 capturedAt: now,
                 isPrimaryCodexLimit: true,
                 sparkQuotaWindows: sparkQuotaWindows(from: result.rateLimitsByLimitId ?? [:])
@@ -3987,6 +4036,10 @@ final class CodexUsageStore: @unchecked Sendable {
             let secondaryPercent = remainingPercent(fromUsedPercent: secondary?["used_percent"])
             let primaryResetsAt = intValue(primary?["resets_at"])
             let secondaryResetsAt = intValue(secondary?["resets_at"])
+            let primaryWindowMinutes = intValue(primary?["window_minutes"])
+                ?? intValue(primary?["window_duration_mins"])
+            let secondaryWindowMinutes = intValue(secondary?["window_minutes"])
+                ?? intValue(secondary?["window_duration_mins"])
             let sparkFamily = modelQuotaFamily(
                 matching: [limitID, limitName, runtime?.model],
                 in: Self.exposedModelQuotaFamilies
@@ -4007,6 +4060,8 @@ final class CodexUsageStore: @unchecked Sendable {
                     secondaryPercent: isMainCodexLimit ? secondaryPercent : nil,
                     primaryResetsAt: isMainCodexLimit ? primaryResetsAt : nil,
                     secondaryResetsAt: isMainCodexLimit ? secondaryResetsAt : nil,
+                    primaryWindowMinutes: isMainCodexLimit ? primaryWindowMinutes : nil,
+                    secondaryWindowMinutes: isMainCodexLimit ? secondaryWindowMinutes : nil,
                     capturedAt: capturedAt,
                     isPrimaryCodexLimit: isMainCodexLimit,
                     sparkQuotaWindows: sparkWindows
@@ -4546,7 +4601,7 @@ private struct AppServerRateLimitCache {
 }
 
 private struct PersistedAppServerRateLimitCache: Codable {
-    static let currentVersion = 1
+    static let currentVersion = 2
 
     let version: Int
     let savedAt: Date
@@ -4602,6 +4657,12 @@ private struct AppServerRateLimitSnapshot: Decodable {
 private struct AppServerRateLimitWindow: Decodable {
     let usedPercent: Int
     let resetsAt: Int?
+    let windowDurationMins: Int?
+    let windowMinutes: Int?
+
+    var durationMinutes: Int? {
+        windowDurationMins ?? windowMinutes
+    }
 }
 
 private struct StoreSignature: Equatable {

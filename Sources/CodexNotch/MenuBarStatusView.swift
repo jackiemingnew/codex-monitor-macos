@@ -14,7 +14,7 @@ struct MenuBarStatusView: View {
 
             switch effectiveDisplaySource {
             case .automatic, .codex:
-                Text(Formatters.percent(viewModel.snapshot.primaryPercent))
+                Text(Formatters.percent(mainQuotaWindow?.remainingPercent))
                     .font(.system(size: 10.2, weight: .semibold, design: .rounded))
                     .foregroundStyle(Color.primary)
                     .monospacedDigit()
@@ -53,6 +53,10 @@ struct MenuBarStatusView: View {
         )
     }
 
+    private var mainQuotaWindow: MainQuotaWindow? {
+        viewModel.snapshot.mainQuotaWindows.first
+    }
+
     private var statusColor: Color {
         switch effectiveDisplaySource {
         case .automatic, .codex:
@@ -80,7 +84,7 @@ struct MenuBarStatusView: View {
     private var accessibilityText: String {
         switch effectiveDisplaySource {
         case .automatic, .codex:
-            "Codex \(viewModel.snapshot.isRunning ? "运行中" : "空闲")，5 小时剩余 \(Formatters.percent(viewModel.snapshot.primaryPercent))"
+            "Codex \(viewModel.snapshot.isRunning ? "运行中" : "空闲")，\(mainQuotaWindow?.accessibilityLabel ?? "额度")剩余 \(Formatters.percent(mainQuotaWindow?.remainingPercent))"
         case .remoteCodex:
             "CLIProxyAPI，异常 \(remoteViewModel.snapshot.quotaCount + remoteViewModel.snapshot.abnormalCount)"
         case .newAPI:
