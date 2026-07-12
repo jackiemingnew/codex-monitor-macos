@@ -299,6 +299,57 @@ runner.check(
     "a reset timestamp alone should not synthesize a 100 percent quota"
 )
 
+var legacyQuotaSnapshot = UsageSnapshot.empty
+legacyQuotaSnapshot.primaryPercent = 78
+legacyQuotaSnapshot.secondaryPercent = 36
+legacyQuotaSnapshot.primaryResetsAt = 1_783_003_600
+legacyQuotaSnapshot.secondaryResetsAt = 1_783_400_000
+legacyQuotaSnapshot.primaryWindowMinutes = 300
+legacyQuotaSnapshot.secondaryWindowMinutes = 10_080
+runner.check(
+    legacyQuotaSnapshot.mainQuotaWindows.map(\.title) == ["5h Quota", "Weekly Quota"],
+    "legacy dual-window quota should keep both 5h and weekly display windows"
+)
+runner.check(
+    legacyQuotaSnapshot.mainQuotaWindows.map(\.compactLabel) == ["5h", "7d"],
+    "legacy dual-window quota should keep compact 5h and 7d labels"
+)
+
+var weeklyOnlyQuotaSnapshot = UsageSnapshot.empty
+weeklyOnlyQuotaSnapshot.primaryPercent = 100
+weeklyOnlyQuotaSnapshot.primaryResetsAt = 1_783_604_800
+weeklyOnlyQuotaSnapshot.primaryWindowMinutes = 10_080
+weeklyOnlyQuotaSnapshot.stabilizeQuota(from: legacyQuotaSnapshot)
+runner.check(
+    weeklyOnlyQuotaSnapshot.secondaryPercent == nil,
+    "an authoritative weekly-only snapshot should clear the previous secondary quota"
+)
+runner.check(
+    weeklyOnlyQuotaSnapshot.mainQuotaWindows.map(\.title) == ["Weekly Quota"],
+    "a weekly quota delivered in the primary slot should render as one weekly window"
+)
+runner.check(
+    weeklyOnlyQuotaSnapshot.mainQuotaWindows.first?.usesDateResetStyle == true,
+    "weekly quota reset metadata should use a date instead of a time-only label"
+)
+
+var unavailableQuotaSnapshot = UsageSnapshot.empty
+unavailableQuotaSnapshot.stabilizeQuota(from: legacyQuotaSnapshot)
+runner.check(
+    unavailableQuotaSnapshot.primaryPercent == 78 && unavailableQuotaSnapshot.secondaryPercent == 36,
+    "a fully unavailable quota refresh should preserve the last known windows"
+)
+
+var partiallyAvailableLegacyQuotaSnapshot = UsageSnapshot.empty
+partiallyAvailableLegacyQuotaSnapshot.primaryPercent = 77
+partiallyAvailableLegacyQuotaSnapshot.primaryResetsAt = 1_783_003_900
+partiallyAvailableLegacyQuotaSnapshot.primaryWindowMinutes = 300
+partiallyAvailableLegacyQuotaSnapshot.stabilizeQuota(from: legacyQuotaSnapshot)
+runner.check(
+    partiallyAvailableLegacyQuotaSnapshot.secondaryPercent == 36,
+    "a partial legacy quota refresh should preserve the temporarily missing weekly window"
+)
+
 let runtimeLocatorRoot = URL(fileURLWithPath: NSTemporaryDirectory())
     .appendingPathComponent("CodexNotchRuntimeLocator-\(UUID().uuidString)")
 let discoveredRuntimeApp = runtimeLocatorRoot.appendingPathComponent("ChatGPT.app", isDirectory: true)
@@ -654,10 +705,27 @@ runner.check(appServerSnapshot.primaryPercent == 83, "app-server codex primary q
 runner.check(appServerSnapshot.secondaryPercent == 78, "app-server codex secondary quota should remain the main 7d quota")
 runner.check(appServerSnapshot.primaryResetsAt == appServerPrimaryReset, "app-server codex primary reset time should decode")
 runner.check(appServerSnapshot.secondaryResetsAt == appServerSecondaryReset, "app-server codex secondary reset time should decode")
+runner.check(appServerSnapshot.primaryWindowMinutes == 300, "app-server primary window duration should decode")
+runner.check(appServerSnapshot.secondaryWindowMinutes == 10_080, "app-server secondary window duration should decode")
 runner.check(appServerSnapshot.sparkQuotaWindows.map(\.label) == ["5h", "7d"], "app-server Spark quota windows should decode")
 runner.check(appServerSnapshot.sparkQuotaWindows.allSatisfy { !$0.id.contains("luna") }, "app-server unknown model quota windows should not appear in Spark quota windows")
 runner.check(appServerSnapshot.sparkQuotaWindows.first?.remainingPercent == 22, "app-server Spark 5h remaining percent should decode")
 runner.check(appServerSnapshot.sparkQuotaWindows.last?.remainingPercent == 58, "app-server Spark 7d remaining percent should decode")
+
+let weeklyOnlyReset = Int(appServerFixtureNow.timeIntervalSince1970) + 7 * 24 * 60 * 60
+let weeklyOnlyAppServerOutput = """
+{"jsonrpc":"2.0","id":2,"result":{"rateLimits":{"limitId":"codex","limitName":null,"primary":{"usedPercent":0,"windowDurationMins":10080,"resetsAt":\(weeklyOnlyReset)},"secondary":null},"rateLimitsByLimitId":{"codex":{"limitId":"codex","limitName":null,"primary":{"usedPercent":0,"windowDurationMins":10080,"resetsAt":\(weeklyOnlyReset)},"secondary":null}}}}
+"""
+let weeklyOnlyAppServerSnapshot = runner.require(
+    CodexUsageStore().parseAppServerRateLimits(
+        output: weeklyOnlyAppServerOutput,
+        now: appServerFixtureNow
+    ),
+    "weekly-only app-server rate limit fixture should parse"
+)
+runner.check(weeklyOnlyAppServerSnapshot.primaryPercent == 100, "weekly-only app-server quota should expose full remaining usage")
+runner.check(weeklyOnlyAppServerSnapshot.primaryWindowMinutes == 10_080, "weekly-only app-server quota should retain its seven-day duration")
+runner.check(weeklyOnlyAppServerSnapshot.secondaryPercent == nil, "weekly-only app-server quota should not synthesize a secondary window")
 
 @MainActor
 func dateFromISO8601(_ value: String, message: String) -> Date {
@@ -3730,7 +3798,7 @@ let codexQuotaPath = sessionDirectory
     .appendingPathComponent("rollout-2026-06-14T02-20-18-\(codexQuotaSessionID).jsonl")
 let codexQuotaBody = """
 {"timestamp":"\(timestamp)","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Codex 额度恢复时间测试"}]}}
-{"timestamp":"\(timestamp)","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":0}},"rate_limits":{"limit_id":"codex","primary":{"used_percent":33,"resets_at":\(codexPrimaryReset)},"secondary":{"used_percent":55,"resets_at":\(codexSecondaryReset)}}}}
+{"timestamp":"\(timestamp)","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":0}},"rate_limits":{"limit_id":"codex","primary":{"used_percent":33,"window_minutes":300,"resets_at":\(codexPrimaryReset)},"secondary":{"used_percent":55,"window_minutes":10080,"resets_at":\(codexSecondaryReset)}}}}
 """
 try codexQuotaBody.write(to: codexQuotaPath, atomically: true, encoding: .utf8)
 try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: codexQuotaPath.path)
@@ -3894,6 +3962,8 @@ runner.check(localSnapshot.primaryPercent == 67, "GPT-5.6 Sol local JSONL should
 runner.check(localSnapshot.secondaryPercent == 45, "GPT-5.6 Sol local JSONL should expose the main Codex 7d quota")
 runner.check(localSnapshot.primaryResetsAt == codexPrimaryReset, "local JSONL Codex quota should expose primary reset time")
 runner.check(localSnapshot.secondaryResetsAt == codexSecondaryReset, "local JSONL Codex quota should expose secondary reset time")
+runner.check(localSnapshot.primaryWindowMinutes == 300, "local JSONL Codex quota should expose the primary window duration")
+runner.check(localSnapshot.secondaryWindowMinutes == 10_080, "local JSONL Codex quota should expose the secondary window duration")
 runner.check(localSnapshot.primaryPercent != 92, "subagent Codex quota should not override the main 5h quota")
 runner.check(localSnapshot.sparkQuotaWindows.map(\.remainingPercent) == [60, 90], "local JSONL Spark quota windows should decode")
 runner.check(localSnapshot.sparkQuotaWindows.allSatisfy { !$0.id.contains("luna") }, "unknown local model quota windows should not appear in Spark quota windows")
@@ -4176,6 +4246,106 @@ let appServerFirstSnapshot = appServerFirstStore.loadSnapshot(
 runner.check(appServerFirstSnapshot.primaryPercent == 83, "fresh app-server 5h quota should remain authoritative")
 runner.check(appServerFirstSnapshot.secondaryPercent == 78, "fresh app-server 7d quota should remain authoritative")
 runner.check(appServerFirstSnapshot.sparkQuotaWindows.map(\.remainingPercent) == [22, 58], "app-server-first should keep Spark quota in Spark windows")
+
+let weeklyOnlyAppServerStore = CodexUsageStore(
+    codexDirectory: tempRoot,
+    initialAppServerRateLimits: weeklyOnlyAppServerSnapshot
+)
+let weeklyOnlyAppServerResult = weeklyOnlyAppServerStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .appServerFirst,
+    taskHistoryRange: .day,
+    now: now
+)
+runner.check(weeklyOnlyAppServerResult.primaryPercent == 100, "weekly-only app-server quota should remain authoritative")
+runner.check(weeklyOnlyAppServerResult.primaryWindowMinutes == 10_080, "weekly-only app-server quota should retain weekly semantics")
+runner.check(weeklyOnlyAppServerResult.secondaryPercent == nil, "weekly-only app-server quota should clear a stale local secondary window")
+
+let weeklyTransitionRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("CodexNotchWeeklyTransition-\(UUID().uuidString)")
+try FileManager.default.createDirectory(at: weeklyTransitionRoot, withIntermediateDirectories: true)
+defer {
+    try? FileManager.default.removeItem(at: weeklyTransitionRoot)
+}
+let weeklyTransitionStateDatabase = weeklyTransitionRoot.appendingPathComponent("state_5.sqlite").path
+let weeklyTransitionLogsDatabase = weeklyTransitionRoot.appendingPathComponent("logs_2.sqlite").path
+_ = try Shell.run("/usr/bin/sqlite3", [
+    weeklyTransitionStateDatabase,
+    """
+    create table threads(
+      id text,
+      title text,
+      tokens_used integer,
+      model text,
+      reasoning_effort text,
+      rollout_path text,
+      created_at integer,
+      updated_at integer,
+      archived integer default 0
+    );
+    """
+])
+_ = try Shell.run("/usr/bin/sqlite3", [
+    weeklyTransitionLogsDatabase,
+    """
+    create table logs(
+      thread_id text,
+      ts integer,
+      target text,
+      feedback_log_body text
+    );
+    """
+])
+let weeklyTransitionSessionDirectory = weeklyTransitionRoot
+    .appendingPathComponent("sessions/2026/07/13", isDirectory: true)
+try FileManager.default.createDirectory(at: weeklyTransitionSessionDirectory, withIntermediateDirectories: true)
+let legacyTransitionSessionID = "019f56de-19ba-7220-9ac7-b1fc2b6800f1"
+let weeklyTransitionSessionID = "019f56de-19ba-7220-9ac7-b1fc2b6800f2"
+let legacyTransitionPath = weeklyTransitionSessionDirectory
+    .appendingPathComponent("rollout-legacy-\(legacyTransitionSessionID).jsonl")
+let weeklyTransitionPath = weeklyTransitionSessionDirectory
+    .appendingPathComponent("rollout-weekly-\(weeklyTransitionSessionID).jsonl")
+let legacyTransitionTimestamp = ISO8601DateFormatter().string(from: now.addingTimeInterval(-5))
+let weeklyTransitionTimestamp = ISO8601DateFormatter().string(from: now)
+let legacyTransitionPrimaryReset = Int(now.timeIntervalSince1970) + 4 * 60 * 60
+let legacyTransitionSecondaryReset = Int(now.timeIntervalSince1970) + 5 * 24 * 60 * 60
+let weeklyTransitionReset = Int(now.timeIntervalSince1970) + 7 * 24 * 60 * 60
+try """
+{"timestamp":"\(legacyTransitionTimestamp)","type":"turn_context","payload":{"model":"gpt-5.6-sol","effort":"max"}}
+{"timestamp":"\(legacyTransitionTimestamp)","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":22,"window_minutes":300,"resets_at":\(legacyTransitionPrimaryReset)},"secondary":{"used_percent":64,"window_minutes":10080,"resets_at":\(legacyTransitionSecondaryReset)}}}}
+"""
+    .write(to: legacyTransitionPath, atomically: true, encoding: .utf8)
+try """
+{"timestamp":"\(weeklyTransitionTimestamp)","type":"turn_context","payload":{"model":"gpt-5.6-sol","effort":"max"}}
+{"timestamp":"\(weeklyTransitionTimestamp)","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":0,"window_minutes":10080,"resets_at":\(weeklyTransitionReset)},"secondary":null}}}
+"""
+    .write(to: weeklyTransitionPath, atomically: true, encoding: .utf8)
+_ = try Shell.run("/usr/bin/sqlite3", [
+    weeklyTransitionStateDatabase,
+    """
+    insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, created_at, updated_at, archived)
+    values
+      ('\(legacyTransitionSessionID)', 'Legacy quota topology', 0, 'gpt-5.6-sol', 'max', '\(legacyTransitionPath.path)', \(Int(now.timeIntervalSince1970)), \(Int(now.timeIntervalSince1970)), 0),
+      ('\(weeklyTransitionSessionID)', 'Weekly-only quota topology', 0, 'gpt-5.6-sol', 'max', '\(weeklyTransitionPath.path)', \(Int(now.timeIntervalSince1970)), \(Int(now.timeIntervalSince1970)), 0);
+    """
+])
+let weeklyTransitionStore = CodexUsageStore(
+    codexDirectory: weeklyTransitionRoot,
+    stateDatabase: weeklyTransitionStateDatabase,
+    logsDatabase: weeklyTransitionLogsDatabase,
+    ripgrepCandidates: []
+)
+let weeklyTransitionSnapshot = weeklyTransitionStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now
+)
+runner.check(weeklyTransitionSnapshot.primaryPercent == 100, "the newest weekly-only local topology should replace the legacy 5h window")
+runner.check(weeklyTransitionSnapshot.primaryWindowMinutes == 10_080, "the local topology transition should retain weekly semantics")
+runner.check(weeklyTransitionSnapshot.secondaryPercent == nil, "the local topology transition should drop the legacy 36 percent weekly value")
 
 let appServerMoreConstrainedStore = CodexUsageStore(
     codexDirectory: tempRoot,

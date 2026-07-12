@@ -41,6 +41,8 @@ struct UsageSnapshot: Equatable {
     var secondaryPercent: Int?
     var primaryResetsAt: Int?
     var secondaryResetsAt: Int?
+    var primaryWindowMinutes: Int? = nil
+    var secondaryWindowMinutes: Int? = nil
     var cumulativeUsage: CumulativeUsage
     var recentUsage: RecentUsage
     var dailyUsage: DailyUsage
@@ -75,6 +77,154 @@ struct UsageSnapshot: Equatable {
         lastUpdated: Date(),
         errorMessage: nil
     )
+
+    mutating func stabilizeQuota(from previous: UsageSnapshot) {
+        let isWeeklyOnlySnapshot = primaryWindowMinutes == 10_080 && !hasSecondaryQuotaWindowData
+        if !hasPrimaryQuotaWindowData {
+            primaryPercent = previous.primaryPercent
+            primaryResetsAt = previous.primaryResetsAt
+            primaryWindowMinutes = previous.primaryWindowMinutes
+        }
+        if !hasSecondaryQuotaWindowData && !isWeeklyOnlySnapshot {
+            secondaryPercent = previous.secondaryPercent
+            secondaryResetsAt = previous.secondaryResetsAt
+            secondaryWindowMinutes = previous.secondaryWindowMinutes
+        }
+    }
+
+    var mainQuotaWindows: [MainQuotaWindow] {
+        var windows: [MainQuotaWindow] = []
+        if hasPrimaryQuotaWindowData {
+            windows.append(
+                MainQuotaWindow(
+                    id: "primary",
+                    fallbackKind: .fiveHour,
+                    remainingPercent: primaryPercent,
+                    resetsAt: primaryResetsAt,
+                    windowMinutes: primaryWindowMinutes
+                )
+            )
+        }
+        if hasSecondaryQuotaWindowData {
+            windows.append(
+                MainQuotaWindow(
+                    id: "secondary",
+                    fallbackKind: .weekly,
+                    remainingPercent: secondaryPercent,
+                    resetsAt: secondaryResetsAt,
+                    windowMinutes: secondaryWindowMinutes
+                )
+            )
+        }
+        if windows.isEmpty {
+            return [
+                MainQuotaWindow(
+                    id: "primary",
+                    fallbackKind: .fiveHour,
+                    remainingPercent: nil,
+                    resetsAt: nil,
+                    windowMinutes: nil
+                ),
+                MainQuotaWindow(
+                    id: "secondary",
+                    fallbackKind: .weekly,
+                    remainingPercent: nil,
+                    resetsAt: nil,
+                    windowMinutes: nil
+                )
+            ]
+        }
+        return windows
+    }
+
+    private var hasPrimaryQuotaWindowData: Bool {
+        primaryPercent != nil || primaryResetsAt != nil || primaryWindowMinutes != nil
+    }
+
+    private var hasSecondaryQuotaWindowData: Bool {
+        secondaryPercent != nil || secondaryResetsAt != nil || secondaryWindowMinutes != nil
+    }
+}
+
+enum MainQuotaWindowKind: Equatable {
+    case fiveHour
+    case weekly
+    case custom(minutes: Int)
+}
+
+struct MainQuotaWindow: Identifiable, Equatable {
+    let id: String
+    let fallbackKind: MainQuotaWindowKind
+    let remainingPercent: Int?
+    let resetsAt: Int?
+    let windowMinutes: Int?
+
+    var kind: MainQuotaWindowKind {
+        switch windowMinutes {
+        case 300:
+            .fiveHour
+        case 10_080:
+            .weekly
+        case let minutes?:
+            .custom(minutes: minutes)
+        case nil:
+            fallbackKind
+        }
+    }
+
+    var title: String {
+        switch kind {
+        case .fiveHour:
+            "5h Quota"
+        case .weekly:
+            "Weekly Quota"
+        case let .custom(minutes):
+            "\(durationLabel(minutes: minutes)) Quota"
+        }
+    }
+
+    var compactLabel: String {
+        switch kind {
+        case .fiveHour:
+            "5h"
+        case .weekly:
+            "7d"
+        case let .custom(minutes):
+            durationLabel(minutes: minutes)
+        }
+    }
+
+    var accessibilityLabel: String {
+        switch kind {
+        case .fiveHour:
+            "5 小时额度"
+        case .weekly:
+            "周额度"
+        case let .custom(minutes):
+            "\(durationLabel(minutes: minutes)) 额度"
+        }
+    }
+
+    var usesDateResetStyle: Bool {
+        switch kind {
+        case .weekly:
+            true
+        case let .custom(minutes):
+            minutes >= 24 * 60
+        case .fiveHour:
+            false
+        }
+    }
+
+    private func durationLabel(minutes: Int) -> String {
+        if minutes.isMultiple(of: 24 * 60) {
+            return "\(minutes / (24 * 60))d"
+        }
+        if minutes.isMultiple(of: 60) {
+            return "\(minutes / 60)h"
+        }
+        return "\(minutes)m"
+    }
 }
 
 enum QuotaDisplayLevel: Equatable {
@@ -718,6 +868,8 @@ struct RateLimitSnapshot: Codable, Equatable {
     let secondaryPercent: Int?
     let primaryResetsAt: Int?
     let secondaryResetsAt: Int?
+    let primaryWindowMinutes: Int?
+    let secondaryWindowMinutes: Int?
     let capturedAt: Date?
     let isPrimaryCodexLimit: Bool
     let sparkQuotaWindows: [SparkQuotaWindow]
@@ -727,6 +879,8 @@ struct RateLimitSnapshot: Codable, Equatable {
         secondaryPercent: Int?,
         primaryResetsAt: Int?,
         secondaryResetsAt: Int?,
+        primaryWindowMinutes: Int? = nil,
+        secondaryWindowMinutes: Int? = nil,
         capturedAt: Date?,
         isPrimaryCodexLimit: Bool,
         sparkQuotaWindows: [SparkQuotaWindow] = []
@@ -735,6 +889,8 @@ struct RateLimitSnapshot: Codable, Equatable {
         self.secondaryPercent = secondaryPercent
         self.primaryResetsAt = primaryResetsAt
         self.secondaryResetsAt = secondaryResetsAt
+        self.primaryWindowMinutes = primaryWindowMinutes
+        self.secondaryWindowMinutes = secondaryWindowMinutes
         self.capturedAt = capturedAt
         self.isPrimaryCodexLimit = isPrimaryCodexLimit
         self.sparkQuotaWindows = sparkQuotaWindows.sortedForSparkQuotaDisplay
@@ -758,6 +914,8 @@ struct RateLimitSnapshot: Codable, Equatable {
             secondaryPercent: secondaryPercent,
             primaryResetsAt: primaryResetsAt,
             secondaryResetsAt: secondaryResetsAt,
+            primaryWindowMinutes: primaryWindowMinutes,
+            secondaryWindowMinutes: secondaryWindowMinutes,
             capturedAt: capturedAt,
             isPrimaryCodexLimit: isPrimaryCodexLimit,
             sparkQuotaWindows: windows

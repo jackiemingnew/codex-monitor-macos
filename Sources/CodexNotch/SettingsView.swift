@@ -610,7 +610,7 @@ struct SettingsView: View {
                     Text(mode.label).tag(mode)
                 }
             } label: {
-                HelpLabel(title: "显示模式", help: "浮动 HUD 保留当前刘海胶囊；菜单栏模式只显示状态标志和 5 小时剩余百分比，完整指标仍可在详情页查看。切换只在点击保存后生效。")
+                HelpLabel(title: "显示模式", help: "浮动 HUD 保留当前刘海胶囊；菜单栏模式只显示状态标志和当前主要额度的剩余百分比，完整指标仍可在详情页查看。切换只在点击保存后生效。")
             }
             .pickerStyle(.segmented)
 

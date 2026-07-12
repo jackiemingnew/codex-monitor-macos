@@ -211,23 +211,17 @@ struct NotchIslandView: View {
         case .automatic, .codex:
             let todayTokens = snapshot.dailyUsage.usageTodayTokens
             let todayIsPartial = snapshot.dailyUsage.isPartial
-            return [
+            var metrics = snapshot.mainQuotaWindows.map { window in
                 CollapsedMetric(
-                    id: "5h",
-                    label: "5h",
-                    value: Formatters.percent(snapshot.primaryPercent),
-                    color: MonitorTheme.quotaColor(for: snapshot.primaryPercent),
+                    id: "quota-\(window.id)",
+                    label: window.compactLabel,
+                    value: Formatters.percent(window.remainingPercent),
+                    color: MonitorTheme.quotaColor(for: window.remainingPercent),
                     labelWidth: 13,
                     valueWidth: 34
-                ),
-                CollapsedMetric(
-                    id: "7d",
-                    label: "7d",
-                    value: Formatters.percent(snapshot.secondaryPercent),
-                    color: MonitorTheme.quotaColor(for: snapshot.secondaryPercent),
-                    labelWidth: 13,
-                    valueWidth: 34
-                ),
+                )
+            }
+            metrics.append(
                 CollapsedMetric(
                     id: "tok",
                     label: "Today",
@@ -243,7 +237,8 @@ struct NotchIslandView: View {
                         missingBaselineSessions: snapshot.dailyUsage.missingBaselineSessions
                     )
                 )
-            ]
+            )
+            return metrics
         case .remoteCodex:
             let remote = remoteViewModel.snapshot
             return [
@@ -622,28 +617,19 @@ struct DetailPanelView: View {
 
     private var localQuotaStrip: some View {
         HStack(spacing: MonitorTheme.Spacing.wide) {
-            QuotaBarCell(
-                label: "5h Quota",
-                value: Formatters.percent(snapshot.primaryPercent),
-                percent: snapshot.primaryPercent,
-                resetText: quotaResetText(
-                    for: snapshot.primaryResetsAt,
-                    percent: snapshot.primaryPercent,
-                    style: .time
-                ),
-                color: quotaColor(for: snapshot.primaryPercent)
-            )
-            QuotaBarCell(
-                label: "7d Quota",
-                value: Formatters.percent(snapshot.secondaryPercent),
-                percent: snapshot.secondaryPercent,
-                resetText: quotaResetText(
-                    for: snapshot.secondaryResetsAt,
-                    percent: snapshot.secondaryPercent,
-                    style: .date
-                ),
-                color: quotaColor(for: snapshot.secondaryPercent)
-            )
+            ForEach(snapshot.mainQuotaWindows) { window in
+                QuotaBarCell(
+                    label: window.title,
+                    value: Formatters.percent(window.remainingPercent),
+                    percent: window.remainingPercent,
+                    resetText: quotaResetText(
+                        for: window.resetsAt,
+                        percent: window.remainingPercent,
+                        style: window.usesDateResetStyle ? .date : .time
+                    ),
+                    color: quotaColor(for: window.remainingPercent)
+                )
+            }
             CompactStatusCell(
                 label: "Running",
                 value: "\(runningTaskCount)",
