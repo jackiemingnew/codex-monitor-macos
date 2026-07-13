@@ -114,6 +114,7 @@ private struct SettingsDraft: Equatable {
     var showPeriodUsage = true
     var showSparkQuota = false
     var showContextMetrics = false
+    var skillInsightsEnabled = true
     var codexRadarEnabled = true
     var codexRadarUsesAuthorizedAPI = false
     var codexRadarAPIToken = ""
@@ -161,6 +162,7 @@ private struct SettingsDraft: Equatable {
         showPeriodUsage = settings.showPeriodUsage
         showSparkQuota = settings.showSparkQuota
         showContextMetrics = settings.showContextMetrics
+        skillInsightsEnabled = settings.skillInsightsEnabled
         codexRadarEnabled = settings.codexRadarEnabled
         codexRadarUsesAuthorizedAPI = settings.codexRadarUsesAuthorizedAPI
         codexRadarAPIToken = settings.secretsAreLoaded ? settings.codexRadarAPIToken : ""
@@ -461,6 +463,12 @@ struct SettingsView: View {
             }
             Toggle(isOn: $draft.showContextMetrics) {
                 HelpLabel(title: "显示上下文用量", help: "开启后在详情页显示 Ctx，并读取会话尾部 token_count。默认关闭以减少刷新时的文件扫描。")
+            }
+            Toggle(isOn: $draft.skillInsightsEnabled) {
+                HelpLabel(
+                    title: "启用 Skill Insights",
+                    help: "独立的本机只读 Skill 周报。关闭后隐藏 Skills tab，不创建分析服务或周定时器，也不会读取 Skill JSONL；不影响 Token、额度和 Delta 监测。"
+                )
             }
             Picker(selection: $draft.taskHistoryRange) {
                 ForEach(TaskHistoryRange.allCases) { range in
@@ -1707,6 +1715,7 @@ struct SettingsView: View {
         settings.showPeriodUsage = next.showPeriodUsage
         settings.showSparkQuota = next.showSparkQuota
         settings.showContextMetrics = next.showContextMetrics
+        settings.skillInsightsEnabled = next.skillInsightsEnabled
         settings.hudDisplayMode = next.hudDisplayMode
         settings.codexRadarEnabled = next.codexRadarEnabled
         let radarModeChanged = next.codexRadarUsesAuthorizedAPI != settings.codexRadarUsesAuthorizedAPI

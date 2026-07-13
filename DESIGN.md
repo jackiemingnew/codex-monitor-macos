@@ -96,7 +96,18 @@ Do not scale font size with viewport width. Do not use negative letter spacing.
 
 - Treat it as a command-palette panel with tabs.
 - Use subtle section backgrounds and hairline borders.
-- Keep `Codex`, `Codex Radar`, `CLIProxyAPI`, `NewAPI`, and `Sub2API` visually related.
+- Keep `Codex`, `Skills`, `Codex Radar`, `CLIProxyAPI`, `NewAPI`, and `Sub2API` visually related.
+- Keep Skill Insights in the expanded detail panel; never add its weekly metrics
+  to the collapsed capsule or menu-bar item.
+- Present catalog cost, evidence counts, completeness, and recommendations as a
+  compact operational table. Keep heuristic evidence visibly distinct from
+  confirmed use and label per-Skill Token as unavailable.
+- Treat the local Codex `skills/list` result as the catalog authority. A direct
+  frontmatter scan is a `PARTIAL` fallback and must not present inactive plugin
+  cache entries as complete current state.
+- Keep Skill Insights behind its own setting. When disabled, remove the tab and
+  do not instantiate its catalog loader, scanner, database connection, or timer;
+  the realtime Codex monitor remains an independent capability.
 - Do not nest decorative cards inside cards.
 
 ### Quota And Usage

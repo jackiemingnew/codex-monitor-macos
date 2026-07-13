@@ -6,6 +6,7 @@ enum IslandMetrics {
     static let collapsedWidth: CGFloat = 264
     static let collapsedHeight: CGFloat = 38
     static let collapsedPillHorizontalPadding: CGFloat = 10
+    static let menuBarRevealSafetyGap: CGFloat = 4
     static let detailHeaderHeight: CGFloat = 22
     static let detailPageSwitcherHeight: CGFloat = 30
     static let detailTopPadding: CGFloat = 26
@@ -57,6 +58,70 @@ enum IslandMetrics {
         return min(1, max(-1, (clampedCenterX - screenFrame.midX) / travel))
     }
 
+    static func floatingHUDTopEdge(
+        screenFrame: CGRect,
+        visibleFrame: CGRect,
+        detailHeight: CGFloat = minimumDetailHeight,
+        avoidsMenuBarReveal: Bool,
+        normalizedVerticalPosition: CGFloat = 0
+    ) -> CGFloat {
+        let range = floatingHUDTopEdgeRange(
+            screenFrame: screenFrame,
+            visibleFrame: visibleFrame,
+            detailHeight: detailHeight,
+            avoidsMenuBarReveal: avoidsMenuBarReveal
+        )
+        let position = min(1, max(0, normalizedVerticalPosition))
+        return range.upperBound - position * (range.upperBound - range.lowerBound)
+    }
+
+    static func floatingHUDTopEdgeRange(
+        screenFrame: CGRect,
+        visibleFrame: CGRect,
+        detailHeight: CGFloat,
+        avoidsMenuBarReveal: Bool
+    ) -> ClosedRange<CGFloat> {
+        let maximumTopEdge: CGFloat
+        if avoidsMenuBarReveal {
+            let safeTopEdge = min(screenFrame.maxY, visibleFrame.maxY) - menuBarRevealSafetyGap
+            maximumTopEdge = max(screenFrame.minY + collapsedHeight, safeTopEdge)
+        } else {
+            maximumTopEdge = screenFrame.maxY
+        }
+
+        let minimumForCollapsedHUD = screenFrame.minY + collapsedHeight
+        let minimumForExpandedDetail = visibleFrame.minY
+            + collapsedHeight
+            + max(0, detailHeight)
+            - detailOverlap
+        let minimumTopEdge = min(
+            maximumTopEdge,
+            max(minimumForCollapsedHUD, minimumForExpandedDetail)
+        )
+        return minimumTopEdge...maximumTopEdge
+    }
+
+    static func normalizedOverlayVerticalPosition(
+        topEdge: CGFloat,
+        screenFrame: CGRect,
+        visibleFrame: CGRect,
+        detailHeight: CGFloat,
+        avoidsMenuBarReveal: Bool
+    ) -> CGFloat {
+        let range = floatingHUDTopEdgeRange(
+            screenFrame: screenFrame,
+            visibleFrame: visibleFrame,
+            detailHeight: detailHeight,
+            avoidsMenuBarReveal: avoidsMenuBarReveal
+        )
+        let travel = range.upperBound - range.lowerBound
+        guard travel > 0 else {
+            return 0
+        }
+        let clampedTopEdge = min(range.upperBound, max(range.lowerBound, topEdge))
+        return min(1, max(0, (range.upperBound - clampedTopEdge) / travel))
+    }
+
     static func detailHeight(taskRows: Int, showsPeriodUsage: Bool, showsSparkQuota: Bool = false) -> CGFloat {
         let rows = max(1, min(visibleTaskRows, taskRows))
         let sparkHeight: CGFloat = showsSparkQuota ? 8 + detailSparkHeight : 0
@@ -106,22 +171,58 @@ enum IslandMetrics {
     }
 }
 
-struct OverlayDragSession {
-    private var anchorPointerX: CGFloat
-    private var anchorCenterX: CGFloat
+struct MenuBarRevealCompatibility {
+    static let barbeeBundleIdentifier = "com.HyperartFlow.Barbee"
 
-    init(pointerX: CGFloat, centerX: CGFloat) {
-        anchorPointerX = pointerX
-        anchorCenterX = centerX
+    private(set) var avoidsMenuBarReveal: Bool
+
+    init(barbeeIsRunning: Bool) {
+        avoidsMenuBarReveal = barbeeIsRunning
     }
 
-    mutating func update(pointerX: CGFloat, in screenFrame: CGRect) -> CGFloat {
-        let proposedCenterX = anchorCenterX + pointerX - anchorPointerX
+    @discardableResult
+    mutating func handleApplicationLifecycle(bundleIdentifier: String?, didLaunch: Bool) -> Bool {
+        guard bundleIdentifier == Self.barbeeBundleIdentifier,
+              avoidsMenuBarReveal != didLaunch else {
+            return false
+        }
+        avoidsMenuBarReveal = didLaunch
+        return true
+    }
+}
+
+struct OverlayDragPosition: Equatable {
+    var centerX: CGFloat
+    var topEdge: CGFloat
+}
+
+struct OverlayDragSession {
+    private var anchorPointer: CGPoint
+    private var anchorPosition: OverlayDragPosition
+
+    init(pointer: CGPoint, centerX: CGFloat, topEdge: CGFloat) {
+        anchorPointer = pointer
+        anchorPosition = OverlayDragPosition(centerX: centerX, topEdge: topEdge)
+    }
+
+    mutating func update(
+        pointer: CGPoint,
+        screenFrame: CGRect,
+        topEdgeRange: ClosedRange<CGFloat>
+    ) -> OverlayDragPosition {
+        let proposedCenterX = anchorPosition.centerX + pointer.x - anchorPointer.x
         let centerX = IslandMetrics.clampedOverlayCenterX(proposedCenterX, in: screenFrame)
         if centerX != proposedCenterX {
-            anchorPointerX = pointerX
-            anchorCenterX = centerX
+            anchorPointer.x = pointer.x
+            anchorPosition.centerX = centerX
         }
-        return centerX
+
+        let proposedTopEdge = anchorPosition.topEdge + pointer.y - anchorPointer.y
+        let topEdge = min(topEdgeRange.upperBound, max(topEdgeRange.lowerBound, proposedTopEdge))
+        if topEdge != proposedTopEdge {
+            anchorPointer.y = pointer.y
+            anchorPosition.topEdge = topEdge
+        }
+        return OverlayDragPosition(centerX: centerX, topEdge: topEdge)
     }
 }

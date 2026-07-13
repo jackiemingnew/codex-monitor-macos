@@ -3111,29 +3111,7 @@ final class CodexUsageStore: @unchecked Sendable {
     }
 
     private func collectRecentSessionPaths(roots: [URL], limit: Int) -> [String] {
-        var files: [(path: String, modifiedAt: Date)] = []
-        for root in roots {
-            guard let enumerator = FileManager.default.enumerator(
-                at: root,
-                includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
-                options: [.skipsHiddenFiles]
-            ) else {
-                continue
-            }
-
-            for case let url as URL in enumerator where url.pathExtension == "jsonl" {
-                guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey]),
-                      values.isRegularFile == true else {
-                    continue
-                }
-                files.append((url.path, values.contentModificationDate ?? .distantPast))
-            }
-        }
-
-        return files
-            .sorted { $0.modifiedAt > $1.modifiedAt }
-            .prefix(limit)
-            .map(\.path)
+        CodexSessionFileLocator.recentRolloutPaths(roots: roots, limit: limit)
     }
 
     private struct LocalRateLimitSelection {

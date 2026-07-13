@@ -277,9 +277,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 private final class CollapsedHostingView<Content: View>: NSHostingView<Content>, NSGestureRecognizerDelegate {
     var onClick: (() -> Void)?
-    var onDragBegan: ((CGFloat) -> Void)?
-    var onDragChanged: ((CGFloat) -> Void)?
-    var onDragEnded: ((CGFloat) -> Void)?
+    var onDragBegan: ((CGPoint) -> Void)?
+    var onDragChanged: ((CGPoint) -> Void)?
+    var onDragEnded: ((CGPoint) -> Void)?
     var onResetPosition: (() -> Void)?
     var onSettings: (() -> Void)?
     var onRefresh: (() -> Void)?
@@ -375,14 +375,14 @@ private final class CollapsedHostingView<Content: View>: NSHostingView<Content>,
     }
 
     @objc private func handlePanGesture(_ gesture: NSPanGestureRecognizer) {
-        let pointerX = NSEvent.mouseLocation.x
+        let pointer = NSEvent.mouseLocation
         switch gesture.state {
         case .began:
-            onDragBegan?(pointerX)
+            onDragBegan?(pointer)
         case .changed:
-            onDragChanged?(pointerX)
+            onDragChanged?(pointer)
         case .ended, .cancelled:
-            onDragEnded?(pointerX)
+            onDragEnded?(pointer)
         default:
             break
         }
@@ -403,6 +403,7 @@ final class NotchOverlayController {
     private lazy var newAPIViewModel = BalanceMonitorViewModel(source: .newAPI, settings: settings)
     private lazy var subAPIViewModel = BalanceMonitorViewModel(source: .subAPI, settings: settings)
     private lazy var codexRadarViewModel = CodexRadarViewModel(settings: settings)
+    private lazy var skillInsightsCoordinator = SkillInsightsFeatureCoordinator(settings: settings)
     private let overlayState = OverlayState()
     private let window: NSPanel
     private var detailWindow: NSPanel?
@@ -419,8 +420,10 @@ final class NotchOverlayController {
     private var cancellables: Set<AnyCancellable> = []
     private var eventMonitors: [Any] = []
     private var overlayHorizontalPosition: CGFloat = 0
+    private var overlayVerticalPosition: CGFloat = 0
     private var dragSession: OverlayDragSession?
     private var selectedDetailPage: DetailPage = .codex
+    private var menuBarCompatibility = MenuBarRevealCompatibility(barbeeIsRunning: false)
     private var statusItem: NSStatusItem?
     private var statusItemHostingView: NSView?
 
@@ -437,13 +440,17 @@ final class NotchOverlayController {
             defer: false
         )
         overlayHorizontalPosition = settings.overlayHorizontalPosition
+        overlayVerticalPosition = settings.overlayVerticalPosition
+        menuBarCompatibility = MenuBarRevealCompatibility(barbeeIsRunning: Self.isBarbeeRunning)
 
         configureWindow()
         configureContent()
         observeState()
         observeScreenChanges()
+        observeMenuBarCompatibilityChanges()
         installEventMonitors()
         _ = codexRadarViewModel
+        _ = skillInsightsCoordinator
         updateFrames()
     }
 
@@ -484,14 +491,14 @@ final class NotchOverlayController {
                 self.overlayState.isExpanded.toggle()
             }
         }
-        hostingView.onDragBegan = { [weak self] pointerX in
-            self?.beginOverlayDrag(pointerX: pointerX)
+        hostingView.onDragBegan = { [weak self] pointer in
+            self?.beginOverlayDrag(pointer: pointer)
         }
-        hostingView.onDragChanged = { [weak self] pointerX in
-            self?.moveOverlay(pointerX: pointerX, ended: false)
+        hostingView.onDragChanged = { [weak self] pointer in
+            self?.moveOverlay(pointer: pointer, ended: false)
         }
-        hostingView.onDragEnded = { [weak self] pointerX in
-            self?.moveOverlay(pointerX: pointerX, ended: true)
+        hostingView.onDragEnded = { [weak self] pointer in
+            self?.moveOverlay(pointer: pointer, ended: true)
         }
         hostingView.onResetPosition = { [weak self] in
             self?.resetOverlayPosition()
@@ -666,6 +673,7 @@ final class NotchOverlayController {
 
         let detailView = DetailPanelView(
             viewModel: viewModel,
+            skillInsightsCoordinator: skillInsightsCoordinator,
             remoteViewModel: remoteViewModel,
             newAPIViewModel: newAPIViewModel,
             subAPIViewModel: subAPIViewModel,
@@ -779,6 +787,32 @@ final class NotchOverlayController {
 
     }
 
+    private func observeMenuBarCompatibilityChanges() {
+        let workspaceNotifications = NSWorkspace.shared.notificationCenter
+        Publishers.Merge(
+            workspaceNotifications.publisher(for: NSWorkspace.didLaunchApplicationNotification),
+            workspaceNotifications.publisher(for: NSWorkspace.didTerminateApplicationNotification)
+        )
+        .sink { [weak self] notification in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
+                        as? NSRunningApplication else {
+                    return
+                }
+                let didLaunch = notification.name == NSWorkspace.didLaunchApplicationNotification
+                guard self.menuBarCompatibility.handleApplicationLifecycle(
+                    bundleIdentifier: application.bundleIdentifier,
+                    didLaunch: didLaunch
+                ) else {
+                    return
+                }
+                self.updateFrames()
+            }
+        }
+        .store(in: &cancellables)
+    }
+
     private func installEventMonitors() {
         if let globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown], handler: { [weak self] _ in
             Task { @MainActor in
@@ -862,6 +896,9 @@ final class NotchOverlayController {
         switch selectedDetailPage {
         case .codex:
             viewModel.refreshAll(forceRateLimitRefresh: false)
+        case .skillInsights:
+            guard settings.skillInsightsEnabled else { return }
+            skillInsightsCoordinator.refreshWhenPresented()
         case .codexRadar:
             guard settings.codexRadarEnabled else {
                 return
@@ -903,44 +940,74 @@ final class NotchOverlayController {
         }
     }
 
-    private func beginOverlayDrag(pointerX: CGFloat) {
+    private func beginOverlayDrag(pointer: CGPoint) {
         guard let screen = primaryDisplayScreen() ?? NSScreen.screens.first else {
             return
         }
+        let detailHeight = detailWindow == nil && !overlayState.isExpanded ? localDetailHeight : currentDetailHeight
         let centerX = IslandMetrics.overlayCenterX(
             normalizedPosition: overlayHorizontalPosition,
             in: screen.frame
         )
-        dragSession = OverlayDragSession(pointerX: pointerX, centerX: centerX)
+        let topEdge = IslandMetrics.floatingHUDTopEdge(
+            screenFrame: screen.frame,
+            visibleFrame: screen.visibleFrame,
+            detailHeight: detailHeight,
+            avoidsMenuBarReveal: menuBarCompatibility.avoidsMenuBarReveal,
+            normalizedVerticalPosition: overlayVerticalPosition
+        )
+        dragSession = OverlayDragSession(pointer: pointer, centerX: centerX, topEdge: topEdge)
     }
 
-    private func moveOverlay(pointerX: CGFloat, ended: Bool) {
+    private func moveOverlay(pointer: CGPoint, ended: Bool) {
         guard let screen = primaryDisplayScreen() ?? NSScreen.screens.first else {
             return
         }
         if dragSession == nil {
-            beginOverlayDrag(pointerX: pointerX)
+            beginOverlayDrag(pointer: pointer)
         }
         guard var session = dragSession else {
             return
         }
-        let centerX = session.update(pointerX: pointerX, in: screen.frame)
+        let detailHeight = detailWindow == nil && !overlayState.isExpanded ? localDetailHeight : currentDetailHeight
+        let topEdgeRange = IslandMetrics.floatingHUDTopEdgeRange(
+            screenFrame: screen.frame,
+            visibleFrame: screen.visibleFrame,
+            detailHeight: detailHeight,
+            avoidsMenuBarReveal: menuBarCompatibility.avoidsMenuBarReveal
+        )
+        let position = session.update(
+            pointer: pointer,
+            screenFrame: screen.frame,
+            topEdgeRange: topEdgeRange
+        )
         dragSession = session
         overlayHorizontalPosition = IslandMetrics.normalizedOverlayPosition(
-            centerX: centerX,
+            centerX: position.centerX,
             in: screen.frame
+        )
+        overlayVerticalPosition = IslandMetrics.normalizedOverlayVerticalPosition(
+            topEdge: position.topEdge,
+            screenFrame: screen.frame,
+            visibleFrame: screen.visibleFrame,
+            detailHeight: detailHeight,
+            avoidsMenuBarReveal: menuBarCompatibility.avoidsMenuBarReveal
         )
         updateFrames()
         if ended {
             dragSession = nil
-            settings.setOverlayHorizontalPosition(overlayHorizontalPosition)
+            settings.setOverlayPosition(
+                horizontal: overlayHorizontalPosition,
+                vertical: overlayVerticalPosition
+            )
         }
     }
 
     private func resetOverlayPosition() {
         dragSession = nil
         overlayHorizontalPosition = 0
-        settings.resetOverlayHorizontalPosition()
+        overlayVerticalPosition = 0
+        settings.resetOverlayPosition()
         updateFrames()
     }
 
@@ -962,7 +1029,14 @@ final class NotchOverlayController {
         }
         let collapsedX = floatingCenterX - IslandMetrics.collapsedWidth / 2
         let detailX = detailCenterX - IslandMetrics.width / 2
-        let islandY = screen.frame.maxY - IslandMetrics.collapsedHeight
+        let floatingTopEdge = IslandMetrics.floatingHUDTopEdge(
+            screenFrame: screen.frame,
+            visibleFrame: screen.visibleFrame,
+            detailHeight: detailHeight,
+            avoidsMenuBarReveal: menuBarCompatibility.avoidsMenuBarReveal,
+            normalizedVerticalPosition: overlayVerticalPosition
+        )
+        let islandY = floatingTopEdge - IslandMetrics.collapsedHeight
         let detailY = switch settings.hudDisplayMode {
         case .floatingHUD:
             islandY - detailHeight + IslandMetrics.detailOverlap
@@ -1018,6 +1092,12 @@ final class NotchOverlayController {
             }
             return screenNumber.uint32Value == primaryDisplayID
         }
+    }
+
+    private static var isBarbeeRunning: Bool {
+        !NSRunningApplication.runningApplications(
+            withBundleIdentifier: MenuBarRevealCompatibility.barbeeBundleIdentifier
+        ).isEmpty
     }
 
     private func showSettings() {

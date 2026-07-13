@@ -14,6 +14,14 @@ unset CODEX_USAGE_DELTA_DB
 
 bash "$ROOT_DIR/scripts/test-notarize-release-contract.sh"
 
+swiftc \
+  -swift-version 6 \
+  "$ROOT_DIR/Sources/CodexNotch/IslandMetrics.swift" \
+  "$ROOT_DIR/Tests/HUDPlacementRegressionTests/main.swift" \
+  -o "$BUILD_DIR/HUDPlacementRegressionTests"
+
+"$BUILD_DIR/HUDPlacementRegressionTests"
+
 swift build -c release --build-path "${BUILD_DIR}/package-build"
 
 swiftc \
@@ -35,6 +43,16 @@ swiftc \
   "${ROOT_DIR}/Sources/CodexNotch/CodexRadarClient.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/CodexRadarViewModel.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/CodexNotchSettings.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/CodexSessionFileLocator.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/SkillInsightsModels.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/CodexSkillsAppServerClient.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/SkillCatalogLoader.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/SkillProcessMetrics.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/SkillJSONLReader.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/SkillObservationStore.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/SkillSessionAnalyzer.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/SkillInsightsService.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/SkillInsightsViewModel.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/CodexUsageStore.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/BalanceMonitorModels.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/BalanceAPIClient.swift" \
