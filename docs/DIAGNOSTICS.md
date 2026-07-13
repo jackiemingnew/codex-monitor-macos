@@ -85,6 +85,103 @@ The last successful app-server quota is cached at:
 The cache contains only quota percentages, reset times, Spark windows, and the
 capture timestamp. Its file mode is `0600` and its directory mode is `0700`.
 
+## Skill Insights Diagnostics
+
+Skill Insights is a separate low-frequency pipeline. It is not invoked by the
+file watcher, JSONL extend events, or the fast Token snapshot. Its setting is a
+hard feature boundary: while disabled, the app does not instantiate the catalog
+loader, scanner, derived database connection, or timer, and the `Skills` tab is
+absent. The App checks the schedule once at startup, automatically analyzes at
+most once per rolling seven days, and also supports an explicit **Analyze recent
+7 days** action from the `Skills` detail tab. Automatic work runs at background
+priority and manual work at utility priority. Neither path performs model,
+embedding, or telemetry calls.
+Catalog lookup sends only an initialize handshake plus `skills/list` over local
+stdio to the installed Codex executable; it does not send Session content,
+prompts, Skill bodies, or evidence to an external service.
+
+The `skills/list` result is authoritative for membership and enabled state. It
+already applies Codex configuration, plugin activation, scope, and path
+precedence. If the local executable or protocol is unavailable, the app falls
+back to direct frontmatter discovery, emits the diagnostic
+`filesystem fallback may include inactive plugin cache entries`, and marks the
+catalog `PARTIAL`. A fallback count must not be interpreted as exact current
+enablement.
+
+Derived state is stored at:
+
+```text
+~/Library/Application Support/CodexNotch/skill-observations.sqlite
+```
+
+The directory is restricted to `0700` and the database to `0600`. The store has
+a 30-day retention policy and contains only catalog identifiers, current enabled
+state snapshots, evidence categories, timestamps, stable project hashes,
+Session IDs, Session-level Token references, source offsets, checkpoints, and
+run statistics. It does not store complete prompts, assistant responses,
+reasoning, secrets, or complete tool inputs/outputs. It never writes to Codex's
+own state databases or `~/.codex/config.toml`.
+
+Each file checkpoint records canonical path, inode, size, nanosecond mtime,
+processed byte offset, last analysis time, status, oversized-row continuation,
+and a derived cursor containing only stable Skill IDs and non-sensitive Session
+references. An unchanged signature is skipped. Truncation, replacement, or
+inode change removes that file's old derived observations before a complete
+rescan. A fingerprint over Skill ID, name, description, path, and analyzer
+version invalidates derived evidence when matching rules change. Enabled state
+is deliberately excluded: neutral relevance/replacement evidence is classified
+as suspected miss or SHADOW against the current catalog at report time. A
+partial trailing JSONL line is retried from its start after a later append;
+malformed rows and relevant/unknown oversized rows are skipped and reported as
+`PARTIAL` instead of failing the file. Deterministically irrelevant reasoning or
+tool-output rows can be filtered before full decoding, including oversized rows,
+without degrading evidence completeness. The full-decoding cap is 256 KiB per
+JSONL row; lowering this bound limits transient memory without silently treating
+unknown or relevant data as complete. A run reads at most 2 GiB of logical
+JSONL bytes, uses at most 15 seconds of process CPU, or runs for 30 wall-clock
+seconds. It resumes remaining work from complete-line checkpoints. Low Power
+Mode and serious/critical thermal state defer the scheduled run for that week
+without adding retries; manual analysis remains available.
+
+The latest run exposes these performance fields in the UI export:
+
+- `candidateFiles`, `analyzedFiles`, `unchangedFiles`, and `pendingFiles`;
+- `analyzedLines`, `parsedRows`, `filteredRows`, and `malformedLines`;
+- `skippedOversizedRows` and `skippedIrrelevantOversizedRows`;
+- `partialFiles`, `analyzedBytes`, and `boundaryProbeBytes`;
+- `cpuMilliseconds`, process `diskReadBytes` / `diskWriteBytes`, observed peak
+  physical footprint, and `databaseDurationMilliseconds`;
+- `durationMilliseconds`, `lastCompletedAt`, and `wasDeferred`;
+- `analyzerVersion` and the invariant `modelTokens = 0`.
+
+`analyzedBytes` is logical JSONL data delivered by the reader and excludes
+boundary probes. Disk fields are process I/O counter deltas and may be lower
+than logical reads when macOS serves cached pages. `pendingFiles` means clean
+work remains because a run bound was reached; `partialFiles` counts actual
+malformed, oversized-relevant, unavailable, or otherwise incomplete files.
+
+Interpret report status as follows:
+
+- `COMPLETE`: the catalog loaded and every candidate file reached a complete
+  checkpoint in the latest run.
+- `PARTIAL`: authoritative catalog failure, filesystem fallback, configuration,
+  file diagnostics, or pending budget work means some evidence may be missing.
+  Per-Skill heuristic evidence can be partial without changing a fully scanned
+  report's completeness.
+- `UNAVAILABLE`: there is no usable catalog or completed analyzer run.
+
+For a read-only local inspection, use SQLite's immutable/read-only URI mode and
+never edit the derived database:
+
+```bash
+sqlite3 'file:'"$HOME"'/Library/Application Support/CodexNotch/skill-observations.sqlite?mode=ro' \
+  'select completed_at_ms, quality, analyzed_files, unchanged_files, analyzed_lines, partial_files, duration_ms, model_tokens from skill_scan_runs order by id desc limit 5;'
+```
+
+Deleting the derived database is not part of normal diagnosis. If it is absent,
+the app recreates it on the next manual or scheduled analysis; Codex-owned data
+is unaffected.
+
 ## 中文说明
 
 当顶部额度发生跳变时，先运行上面的 `--print-diagnostics` 命令。重点查看
@@ -97,3 +194,16 @@ capture timestamp. Its file mode is `0600` and its directory mode is `0700`.
 多个本地未来周期支持数相同时选择 reset 更早的稳定周期。若
 `app_server_refresh.outcome = staged_rebound`，表示一次大幅回升正在等待第二次
 同代次响应确认，尚未发布到 UI。
+
+Skill Insights 使用独立的低频链路，不进入实时 Token 刷新。设置中关闭后不会
+创建目录加载器、扫描器、数据库连接或定时器，Token / Quota / Delta 继续独立
+运行。启用时启动后检查、滚动每 7 天最多自动分析一次，也可在详情页 `Skills`
+手动增量分析最近 7 天。派生库位于
+`~/Library/Application Support/CodexNotch/skill-observations.sqlite`，只保存
+证据类别、时间、稳定标识、Session Token 参考值、文件检查点和性能统计；不保存
+完整 Prompt、回答、reasoning 或工具输入输出，也不会修改 Codex 配置与数据库。
+目录数量和启用状态以本机 Codex `skills/list` 为准；该请求只走本机 stdio，不发送
+Session 内容。接口不可用时才回退读取 frontmatter，并明确标记 `PARTIAL`，因为回退
+可能包含未激活的插件缓存。完整度只表示目录和文件是否扫描完整；逐条启发式证据
+仍会单独标记质量。单次扫描受 2GiB 逻辑读取、15 秒进程 CPU 和 30 秒墙钟限制；
+`pendingFiles` 表示预算后待续扫，`partialFiles` 只表示真实异常或证据缺失。

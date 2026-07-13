@@ -1,7 +1,7 @@
-# Codex Token Metric Definitions
+# Codex Monitor Metric Definitions
 
-This file is the source of truth for local Codex token metrics. Any change that
-adds, removes, renames, or changes the formula for a usage metric in
+This file is the source of truth for local Codex usage and Skill Insights
+metrics. Any change that adds, removes, renames, or changes a formula in
 `CodexUsageStore`, `SnapshotOutputFormatter`, the Codex UI, or local
 `codex-usage*` surfaces must update this document in the same change.
 
@@ -28,6 +28,24 @@ adds, removes, renames, or changes the formula for a usage metric in
 | `quota.7d` | Main Codex 7 day remaining quota | app-server or local JSONL rate limits | main `limit_id = codex`, remaining percent | main Codex only |
 | `quota.spark.5h` | GPT-5.3-Codex-Spark 5 hour remaining quota | app-server Spark limit, local JSONL fallback | Spark `limit_id = codex_bengalfox` or `limit_name` containing Spark, remaining percent | Spark only |
 | `quota.spark.7d` | GPT-5.3-Codex-Spark 7 day remaining quota | app-server Spark limit, local JSONL fallback | Spark `limit_id = codex_bengalfox` or `limit_name` containing Spark, remaining percent | Spark only |
+| `skill.catalog.enabled_count` | Currently enabled Skill count | local Codex app-server `skills/list`; `PARTIAL` frontmatter fallback | `count(distinct stable_path_id) where enabled = true` | current catalog |
+| `skill.catalog.disabled_count` | Currently disabled Skill count | local Codex app-server `skills/list`; `PARTIAL` frontmatter fallback | `count(distinct stable_path_id) where enabled = false` | current catalog |
+| `skill.catalog.context_token_estimate` | Enabled catalog/context cost | enabled Skill `name` + `description` metadata from `skills/list` | `sum(ceil((name.characters + description.characters) / 4))` | current enabled catalog |
+| `skill.evidence.direct_7d` | Explicit Skill-use evidence | recent rollout JSONL derived observations | count of `DIRECT + confirmed_use` observations | rolling 7 days |
+| `skill.evidence.strong_7d` | Corroborated Skill-use evidence | recent rollout JSONL derived observations | count of turns with relevant task + matching Skill declaration + matching `SKILL.md` read | rolling 7 days |
+| `skill.evidence.inferred_7d` | Unconfirmed possible Skill use | recent rollout JSONL derived observations | count of `INFERRED + inferred_use` observations | rolling 7 days |
+| `skill.evidence.shadow_7d` | Disabled Skill demand signal | recent rollout JSONL + current catalog state | count of relevant tasks matching a disabled Skill | rolling 7 days |
+| `skill.suspected_miss_7d` | Enabled Skill possibly not triggered | recent rollout JSONL derived observations | count of relevant enabled-Skill tasks without DIRECT, STRONG, or INFERRED use evidence | rolling 7 days |
+| `skill.suspected_misfire_7d` | Skill possibly used on an unrelated task | recent rollout JSONL derived observations | count of declared/read Skill evidence not matched to the current task | rolling 7 days |
+| `skill.related_session_tokens_7d` | Related Session Token reference | `state_*.sqlite` / rollout token reference + derived observations | for each Skill, sum the maximum total of each distinct related Session | rolling 7 days; reference only |
+| `skill.per_skill_tokens` | Tokens attributable to one Skill | unavailable | `UNAVAILABLE` | never inferred in P0 |
+| `skill.report.quality` | Skill report data completeness | catalog loader + catalog/analyzer fingerprint + file checkpoints + analyzer runs | `UNAVAILABLE` without a usable catalog/run; `PARTIAL` if the catalog changed or any catalog/file scan is incomplete; otherwise `COMPLETE` | latest run |
+| `skill.scan.logical_bytes` | JSONL bytes delivered by the chunk reader | incremental rollout reads | sum of bytes read after the persisted offset; boundary probes reported separately | latest run |
+| `skill.scan.pending_files` | Clean files with unread suffixes | candidates + complete-line checkpoints | distinct candidate paths stopped by byte, CPU, wall-time, or cancellation bounds | latest run |
+| `skill.scan.partial_files` | Files with actual analysis loss or ambiguity | malformed/oversized rows and file errors | distinct affected paths; excludes budget-only pending work | latest run |
+| `skill.scan.cpu_ms` | Process CPU used during analyzer execution | process CPU clock delta | end minus start; conservative when other app work overlaps | latest run |
+| `skill.scan.disk_read_bytes` | Physical/process read-I/O reference | macOS process resource counters | process counter delta; may be lower than logical reads due to page cache | latest run |
+| `skill.scan.database_ms` | Derived-store time | persistent Skill SQLite connection | elapsed time in per-file observation/checkpoint transactions | latest run |
 
 ## Rules
 
@@ -116,6 +134,62 @@ adds, removes, renames, or changes the formula for a usage metric in
   unavailable. They must never be converted into a precise `100%` remaining
   value.
 
+### Skill Insights Rules
+
+- The default observation window is the rolling interval
+  `[now - 7 days, now]`, inclusive at both boundaries.
+- Catalog entries are keyed by canonical Skill path, not name. Same-name Skills
+  from a plugin and a local directory remain separate rows.
+- The local Codex app-server `skills/list` result is authoritative for catalog
+  membership and enabled state because it applies Codex configuration, plugin,
+  scope, and path-precedence rules. The request uses local stdio and does not
+  include Session content. If that source is unavailable, direct `SKILL.md`
+  frontmatter discovery is retained only as a visibly `PARTIAL` fallback.
+- Catalog metadata is limited to `name`, `description`, path, scope, and enabled
+  state. The context estimate is a fixed approximation of enabled
+  `name + description`, not measured model input and not actual billed Token
+  usage.
+- `DIRECT` means an explicit `$skill-name` reference or exact structured Skill
+  call. `STRONG` requires all three deterministic signals in one task: a
+  relevant user request, a matching Skill declaration, and a read of that
+  Skill's `SKILL.md` path.
+- `INFERRED` does not count as confirmed use. `SHADOW`, suspected miss,
+  suspected misfire, and replacement observations are conservative heuristics
+  and must remain visibly unverified.
+- A plain mention of a Skill name is relevance evidence only. Reading a generic
+  file, or even reading `SKILL.md` without task relevance and another activation
+  signal, must not count as confirmed use.
+- `skill.related_session_tokens_7d` deduplicates by Skill and Session, but the
+  whole Session total is only contextual reference. It must never be labeled or
+  exported as Token consumed by that Skill.
+- `skill.per_skill_tokens` is always `UNAVAILABLE` in P0. No Session total may
+  be divided, apportioned, or otherwise attributed to individual Skills.
+- `skill.report.quality` describes data completeness only. Evidence certainty is
+  reported separately per Skill. Heuristic evidence does not by itself make a
+  fully scanned report `PARTIAL`.
+- `COMPLETE` means the catalog loaded without diagnostics, all candidate files
+  reached complete checkpoints, the current catalog/analyzer fingerprint
+  matches the derived observations, and the latest analyzer run completed.
+  `PARTIAL` means evidence may be missing because the authoritative catalog was
+  unavailable, a filesystem fallback was used, configuration or path errors
+  occurred, rows were malformed or relevant/unknown oversized, a run-bound
+  continuation was required, file replacement was ambiguous, a catalog change is pending
+  reanalysis, or another scan problem was reported. `UNAVAILABLE` means no
+  usable catalog or completed analyzer run exists.
+- One week with zero evidence means only `暂无证据`; it is not evidence that a
+  Skill has no value. Safety, migration, recovery, and release Skills must not
+  be downgraded solely because they are rarely used.
+- Skill analysis runs outside the fast Token snapshot and file-watcher paths.
+  While its independent setting is off, no Skill loader, scanner, database
+  connection, or timer is created. While enabled, automatic analysis runs at
+  most once per rolling seven days; manual analysis resumes persisted offsets.
+  Enabled-state changes reclassify neutral relevance/replacement evidence and
+  do not invalidate file checkpoints. It performs no model or embedding calls;
+  catalog lookup is a local Codex app-server stdio request.
+- JSONL rows are fully decoded only up to 256 KiB. Deterministically irrelevant
+  oversized rows are counted as filtered; relevant or unknown oversized rows
+  increment the oversized/partial metrics and therefore prevent `COMPLETE`.
+
 ## Output Contract
 
 - Compact Swift JSON exposes cumulative totals as `cumulative_usage`.
@@ -132,3 +206,6 @@ adds, removes, renames, or changes the formula for a usage metric in
 - Human snapshot output prints `recent20d active=... archived=... all=...`.
 - Dashboard and CLI cards that say `Total Tokens` must use
   `cumulative.active_tokens` when the Swift snapshot provides it.
+- Skill Insights is not added to the existing snapshot or Node-compatible JSON
+  contract. Its detail page exports a separate Markdown weekly report or a
+  schema-versioned JSON `SkillInsightsSnapshot`.

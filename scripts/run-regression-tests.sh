@@ -35,6 +35,16 @@ swiftc \
   "${ROOT_DIR}/Sources/CodexNotch/CodexRadarClient.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/CodexRadarViewModel.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/CodexNotchSettings.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/CodexSessionFileLocator.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/SkillInsightsModels.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/CodexSkillsAppServerClient.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/SkillCatalogLoader.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/SkillProcessMetrics.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/SkillJSONLReader.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/SkillObservationStore.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/SkillSessionAnalyzer.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/SkillInsightsService.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/SkillInsightsViewModel.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/CodexUsageStore.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/BalanceMonitorModels.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/BalanceAPIClient.swift" \

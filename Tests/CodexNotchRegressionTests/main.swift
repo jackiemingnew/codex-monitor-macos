@@ -36,6 +36,10 @@ private struct CountRecord: Decodable {
     let count: Int
 }
 
+private struct StringValueRecord: Decodable {
+    let value: String
+}
+
 private final class AsyncResultBox<Value>: @unchecked Sendable {
     private let lock = NSLock()
     private var value: Result<Value, Error>?
@@ -149,7 +153,19 @@ for metricID in [
     "delta.24h",
     "task.total_tokens",
     "quota.5h",
-    "quota.7d"
+    "quota.7d",
+    "skill.catalog.enabled_count",
+    "skill.catalog.disabled_count",
+    "skill.catalog.context_token_estimate",
+    "skill.evidence.direct_7d",
+    "skill.evidence.strong_7d",
+    "skill.evidence.inferred_7d",
+    "skill.evidence.shadow_7d",
+    "skill.suspected_miss_7d",
+    "skill.suspected_misfire_7d",
+    "skill.related_session_tokens_7d",
+    "skill.per_skill_tokens",
+    "skill.report.quality"
 ] {
     runner.check(metricDefinitions.contains(metricID), "metric definitions should document \(metricID)")
 }
@@ -1478,6 +1494,27 @@ lazyStartupSettings.showSparkQuota = true
 lazyStartupSettings.resetRefreshDefaults()
 runner.check(lazyStartupKeychainStore.loadCount == 0, "local settings changes should not read Keychain")
 runner.check(lazyStartupKeychainStore.saveCount == 0, "local settings changes should not write secret storage")
+lazyStartupSettings.skillInsightsEnabled = false
+var disabledSkillFeatureFactoryCalls = 0
+let disabledSkillFeature = SkillInsightsFeatureCoordinator(settings: lazyStartupSettings) {
+    disabledSkillFeatureFactoryCalls += 1
+    return SkillInsightsViewModel(
+        service: SkillInsightsService(
+            codexDirectory: FileManager.default.temporaryDirectory
+                .appendingPathComponent("DisabledSkillFeature-\(UUID().uuidString)"),
+            skillRoots: [],
+            databaseURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("disabled-skill-feature-\(UUID().uuidString).sqlite"),
+            automaticDeferralReason: { "test policy" }
+        )
+    )
+}
+runner.check(!disabledSkillFeature.isEnabled, "disabled Skill Insights should remain uninitialized")
+runner.checkEqual(
+    disabledSkillFeatureFactoryCalls,
+    0,
+    "disabled Skill Insights must not construct the catalog, scanner, database, or timer service"
+)
 runner.check(lazyStartupSettings.loadSecretsIfNeeded(), "explicit secret load should succeed")
 runner.check(lazyStartupKeychainStore.loadCount == 1, "explicit secret load should read Keychain once")
 runner.check(lazyStartupSettings.cliproxyManagementKey == "lazy-clip-secret", "explicit secret load should populate CLIProxyAPI key")
@@ -6120,9 +6157,1122 @@ runner.check(
     "filtered archived subagent files should remain cached across unchanged full refreshes"
 )
 
+let skillInsightsRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("CodexNotchSkillInsights-\(UUID().uuidString)")
+let skillCodexHome = skillInsightsRoot.appendingPathComponent("codex-home", isDirectory: true)
+let skillRoot = skillInsightsRoot.appendingPathComponent("skills", isDirectory: true)
+let skillDatabaseURL = skillInsightsRoot.appendingPathComponent("skill-observations.sqlite")
+let skillConfigURL = skillCodexHome.appendingPathComponent("config.toml")
+let skillSessionsDirectory = skillCodexHome.appendingPathComponent("sessions/2026/07/13", isDirectory: true)
+try FileManager.default.createDirectory(at: skillSessionsDirectory, withIntermediateDirectories: true)
+try FileManager.default.createDirectory(at: skillRoot, withIntermediateDirectories: true)
+defer {
+    try? FileManager.default.removeItem(at: skillInsightsRoot)
+}
+
+let writeSyntheticSkill: (String, String, String) throws -> URL = { directoryName, name, description in
+    let directory = skillRoot.appendingPathComponent(directoryName, isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let url = directory.appendingPathComponent("SKILL.md")
+    try """
+    ---
+    name: \(name)
+    description: \(description)
+    ---
+
+    THIS BODY MUST NOT BE NEEDED BY THE CATALOG LOADER.
+    """.write(to: url, atomically: true, encoding: .utf8)
+    return url
+}
+
+let testSkillURL = try writeSyntheticSkill(
+    "test-skill",
+    "test-skill",
+    "Analyze release workflows and deployment risks."
+)
+_ = try writeSyntheticSkill(
+    "shadow-skill",
+    "shadow-skill",
+    "Review database migration rollback safety."
+)
+_ = try writeSyntheticSkill(
+    "legacy-dashboard",
+    "legacy-dashboard",
+    "Build operational dashboard reports."
+)
+let duplicateOneURL = try writeSyntheticSkill(
+    "duplicate-one",
+    "duplicate-skill",
+    "Inspect unique duplicate alpha evidence."
+)
+let duplicateTwoURL = try writeSyntheticSkill(
+    "duplicate-two",
+    "duplicate-skill",
+    "Inspect unique duplicate beta evidence."
+)
+_ = try writeSyntheticSkill(
+    "boundary-skill",
+    "boundary-skill",
+    "Check weekly boundary evidence timing."
+)
+try """
+[[skills.config]]
+name = "shadow-skill"
+enabled = false
+
+[[skills.config]]
+name = "legacy-dashboard"
+enabled = false
+""".write(to: skillConfigURL, atomically: true, encoding: .utf8)
+
+let skillStatePath = skillCodexHome.appendingPathComponent("state_5.sqlite").path
+let skillLogsPath = skillCodexHome.appendingPathComponent("logs_2.sqlite").path
+let skillSessionID = "019f5d70-0000-7000-8000-000000000001"
+let skillBoundarySessionID = "019f5d70-0000-7000-8000-000000000002"
+let skillRolloutURL = skillSessionsDirectory
+    .appendingPathComponent("rollout-2026-07-13T12-00-00-\(skillSessionID).jsonl")
+let skillBoundaryURL = skillSessionsDirectory
+    .appendingPathComponent("rollout-2026-07-13T12-00-01-\(skillBoundarySessionID).jsonl")
+let skillNow = Calendar.current.startOfDay(for: now).addingTimeInterval(12 * 60 * 60)
+let skillFixtureStart = skillNow.addingTimeInterval(-10)
+let skillWindowStart = skillNow.addingTimeInterval(-7 * 24 * 60 * 60)
+
+_ = try Shell.run("/usr/bin/sqlite3", [
+    skillStatePath,
+    """
+    create table threads(
+      id text,
+      title text,
+      tokens_used integer,
+      model text,
+      reasoning_effort text,
+      rollout_path text,
+      created_at integer,
+      updated_at integer,
+      archived integer default 0
+    );
+    insert into threads(id, title, tokens_used, rollout_path, created_at, updated_at, archived)
+    values(
+      '\(skillSessionID)',
+      'Skill fixture',
+      82000,
+      '\(skillRolloutURL.path)',
+      \(Int(skillNow.timeIntervalSince1970)),
+      \(Int(skillNow.timeIntervalSince1970)),
+      0
+    );
+    """
+])
+_ = try Shell.run("/usr/bin/sqlite3", [
+    skillLogsPath,
+    "create table logs(thread_id text, ts integer, target text, feedback_log_body text);"
+])
+
+let skillTimestamp: (Date) -> String = { date in
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter.string(from: date)
+}
+let skillJSONLine: ([String: Any]) -> String = { object in
+    let data = try! JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    return String(decoding: data, as: UTF8.self) + "\n"
+}
+let skillSessionMetaLine: (Date, String) -> String = { date, sessionID in
+    skillJSONLine([
+        "timestamp": skillTimestamp(date),
+        "type": "session_meta",
+        "payload": [
+            "id": sessionID,
+            "cwd": "/private/project-sensitive-path"
+        ]
+    ])
+}
+let skillMessageLine: (Date, String, String, String?) -> String = { date, role, text, phase in
+    var payload: [String: Any] = [
+        "type": "message",
+        "role": role,
+        "content": [["type": role == "user" ? "input_text" : "output_text", "text": text]]
+    ]
+    if let phase {
+        payload["phase"] = phase
+    }
+    return skillJSONLine([
+        "timestamp": skillTimestamp(date),
+        "type": "response_item",
+        "payload": payload
+    ])
+}
+let skillReadLine: (Date, URL, String) -> String = { date, skillURL, extra in
+    skillJSONLine([
+        "timestamp": skillTimestamp(date),
+        "type": "response_item",
+        "payload": [
+            "type": "custom_tool_call",
+            "name": "exec",
+            "input": "sed -n '1,120p' '\(skillURL.path)' \(extra)"
+        ]
+    ])
+}
+let skillTokenLine: (Date, Int) -> String = { date, tokens in
+    skillJSONLine([
+        "timestamp": skillTimestamp(date),
+        "type": "event_msg",
+        "payload": [
+            "type": "token_count",
+            "info": ["last_token_usage": ["total_tokens": tokens]]
+        ]
+    ])
+}
+
+var skillRollout = skillSessionMetaLine(skillFixtureStart, skillSessionID)
+skillRollout += skillMessageLine(skillFixtureStart, "user", "$test-skill review release workflow", nil)
+skillRollout += skillMessageLine(skillFixtureStart, "assistant", "Using test-skill skill.", "commentary")
+skillRollout += skillReadLine(skillFixtureStart, testSkillURL, "")
+skillRollout += skillTokenLine(skillFixtureStart, 82000)
+skillRollout += skillMessageLine(skillFixtureStart, "assistant", "Completed.", "final")
+
+skillRollout += skillMessageLine(skillFixtureStart.addingTimeInterval(1), "user", "Analyze release workflows and deployment risks.", nil)
+skillRollout += skillMessageLine(skillFixtureStart.addingTimeInterval(1), "assistant", "Using test-skill skill.", "commentary")
+skillRollout += skillReadLine(skillFixtureStart.addingTimeInterval(1), testSkillURL, "")
+skillRollout += skillMessageLine(skillFixtureStart.addingTimeInterval(1), "assistant", "Completed.", "final")
+
+skillRollout += skillMessageLine(skillFixtureStart.addingTimeInterval(2), "user", "What is test-skill?", nil)
+skillRollout += skillMessageLine(skillFixtureStart.addingTimeInterval(2), "assistant", "Information provided.", "final")
+
+skillRollout += skillMessageLine(
+    skillFixtureStart.addingTimeInterval(3),
+    "user",
+    "SECRET-PROMPT-DO-NOT-STORE review database migration rollback safety",
+    nil
+)
+skillRollout += skillMessageLine(skillFixtureStart.addingTimeInterval(3), "assistant", "Completed.", "final")
+
+skillRollout += skillMessageLine(skillFixtureStart.addingTimeInterval(4), "user", "Build operational dashboard reports.", nil)
+skillRollout += skillMessageLine(
+    skillFixtureStart.addingTimeInterval(4),
+    "assistant",
+    "Handled by existing capability instead of legacy-dashboard skill.",
+    "final"
+)
+
+skillRollout += skillMessageLine(skillFixtureStart.addingTimeInterval(5), "user", "Analyze release workflows and deployment risks.", nil)
+skillRollout += skillMessageLine(skillFixtureStart.addingTimeInterval(5), "assistant", "Using test-skill skill.", "final")
+
+skillRollout += skillMessageLine(skillFixtureStart.addingTimeInterval(6), "user", "Summarize gardening notes.", nil)
+skillRollout += skillMessageLine(skillFixtureStart.addingTimeInterval(6), "assistant", "Using test-skill skill.", "commentary")
+skillRollout += skillReadLine(skillFixtureStart.addingTimeInterval(6), testSkillURL, "SECRET-TOOL-INPUT")
+skillRollout += skillMessageLine(skillFixtureStart.addingTimeInterval(6), "assistant", "Completed.", "final")
+
+skillRollout += skillMessageLine(skillFixtureStart.addingTimeInterval(7), "user", "$duplicate-skill inspect duplicate evidence", nil)
+skillRollout += skillMessageLine(skillFixtureStart.addingTimeInterval(7), "assistant", "Completed.", "final")
+skillRollout += "{malformed-jsonl-row\n"
+skillRollout += "{\"oversized\":\"\(String(repeating: "x", count: 9_000))\"}\n"
+try skillRollout.write(to: skillRolloutURL, atomically: true, encoding: .utf8)
+try FileManager.default.setAttributes([.modificationDate: skillNow], ofItemAtPath: skillRolloutURL.path)
+
+var boundaryRollout = skillSessionMetaLine(skillNow, skillBoundarySessionID)
+boundaryRollout += skillMessageLine(
+    skillWindowStart.addingTimeInterval(-1),
+    "user",
+    "$boundary-skill check weekly boundary evidence timing",
+    nil
+)
+boundaryRollout += skillMessageLine(skillWindowStart.addingTimeInterval(-1), "assistant", "Completed.", "final")
+boundaryRollout += skillMessageLine(
+    skillWindowStart,
+    "user",
+    "$boundary-skill check weekly boundary evidence timing",
+    nil
+)
+boundaryRollout += skillMessageLine(skillWindowStart, "assistant", "Completed.", "final")
+try boundaryRollout.write(to: skillBoundaryURL, atomically: true, encoding: .utf8)
+try FileManager.default.setAttributes([.modificationDate: skillNow], ofItemAtPath: skillBoundaryURL.path)
+
+let authoritativeCatalogFixture = SkillCatalogSnapshot(
+    skills: [
+        SkillCatalogEntry(
+            id: SkillCatalogLoader.stableID(for: testSkillURL.path),
+            name: "test-skill",
+            description: "Analyze release workflows and deployment risks.",
+            path: testSkillURL.path,
+            enabled: true,
+            catalogCharacterCount: 55,
+            catalogTokenEstimate: 14,
+            protectsHighRiskWorkflow: true
+        ),
+        SkillCatalogEntry(
+            id: SkillCatalogLoader.stableID(for: skillRoot.appendingPathComponent("shadow-skill/SKILL.md").path),
+            name: "shadow-skill",
+            description: "Review database migration rollback safety.",
+            path: skillRoot.appendingPathComponent("shadow-skill/SKILL.md").path,
+            enabled: false,
+            catalogCharacterCount: 53,
+            catalogTokenEstimate: 14,
+            protectsHighRiskWorkflow: true
+        )
+    ],
+    quality: .complete,
+    diagnostics: [],
+    loadedAt: skillNow
+)
+let authoritativeCatalogResult = SkillCatalogLoader(
+    codexDirectory: skillCodexHome,
+    configURL: skillConfigURL,
+    skillRoots: [skillRoot],
+    authoritativeCatalogLoader: { _, _ in authoritativeCatalogFixture }
+).load(now: skillNow)
+runner.checkEqual(
+    authoritativeCatalogResult.skills.count,
+    2,
+    "the authoritative Codex catalog should exclude cached Skills that are not active"
+)
+runner.checkEqual(
+    authoritativeCatalogResult.enabledCount,
+    1,
+    "enabled Skill count should come from the authoritative Codex catalog"
+)
+runner.checkEqual(
+    authoritativeCatalogResult.disabledCount,
+    1,
+    "disabled Skill count should come from the authoritative Codex catalog"
+)
+
+let appServerCatalogPayload = try JSONSerialization.data(withJSONObject: [
+    "jsonrpc": "2.0",
+    "id": 2,
+    "result": [
+        "data": [[
+            "cwd": skillCodexHome.path,
+            "errors": [],
+            "skills": [
+                [
+                    "name": "test-skill",
+                    "description": "Analyze release workflows and deployment risks.",
+                    "path": testSkillURL.path,
+                    "enabled": true,
+                    "scope": "user"
+                ],
+                [
+                    "name": "shadow-skill",
+                    "description": "Review database migration rollback safety.",
+                    "path": skillRoot.appendingPathComponent("shadow-skill/SKILL.md").path,
+                    "enabled": false,
+                    "scope": "user"
+                ]
+            ]
+        ]]
+    ]
+], options: [.sortedKeys])
+let parsedAppServerCatalog = try CodexSkillsAppServerClient.parseSkillsListResponse(
+    appServerCatalogPayload,
+    loadedAt: skillNow
+)
+runner.checkEqual(parsedAppServerCatalog.enabledCount, 1, "skills/list enabled state should be parsed without rescanning cache roots")
+runner.checkEqual(parsedAppServerCatalog.disabledCount, 1, "skills/list disabled state should be parsed without rescanning config.toml")
+runner.checkEqual(parsedAppServerCatalog.quality, .complete, "a clean skills/list response should produce COMPLETE catalog quality")
+
+let fakeCodexExecutable = skillInsightsRoot.appendingPathComponent("fake-codex")
+let fakeCatalogResponse = String(decoding: appServerCatalogPayload, as: UTF8.self)
+try """
+#!/bin/sh
+IFS= read -r initialize
+IFS= read -r initialized
+IFS= read -r list_skills
+printf '%s\\n' '\(fakeCatalogResponse)'
+while IFS= read -r remainder; do :; done
+""".write(to: fakeCodexExecutable, atomically: true, encoding: .utf8)
+try FileManager.default.setAttributes(
+    [.posixPermissions: 0o700],
+    ofItemAtPath: fakeCodexExecutable.path
+)
+let catalogClientStartedAt = Date()
+let processBackedCatalog = try CodexSkillsAppServerClient(
+    codexDirectory: skillCodexHome,
+    workingDirectory: skillInsightsRoot,
+    executablePath: fakeCodexExecutable.path,
+    timeout: 2
+).load(now: skillNow, forceReload: true)
+let catalogClientDurationMilliseconds = Int(Date().timeIntervalSince(catalogClientStartedAt) * 1_000)
+runner.checkEqual(processBackedCatalog.enabledCount, 1, "the bounded local app-server process client should return enabled Skills")
+runner.checkEqual(processBackedCatalog.disabledCount, 1, "the bounded local app-server process client should return disabled Skills")
+runner.check(
+    catalogClientDurationMilliseconds < 2_000,
+    "the local skills/list process client should finish inside its two-second test budget"
+)
+
+let fallbackCatalogResult = SkillCatalogLoader(
+    codexDirectory: skillCodexHome,
+    configURL: skillConfigURL,
+    skillRoots: [skillRoot],
+    authoritativeCatalogLoader: { _, _ in throw AppServerLoaderTestError.unavailable }
+).load(now: skillNow)
+runner.checkEqual(fallbackCatalogResult.quality, .partial, "filesystem fallback after skills/list failure must be visibly PARTIAL")
+runner.check(
+    fallbackCatalogResult.diagnostics.contains { $0.contains("inactive plugin cache") },
+    "filesystem fallback should diagnose possible inactive plugin cache overcounting"
+)
+
+let unavailableCheckpointAnalyzer = SkillSessionAnalyzer(
+    codexDirectory: skillCodexHome,
+    observationStore: SkillObservationStore(databaseURL: skillInsightsRoot),
+    maxRowBytes: 8 * 1024,
+    maxBytesPerFilePerRun: 4 * 1024 * 1024
+)
+let unavailableCheckpointOutcome = unavailableCheckpointAnalyzer.analyze(
+    catalog: authoritativeCatalogResult,
+    now: skillNow
+)
+runner.checkEqual(
+    unavailableCheckpointOutcome.performance.analyzedBytes,
+    0,
+    "an unavailable checkpoint store must not trigger an uncheckpointed full JSONL rescan"
+)
+runner.checkEqual(
+    unavailableCheckpointOutcome.quality,
+    .partial,
+    "checkpoint-store failure should propagate PARTIAL instead of silently appearing complete"
+)
+
+let skillService = SkillInsightsService(
+    codexDirectory: skillCodexHome,
+    configURL: skillConfigURL,
+    skillRoots: [skillRoot],
+    databaseURL: skillDatabaseURL,
+    maxRowBytes: 8 * 1024,
+    maxBytesPerFilePerRun: 4 * 1024 * 1024
+)
+let firstSkillSnapshot = skillService.analyzeRecentWeek(force: false, automatic: false, now: skillNow)
+let firstDisabledSkillIndex = firstSkillSnapshot.rows.firstIndex { !$0.skill.enabled }
+    ?? firstSkillSnapshot.rows.endIndex
+runner.check(
+    firstSkillSnapshot.rows[..<firstDisabledSkillIndex].allSatisfy { $0.skill.enabled }
+        && firstSkillSnapshot.rows[firstDisabledSkillIndex...].allSatisfy { !$0.skill.enabled },
+    "Skill Insights should group every enabled Skill ahead of disabled Skills"
+)
+let testSkillRow = runner.require(
+    firstSkillSnapshot.rows.first { $0.skill.name == "test-skill" },
+    "Skill Insights should include the enabled test Skill"
+)
+runner.checkEqual(testSkillRow.directCount, 1, "explicit $skill-name should produce one DIRECT observation")
+runner.checkEqual(testSkillRow.strongCount, 1, "declaration + SKILL.md read + relevant task should produce STRONG")
+runner.check(testSkillRow.inferredCount >= 2, "declaration without all STRONG evidence should remain INFERRED")
+runner.check(testSkillRow.suspectedMissCount >= 1, "mentioning an enabled Skill without use should not count as confirmed use")
+runner.check(testSkillRow.suspectedMisfireCount >= 1, "irrelevant Skill declaration/read should be a suspected misfire")
+runner.checkEqual(testSkillRow.relatedSessionTokens, 82_000, "related Session Token should remain a non-attributed reference total")
+
+let shadowSkillRow = runner.require(
+    firstSkillSnapshot.rows.first { $0.skill.name == "shadow-skill" },
+    "Skill Insights should include disabled Skills"
+)
+runner.checkEqual(shadowSkillRow.shadowCount, 1, "disabled relevant Skill should produce SHADOW evidence")
+runner.checkEqual(shadowSkillRow.recommendation, .retest, "one high-risk SHADOW should recommend sampling and retest")
+runner.checkEqual(shadowSkillRow.relatedSessionCount, 1, "SHADOW evidence should retain a whole-Session reference without Token attribution")
+
+let replacementRow = runner.require(
+    firstSkillSnapshot.rows.first { $0.skill.name == "legacy-dashboard" },
+    "Skill Insights should include replacement candidates"
+)
+runner.checkEqual(replacementRow.shadowCount, 1, "disabled replacement candidate should retain its SHADOW observation")
+runner.checkEqual(replacementRow.replacedByExistingCount, 1, "explicit replacement wording should remain a separate heuristic")
+
+let duplicateRows = firstSkillSnapshot.rows.filter { $0.skill.name == "duplicate-skill" }
+runner.checkEqual(duplicateRows.count, 2, "same-name Skills should stay distinct by canonical path")
+runner.check(duplicateRows.allSatisfy { $0.directCount == 1 }, "ambiguous explicit duplicate name should preserve evidence for both paths")
+runner.check(duplicateRows.allSatisfy { $0.evidenceQuality == .partial }, "ambiguous same-name evidence should be visibly PARTIAL")
+
+let boundaryRow = runner.require(
+    firstSkillSnapshot.rows.first { $0.skill.name == "boundary-skill" },
+    "Skill Insights should include the one-week boundary fixture"
+)
+runner.checkEqual(boundaryRow.directCount, 1, "exact seven-day boundary should be included and older evidence excluded")
+runner.checkEqual(firstSkillSnapshot.quality, .partial, "corrupt or oversized JSONL rows should propagate PARTIAL")
+runner.check(firstSkillSnapshot.performance.malformedLines >= 1, "malformed JSONL row should be counted and skipped")
+runner.check(firstSkillSnapshot.performance.skippedOversizedRows >= 1, "oversized JSONL row should be counted and skipped")
+runner.checkEqual(firstSkillSnapshot.performance.modelTokens, 0, "Skill analyzer must not consume model Tokens")
+
+let observationDump = try Shell.run("/usr/bin/sqlite3", [skillDatabaseURL.path, ".dump"])
+runner.check(!observationDump.contains("SECRET-PROMPT-DO-NOT-STORE"), "derived SQLite must not store complete Prompt text")
+runner.check(!observationDump.contains("SECRET-TOOL-INPUT"), "derived SQLite must not store complete tool input")
+runner.check(!observationDump.contains("Using test-skill skill"), "derived SQLite must not store assistant message text")
+
+let firstMarkdown = String(decoding: try skillService.export(firstSkillSnapshot, format: .markdown), as: UTF8.self)
+runner.check(firstMarkdown.contains("## 9. UNVERIFIED"), "Markdown report should include all UNVERIFIED items")
+runner.check(firstMarkdown.contains("Per-Skill Token: UNAVAILABLE"), "Markdown report should forbid precise per-Skill Token attribution")
+let firstJSON = try skillService.export(firstSkillSnapshot, format: .json)
+runner.check((try? JSONSerialization.jsonObject(with: firstJSON)) != nil, "JSON Skill report should be machine readable")
+let observationsAfterColdScan = try Shell.sqliteJSON(
+    database: skillDatabaseURL.path,
+    query: "select count(*) as count from skill_observations;",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count
+
+let aliasedRolloutURL = skillSessionsDirectory
+    .appendingPathComponent("rollout-alias-\(skillSessionID).jsonl")
+try FileManager.default.createSymbolicLink(
+    at: aliasedRolloutURL,
+    withDestinationURL: skillRolloutURL
+)
+let unchangedSkillSnapshot = skillService.analyzeRecentWeek(
+    force: false,
+    automatic: false,
+    now: skillNow.addingTimeInterval(1)
+)
+runner.checkEqual(
+    unchangedSkillSnapshot.performance.candidateFiles,
+    2,
+    "canonical rollout paths should deduplicate real paths and symbolic-link aliases"
+)
+runner.checkEqual(unchangedSkillSnapshot.performance.analyzedFiles, 0, "unchanged rollout files should not be reparsed")
+runner.checkEqual(unchangedSkillSnapshot.performance.unchangedFiles, 2, "unchanged rollout checkpoints should be reported")
+runner.checkEqual(unchangedSkillSnapshot.performance.analyzedBytes, 0, "a warm unchanged scan should read zero logical JSONL bytes")
+runner.check(
+    unchangedSkillSnapshot.performance.durationMilliseconds <= 500,
+    "a warm unchanged Skill snapshot should complete within 500 ms"
+)
+let observationsAfterWarmScan = try Shell.sqliteJSON(
+    database: skillDatabaseURL.path,
+    query: "select count(*) as count from skill_observations;",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count
+runner.checkEqual(
+    observationsAfterWarmScan,
+    observationsAfterColdScan,
+    "a warm unchanged scan should write zero new observations"
+)
+runner.checkEqual(
+    unchangedSkillSnapshot.rows.first { $0.skill.name == "test-skill" }?.directCount,
+    testSkillRow.directCount,
+    "repeat analysis should be idempotent"
+)
+
+try """
+[[skills.config]]
+name = "shadow-skill"
+enabled = true
+
+[[skills.config]]
+name = "legacy-dashboard"
+enabled = false
+""".write(to: skillConfigURL, atomically: true, encoding: .utf8)
+let enabledStateOnlySnapshot = skillService.analyzeRecentWeek(
+    force: false,
+    automatic: false,
+    now: skillNow.addingTimeInterval(2)
+)
+runner.checkEqual(
+    enabledStateOnlySnapshot.performance.analyzedFiles,
+    0,
+    "enabled-state changes should reclassify neutral evidence without rereading JSONL"
+)
+let enabledShadowRow = runner.require(
+    enabledStateOnlySnapshot.rows.first { $0.skill.name == "shadow-skill" },
+    "enabled-state reclassification should preserve the Skill row"
+)
+runner.checkEqual(enabledShadowRow.shadowCount, 0, "an enabled Skill should not retain SHADOW classification")
+runner.check(
+    enabledShadowRow.suspectedMissCount >= 1,
+    "neutral relevance evidence should become a suspected miss when the Skill is enabled"
+)
+try """
+[[skills.config]]
+name = "shadow-skill"
+enabled = false
+
+[[skills.config]]
+name = "legacy-dashboard"
+enabled = false
+""".write(to: skillConfigURL, atomically: true, encoding: .utf8)
+let restoredEnabledStateSnapshot = skillService.analyzeRecentWeek(
+    force: false,
+    automatic: false,
+    now: skillNow.addingTimeInterval(3)
+)
+runner.checkEqual(
+    restoredEnabledStateSnapshot.performance.analyzedFiles,
+    0,
+    "restoring enabled state should also avoid JSONL rereads"
+)
+
+let appendedStrongTurn = skillMessageLine(
+    skillNow.addingTimeInterval(8),
+    "user",
+    "Analyze release workflows and deployment risks.",
+    nil
+) + skillMessageLine(
+    skillNow.addingTimeInterval(8),
+    "assistant",
+    "Using test-skill skill.",
+    "commentary"
+) + skillReadLine(
+    skillNow.addingTimeInterval(8),
+    testSkillURL,
+    ""
+) + skillMessageLine(skillNow.addingTimeInterval(8), "assistant", "Completed.", "final")
+let appendHandle = try FileHandle(forWritingTo: skillRolloutURL)
+try appendHandle.seekToEnd()
+try appendHandle.write(contentsOf: Data(appendedStrongTurn.utf8))
+try appendHandle.close()
+let appendedSkillSnapshot = skillService.analyzeRecentWeek(
+    force: false,
+    automatic: false,
+    now: skillNow.addingTimeInterval(8)
+)
+runner.checkEqual(appendedSkillSnapshot.performance.analyzedFiles, 1, "append should rescan only the changed rollout")
+runner.checkEqual(appendedSkillSnapshot.performance.unchangedFiles, 1, "append should skip the unchanged rollout")
+runner.checkEqual(
+    appendedSkillSnapshot.rows.first { $0.skill.name == "test-skill" }?.strongCount,
+    testSkillRow.strongCount + 1,
+    "append scan should add exactly one STRONG observation"
+)
+
+_ = skillService.analyzeRecentWeek(force: false, automatic: true, now: skillNow.addingTimeInterval(9))
+let directBeforeThrottledAutomatic = skillService.currentSnapshot(now: skillNow.addingTimeInterval(9))
+    .rows.first { $0.skill.name == "test-skill" }?.directCount
+let appendedDirectTurn = skillMessageLine(
+    skillNow.addingTimeInterval(10),
+    "user",
+    "$test-skill review release workflow",
+    nil
+) + skillMessageLine(skillNow.addingTimeInterval(10), "assistant", "Completed.", "final")
+let throttleAppendHandle = try FileHandle(forWritingTo: skillRolloutURL)
+try throttleAppendHandle.seekToEnd()
+try throttleAppendHandle.write(contentsOf: Data(appendedDirectTurn.utf8))
+try throttleAppendHandle.close()
+let throttledAutomaticSnapshot = skillService.analyzeRecentWeek(
+    force: false,
+    automatic: true,
+    now: skillNow.addingTimeInterval(10)
+)
+runner.checkEqual(
+    throttledAutomaticSnapshot.rows.first { $0.skill.name == "test-skill" }?.directCount,
+    directBeforeThrottledAutomatic,
+    "automatic Skill analysis should not repeat inside the rolling seven-day interval"
+)
+let manualAfterThrottle = skillService.analyzeRecentWeek(
+    force: false,
+    automatic: false,
+    now: skillNow.addingTimeInterval(10)
+)
+runner.checkEqual(
+    manualAfterThrottle.rows.first { $0.skill.name == "test-skill" }?.directCount,
+    (directBeforeThrottledAutomatic ?? 0) + 1,
+    "manual analysis should bypass the rolling weekly automatic throttle"
+)
+
+let scanRunCountBeforeFastSnapshot = try Shell.sqliteJSON(
+    database: skillDatabaseURL.path,
+    query: "select count(*) as count from skill_scan_runs;",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count
+let fastPathStore = CodexUsageStore(codexDirectory: skillCodexHome, ripgrepCandidates: [])
+_ = fastPathStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: skillNow.addingTimeInterval(10)
+)
+let scanRunCountAfterFastSnapshot = try Shell.sqliteJSON(
+    database: skillDatabaseURL.path,
+    query: "select count(*) as count from skill_scan_runs;",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count
+runner.checkEqual(
+    scanRunCountAfterFastSnapshot,
+    scanRunCountBeforeFastSnapshot,
+    "ordinary fast Token snapshots must not invoke Skill analysis"
+)
+
+var truncatedRollout = skillSessionMetaLine(skillNow.addingTimeInterval(11), skillSessionID)
+truncatedRollout += skillMessageLine(
+    skillNow.addingTimeInterval(11),
+    "user",
+    "Review database migration rollback safety.",
+    nil
+)
+truncatedRollout += skillMessageLine(skillNow.addingTimeInterval(11), "assistant", "Completed.", "final")
+let truncateHandle = try FileHandle(forWritingTo: skillRolloutURL)
+try truncateHandle.truncate(atOffset: 0)
+try truncateHandle.seek(toOffset: 0)
+try truncateHandle.write(contentsOf: Data(truncatedRollout.utf8))
+try truncateHandle.close()
+try FileManager.default.setAttributes(
+    [.modificationDate: skillNow.addingTimeInterval(11)],
+    ofItemAtPath: skillRolloutURL.path
+)
+let truncatedSkillSnapshot = skillService.analyzeRecentWeek(
+    force: false,
+    automatic: false,
+    now: skillNow.addingTimeInterval(11)
+)
+runner.checkEqual(
+    truncatedSkillSnapshot.rows.first { $0.skill.name == "test-skill" }?.confirmedUseCount,
+    0,
+    "file truncation should invalidate observations derived from the old file contents"
+)
+
+try FileManager.default.removeItem(at: skillRolloutURL)
+let rotatedRollout = skillSessionMetaLine(skillNow.addingTimeInterval(12), skillSessionID)
+    + skillMessageLine(skillNow.addingTimeInterval(12), "user", "$test-skill review release workflow", nil)
+    + skillMessageLine(skillNow.addingTimeInterval(12), "assistant", "Completed.", "final")
+try rotatedRollout.write(to: skillRolloutURL, atomically: true, encoding: .utf8)
+try FileManager.default.setAttributes(
+    [.modificationDate: skillNow.addingTimeInterval(12)],
+    ofItemAtPath: skillRolloutURL.path
+)
+let rotatedSkillSnapshot = skillService.analyzeRecentWeek(
+    force: false,
+    automatic: false,
+    now: skillNow.addingTimeInterval(12)
+)
+runner.checkEqual(
+    rotatedSkillSnapshot.quality,
+    .complete,
+    "report completeness should recover after a partial rollout is replaced by a clean file"
+)
+runner.checkEqual(
+    rotatedSkillSnapshot.rows.first { $0.skill.name == "test-skill" }?.directCount,
+    1,
+    "inode replacement should fully invalidate and rescan the rollout"
+)
+
+let forcedSkillSnapshot = skillService.analyzeRecentWeek(
+    force: true,
+    automatic: false,
+    now: skillNow.addingTimeInterval(13)
+)
+runner.checkEqual(
+    forcedSkillSnapshot.rows.first { $0.skill.name == "test-skill" }?.directCount,
+    1,
+    "manual reanalysis of seven days should remain idempotent"
+)
+
+let trailingSessionID = "019f5d70-0000-7000-8000-000000000003"
+let trailingRolloutURL = skillSessionsDirectory
+    .appendingPathComponent("rollout-2026-07-13T12-00-02-\(trailingSessionID).jsonl")
+_ = try Shell.run("/usr/bin/sqlite3", [
+    skillStatePath,
+    """
+    insert into threads(id, title, tokens_used, rollout_path, created_at, updated_at, archived)
+    values(
+      '\(trailingSessionID)',
+      'Trailing Skill fixture',
+      12000,
+      '\(trailingRolloutURL.path)',
+      \(Int(skillNow.addingTimeInterval(14).timeIntervalSince1970)),
+      \(Int(skillNow.addingTimeInterval(14).timeIntervalSince1970)),
+      0
+    );
+    """
+])
+let trailingFinalLine = skillMessageLine(
+    skillNow.addingTimeInterval(14),
+    "assistant",
+    "Completed.",
+    "final"
+)
+let trailingSplit = trailingFinalLine.index(
+    trailingFinalLine.startIndex,
+    offsetBy: trailingFinalLine.count / 2
+)
+let trailingPrefix = String(trailingFinalLine[..<trailingSplit])
+let trailingSuffix = String(trailingFinalLine[trailingSplit...])
+let trailingInitial = skillSessionMetaLine(skillNow.addingTimeInterval(14), trailingSessionID)
+    + skillMessageLine(skillNow.addingTimeInterval(14), "user", "$test-skill review release workflow", nil)
+    + trailingPrefix
+try trailingInitial.write(to: trailingRolloutURL, atomically: true, encoding: .utf8)
+let partialTailSnapshot = skillService.analyzeRecentWeek(
+    force: false,
+    automatic: false,
+    now: skillNow.addingTimeInterval(14)
+)
+runner.checkEqual(partialTailSnapshot.quality, .partial, "an incomplete trailing JSONL row should be reported as PARTIAL")
+
+let trailingAppendHandle = try FileHandle(forWritingTo: trailingRolloutURL)
+try trailingAppendHandle.seekToEnd()
+try trailingAppendHandle.write(contentsOf: Data(trailingSuffix.utf8))
+try trailingAppendHandle.close()
+let completedTailSnapshot = skillService.analyzeRecentWeek(
+    force: false,
+    automatic: false,
+    now: skillNow.addingTimeInterval(15)
+)
+runner.checkEqual(completedTailSnapshot.quality, .complete, "a completed trailing JSONL row should recover to COMPLETE")
+runner.checkEqual(
+    completedTailSnapshot.rows.first { $0.skill.name == "test-skill" }?.directCount,
+    2,
+    "a retried trailing row should flush its pending turn exactly once"
+)
+
+_ = try writeSyntheticSkill(
+    "test-skill",
+    "test-skill",
+    "Analyze release workflows and deployment risks with audit evidence."
+)
+let pendingCatalogSnapshot = skillService.currentSnapshot(now: skillNow.addingTimeInterval(16))
+runner.checkEqual(
+    pendingCatalogSnapshot.quality,
+    .complete,
+    "the process-lifetime catalog cache should avoid an app-server reload when merely reopening the tab"
+)
+let changedCatalogSnapshot = skillService.analyzeRecentWeek(
+    force: false,
+    automatic: false,
+    now: skillNow.addingTimeInterval(16)
+)
+runner.checkEqual(changedCatalogSnapshot.performance.analyzedFiles, 3, "a changed Skill catalog should invalidate all current seven-day file checkpoints")
+runner.checkEqual(
+    changedCatalogSnapshot.rows.first { $0.skill.name == "test-skill" }?.directCount,
+    2,
+    "catalog invalidation should rebuild derived evidence without duplicating observations"
+)
+let stableCatalogSnapshot = skillService.analyzeRecentWeek(
+    force: false,
+    automatic: false,
+    now: skillNow.addingTimeInterval(17)
+)
+runner.checkEqual(stableCatalogSnapshot.performance.analyzedFiles, 0, "an unchanged catalog fingerprint should preserve warm file checkpoints")
+
+let missingConfigCatalog = SkillCatalogLoader(
+    codexDirectory: skillCodexHome,
+    configURL: skillInsightsRoot.appendingPathComponent("missing-config.toml"),
+    skillRoots: [skillRoot]
+).load(now: skillNow)
+runner.checkEqual(missingConfigCatalog.quality, .partial, "missing config.toml should produce PARTIAL catalog quality")
+runner.check(missingConfigCatalog.skills.allSatisfy(\.enabled), "missing config should not silently disable discovered Skills")
+
+let invalidPathConfigURL = skillInsightsRoot.appendingPathComponent("invalid-path-config.toml")
+try """
+[[skills.config]]
+path = "\(skillInsightsRoot.appendingPathComponent("missing-skill/SKILL.md").path)"
+enabled = false
+""".write(to: invalidPathConfigURL, atomically: true, encoding: .utf8)
+let invalidPathCatalog = SkillCatalogLoader(
+    codexDirectory: skillCodexHome,
+    configURL: invalidPathConfigURL,
+    skillRoots: [skillRoot]
+).load(now: skillNow)
+runner.checkEqual(invalidPathCatalog.quality, .partial, "invalid configured Skill path should produce PARTIAL catalog quality")
+
+let ambiguousNameConfigURL = skillInsightsRoot.appendingPathComponent("ambiguous-name-config.toml")
+try """
+[[skills.config]]
+name = "duplicate-skill"
+enabled = false
+
+[[skills.config]]
+name = "duplicate-skill"
+path = "\(duplicateOneURL.path)"
+enabled = true
+
+[features]
+enabled = false
+""".write(to: ambiguousNameConfigURL, atomically: true, encoding: .utf8)
+let ambiguousNameCatalog = SkillCatalogLoader(
+    codexDirectory: skillCodexHome,
+    configURL: ambiguousNameConfigURL,
+    skillRoots: [skillRoot]
+).load(now: skillNow)
+runner.checkEqual(ambiguousNameCatalog.quality, .partial, "a name-only config matching multiple paths should be visibly PARTIAL")
+runner.checkEqual(
+    ambiguousNameCatalog.skills.first { $0.path == duplicateOneURL.path }?.enabled,
+    true,
+    "an exact configured Skill path should override a name-only duplicate setting"
+)
+runner.checkEqual(
+    ambiguousNameCatalog.skills.first { $0.path == duplicateTwoURL.path }?.enabled,
+    false,
+    "the name-only duplicate setting should still apply to the other canonical path"
+)
+
+let emptySkillHome = skillInsightsRoot.appendingPathComponent("empty-codex-home", isDirectory: true)
+try FileManager.default.createDirectory(at: emptySkillHome, withIntermediateDirectories: true)
+let emptySkillService = SkillInsightsService(
+    codexDirectory: emptySkillHome,
+    configURL: skillConfigURL,
+    skillRoots: [skillRoot],
+    databaseURL: skillInsightsRoot.appendingPathComponent("empty-skill-observations.sqlite")
+)
+let emptySkillSnapshot = emptySkillService.analyzeRecentWeek(force: true, automatic: false, now: skillNow)
+runner.check(emptySkillSnapshot.lastAnalyzedAt != nil, "empty Codex Home Skill analysis should complete without crashing")
+runner.checkEqual(emptySkillSnapshot.quality, .partial, "an empty Codex Home without state SQLite should report PARTIAL source completeness")
+runner.checkEqual(emptySkillSnapshot.performance.modelTokens, 0, "empty Codex Home analysis should still use zero model Tokens")
+
+let irrelevantOversizedURL = skillInsightsRoot.appendingPathComponent("irrelevant-oversized.jsonl")
+let irrelevantOversizedLine = """
+{"timestamp":"\(skillTimestamp(skillNow))","type":"response_item","payload":{"type":"reasoning","text":"\(String(repeating: "x", count: 32 * 1024))"}}
+
+"""
+try irrelevantOversizedLine.write(to: irrelevantOversizedURL, atomically: true, encoding: .utf8)
+let irrelevantOversizedHandle = try FileHandle(forReadingFrom: irrelevantOversizedURL)
+let irrelevantOversizedResult = try SkillJSONLReader.read(
+    handle: irrelevantOversizedHandle,
+    startOffset: 0,
+    fileSize: UInt64(Data(irrelevantOversizedLine.utf8).count),
+    byteBudget: UInt64(Data(irrelevantOversizedLine.utf8).count),
+    maxRowBytes: 8 * 1024,
+    initialDiscardingOversizedRow: false,
+    wallDeadlineUptime: ProcessInfo.processInfo.systemUptime + 5,
+    cpuDeadlineNanoseconds: SkillProcessResourceSnapshot.processCPUNanoseconds() + 5_000_000_000,
+    shouldCancel: { false },
+    process: { _, _ in }
+)
+try irrelevantOversizedHandle.close()
+runner.checkEqual(
+    irrelevantOversizedResult.skippedIrrelevantOversizedRows,
+    1,
+    "an oversized reasoning row should be filtered without degrading Skill evidence completeness"
+)
+runner.checkEqual(
+    irrelevantOversizedResult.skippedOversizedRows,
+    0,
+    "a deterministically irrelevant oversized row should not count as an unknown relevant loss"
+)
+
+let pendingHome = skillInsightsRoot.appendingPathComponent("pending-home", isDirectory: true)
+let pendingSessions = pendingHome.appendingPathComponent("sessions", isDirectory: true)
+try FileManager.default.createDirectory(at: pendingSessions, withIntermediateDirectories: true)
+let pendingSessionID = "019f5d70-0000-7000-8000-000000000004"
+let pendingRolloutURL = pendingSessions.appendingPathComponent("rollout-pending-\(pendingSessionID).jsonl")
+var pendingRollout = skillSessionMetaLine(skillNow, pendingSessionID)
+for index in 0..<160 {
+    pendingRollout += skillJSONLine([
+        "timestamp": skillTimestamp(skillNow.addingTimeInterval(Double(index) / 100)),
+        "type": "response_item",
+        "payload": ["type": "reasoning", "text": String(repeating: "r", count: 256)]
+    ])
+}
+try pendingRollout.write(to: pendingRolloutURL, atomically: true, encoding: .utf8)
+let pendingStatePath = pendingHome.appendingPathComponent("state_5.sqlite").path
+_ = try Shell.run("/usr/bin/sqlite3", [
+    pendingStatePath,
+    """
+    create table threads(
+      id text, title text, tokens_used integer, rollout_path text,
+      created_at integer, updated_at integer, archived integer default 0
+    );
+    insert into threads(id, title, tokens_used, rollout_path, created_at, updated_at, archived)
+    values(
+      '\(pendingSessionID)', 'Pending fixture', 0, '\(pendingRolloutURL.path)',
+      \(Int(skillNow.timeIntervalSince1970)), \(Int(skillNow.timeIntervalSince1970)), 0
+    );
+    """
+])
+let pendingService = SkillInsightsService(
+    codexDirectory: pendingHome,
+    configURL: skillConfigURL,
+    skillRoots: [skillRoot],
+    databaseURL: skillInsightsRoot.appendingPathComponent("pending-observations.sqlite"),
+    maxRowBytes: 8 * 1024,
+    maxBytesPerFilePerRun: 8 * 1024,
+    maxBytesPerRun: 8 * 1024
+)
+let pendingSnapshot = pendingService.analyzeRecentWeek(force: false, automatic: false, now: skillNow)
+runner.checkEqual(pendingSnapshot.performance.pendingFiles, 1, "a clean file stopped by budget should be counted as pending")
+runner.checkEqual(pendingSnapshot.performance.partialFiles, 0, "pending budget work must not be mislabeled as a damaged file")
+
+let boundaryHome = skillInsightsRoot.appendingPathComponent("window-boundary-home", isDirectory: true)
+let boundarySessions = boundaryHome.appendingPathComponent("sessions", isDirectory: true)
+try FileManager.default.createDirectory(at: boundarySessions, withIntermediateDirectories: true)
+let largeBoundarySessionID = "019f5d70-0000-7000-8000-000000000005"
+let largeBoundaryRolloutURL = boundarySessions
+    .appendingPathComponent("rollout-window-\(largeBoundarySessionID).jsonl")
+let oldBoundaryDate = skillNow.addingTimeInterval(-8 * 24 * 60 * 60)
+let oldReasoningLine = skillJSONLine([
+    "timestamp": skillTimestamp(oldBoundaryDate),
+    "type": "response_item",
+    "payload": ["type": "reasoning", "text": String(repeating: "o", count: 64 * 1024)]
+])
+var largeBoundaryRollout = skillSessionMetaLine(oldBoundaryDate, largeBoundarySessionID)
+largeBoundaryRollout += String(repeating: oldReasoningLine, count: 132)
+largeBoundaryRollout += skillMessageLine(
+    skillNow.addingTimeInterval(-60),
+    "user",
+    "$test-skill review release workflow",
+    nil
+)
+largeBoundaryRollout += skillMessageLine(skillNow.addingTimeInterval(-60), "assistant", "Completed.", "final")
+try largeBoundaryRollout.write(to: largeBoundaryRolloutURL, atomically: true, encoding: .utf8)
+let boundaryStatePath = boundaryHome.appendingPathComponent("state_5.sqlite").path
+_ = try Shell.run("/usr/bin/sqlite3", [
+    boundaryStatePath,
+    """
+    create table threads(
+      id text, title text, tokens_used integer, rollout_path text,
+      created_at integer, updated_at integer, archived integer default 0
+    );
+    insert into threads(id, title, tokens_used, rollout_path, created_at, updated_at, archived)
+    values(
+      '\(largeBoundarySessionID)', 'Boundary locator', 0, '\(largeBoundaryRolloutURL.path)',
+      \(Int(oldBoundaryDate.timeIntervalSince1970)), \(Int(skillNow.timeIntervalSince1970)), 0
+    );
+    """
+])
+let boundaryService = SkillInsightsService(
+    codexDirectory: boundaryHome,
+    configURL: skillConfigURL,
+    skillRoots: [skillRoot],
+    databaseURL: skillInsightsRoot.appendingPathComponent("window-boundary-observations.sqlite"),
+    maxBytesPerFilePerRun: 16 * 1024 * 1024,
+    maxBytesPerRun: 16 * 1024 * 1024
+)
+let locatedBoundarySnapshot = boundaryService.analyzeRecentWeek(force: false, automatic: false, now: skillNow)
+runner.check(locatedBoundarySnapshot.performance.boundaryProbeBytes > 0, "an old large rollout should probe for the seven-day boundary")
+runner.check(
+    locatedBoundarySnapshot.performance.analyzedBytes < UInt64(Data(largeBoundaryRollout.utf8).count / 2),
+    "a proven timestamp boundary should avoid rereading the old JSONL prefix"
+)
+runner.checkEqual(
+    locatedBoundarySnapshot.rows.first { $0.skill.name == "test-skill" }?.directCount,
+    1,
+    "window seeking should retain the first safe recent user turn"
+)
+
+let weeklyScheduleDatabaseURL = skillInsightsRoot.appendingPathComponent("weekly-schedule.sqlite")
+let weeklyScheduleStore = SkillObservationStore(databaseURL: weeklyScheduleDatabaseURL)
+runner.check(weeklyScheduleStore.shouldRunAutomatically(now: skillNow), "a new Skill store should allow its first automatic analysis")
+try weeklyScheduleStore.markAutomaticRun(at: skillNow)
+runner.check(
+    !weeklyScheduleStore.shouldRunAutomatically(now: skillNow.addingTimeInterval(7 * 24 * 60 * 60 - 1)),
+    "automatic Skill analysis should remain throttled until the full rolling week elapses"
+)
+runner.check(
+    weeklyScheduleStore.shouldRunAutomatically(now: skillNow.addingTimeInterval(7 * 24 * 60 * 60)),
+    "automatic Skill analysis should become due exactly seven days after its prior attempt"
+)
+try weeklyScheduleStore.enforceRetention(now: skillNow)
+let firstRetentionStamp = try Shell.run(
+    "/usr/bin/sqlite3",
+    [weeklyScheduleDatabaseURL.path, "select value from skill_metadata where key='last_retention_ms';"]
+).trimmingCharacters(in: .whitespacesAndNewlines)
+try weeklyScheduleStore.enforceRetention(now: skillNow.addingTimeInterval(24 * 60 * 60))
+let dailyRetentionStamp = try Shell.run(
+    "/usr/bin/sqlite3",
+    [weeklyScheduleDatabaseURL.path, "select value from skill_metadata where key='last_retention_ms';"]
+).trimmingCharacters(in: .whitespacesAndNewlines)
+runner.checkEqual(dailyRetentionStamp, firstRetentionStamp, "Skill retention cleanup should run at most once per week")
+try weeklyScheduleStore.enforceRetention(now: skillNow.addingTimeInterval(7 * 24 * 60 * 60))
+let weeklyRetentionStamp = try Shell.run(
+    "/usr/bin/sqlite3",
+    [weeklyScheduleDatabaseURL.path, "select value from skill_metadata where key='last_retention_ms';"]
+).trimmingCharacters(in: .whitespacesAndNewlines)
+runner.check(weeklyRetentionStamp != firstRetentionStamp, "Skill retention cleanup should resume after a week")
+
+let legacySkillDatabaseURL = skillInsightsRoot.appendingPathComponent("legacy-skill-store.sqlite")
+_ = try Shell.run("/usr/bin/sqlite3", [
+    legacySkillDatabaseURL.path,
+    """
+    create table skill_metadata(key text primary key, value text not null);
+    create table skill_observations(
+      id integer primary key autoincrement,
+      session_id text not null,
+      skill_id text not null,
+      skill_name text not null,
+      skill_path text not null,
+      enabled integer not null,
+      evidence_level text not null,
+      observation_type text not null,
+      observed_at_ms integer not null,
+      project_id text,
+      session_tokens integer,
+      analyzer_version integer not null,
+      quality text not null,
+      source_file_path text not null,
+      source_offset integer not null,
+      unique(source_file_path, source_offset, skill_id, evidence_level, observation_type)
+    );
+    insert into skill_observations(
+      session_id, skill_id, skill_name, skill_path, enabled, evidence_level,
+      observation_type, observed_at_ms, analyzer_version, quality,
+      source_file_path, source_offset
+    ) values('legacy-session', 'legacy-skill', 'legacy', '/legacy/SKILL.md', 1,
+      'INFERRED', 'suspected_miss', \(Int64(skillNow.timeIntervalSince1970 * 1_000)),
+      1, 'PARTIAL', '/legacy/rollout.jsonl', 42);
+    insert into skill_observations(
+      session_id, skill_id, skill_name, skill_path, enabled, evidence_level,
+      observation_type, observed_at_ms, analyzer_version, quality,
+      source_file_path, source_offset
+    ) values('legacy-session', 'legacy-skill', 'legacy', '/legacy/SKILL.md', 1,
+      'INFERRED', 'relevance_match', \(Int64(skillNow.timeIntervalSince1970 * 1_000)),
+      2, 'PARTIAL', '/legacy/rollout.jsonl', 42);
+    create table skill_scan_runs(
+      id integer primary key autoincrement,
+      completed_at_ms integer not null,
+      quality text not null,
+      analyzed_files integer not null,
+      unchanged_files integer not null,
+      analyzed_lines integer not null,
+      malformed_lines integer not null,
+      skipped_oversized_rows integer not null,
+      partial_files integer not null,
+      analyzed_bytes integer not null,
+      duration_ms integer not null,
+      analyzer_version integer not null,
+      model_tokens integer not null default 0
+    );
+    """
+])
+let migratedLegacyStore = SkillObservationStore(databaseURL: legacySkillDatabaseURL)
+_ = migratedLegacyStore.storedAnalysisFingerprint()
+let migratedLegacyType = try Shell.sqliteJSON(
+    database: legacySkillDatabaseURL.path,
+    query: "select observation_type as value from skill_observations limit 1;",
+    as: [StringValueRecord].self,
+    readOnly: true
+).first?.value
+runner.checkEqual(migratedLegacyType, "relevance_match", "legacy enabled-state evidence should migrate to neutral relevance")
+let reopenedLegacyStore = SkillObservationStore(databaseURL: legacySkillDatabaseURL)
+_ = reopenedLegacyStore.storedAnalysisFingerprint()
+let migratedLegacyCount = try Shell.sqliteJSON(
+    database: legacySkillDatabaseURL.path,
+    query: "select count(*) as count from skill_observations where observation_type='relevance_match';",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count
+runner.checkEqual(migratedLegacyCount, 1, "Skill store migration should be idempotent across reopen")
+
+let deferredHome = skillInsightsRoot.appendingPathComponent("deferred-home", isDirectory: true)
+try FileManager.default.createDirectory(at: deferredHome, withIntermediateDirectories: true)
+let deferredDatabaseURL = skillInsightsRoot.appendingPathComponent("deferred-observations.sqlite")
+let deferredService = SkillInsightsService(
+    codexDirectory: deferredHome,
+    configURL: skillConfigURL,
+    skillRoots: [skillRoot],
+    databaseURL: deferredDatabaseURL,
+    automaticDeferralReason: { "Low Power Mode is enabled" }
+)
+let deferredSnapshot = deferredService.analyzeRecentWeek(force: false, automatic: true, now: skillNow)
+runner.check(deferredSnapshot.performance.wasDeferred, "a power-policy deferral should be visible in the machine-readable performance snapshot")
+let deferredRunCount = try Shell.sqliteJSON(
+    database: deferredDatabaseURL.path,
+    query: "select count(*) as count from skill_scan_runs;",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count
+runner.checkEqual(deferredRunCount, 0, "a deferred automatic attempt must not create a scanner run")
+let deferredSecondSnapshot = deferredService.analyzeRecentWeek(
+    force: false,
+    automatic: true,
+    now: skillNow.addingTimeInterval(60)
+)
+runner.check(deferredSecondSnapshot.performance.wasDeferred, "a deferred weekly attempt should remain visible without adding retry activity")
+
 if runner.failures > 0 {
     FileHandle.standardError.write(Data("\(runner.failures) regression test(s) failed\n".utf8))
     exit(1)
 }
 
+print(
+    "Skill Insights performance: "
+        + "cold=\(firstSkillSnapshot.performance.durationMilliseconds)ms/\(firstSkillSnapshot.performance.analyzedFiles)files, "
+        + "warm=\(unchangedSkillSnapshot.performance.durationMilliseconds)ms/\(unchangedSkillSnapshot.performance.analyzedFiles)files/\(unchangedSkillSnapshot.performance.analyzedLines)lines, "
+        + "append=\(appendedSkillSnapshot.performance.durationMilliseconds)ms/\(appendedSkillSnapshot.performance.analyzedFiles)files, "
+        + "catalog=\(catalogClientDurationMilliseconds)ms, "
+        + "fastSnapshotRuns=\(scanRunCountBeforeFastSnapshot ?? -1)->\(scanRunCountAfterFastSnapshot ?? -1), "
+        + "modelTokens=\(firstSkillSnapshot.performance.modelTokens)"
+)
 print("All regression tests passed")

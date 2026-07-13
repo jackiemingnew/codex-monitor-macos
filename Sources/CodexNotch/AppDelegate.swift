@@ -403,6 +403,7 @@ final class NotchOverlayController {
     private lazy var newAPIViewModel = BalanceMonitorViewModel(source: .newAPI, settings: settings)
     private lazy var subAPIViewModel = BalanceMonitorViewModel(source: .subAPI, settings: settings)
     private lazy var codexRadarViewModel = CodexRadarViewModel(settings: settings)
+    private lazy var skillInsightsCoordinator = SkillInsightsFeatureCoordinator(settings: settings)
     private let overlayState = OverlayState()
     private let window: NSPanel
     private var detailWindow: NSPanel?
@@ -444,6 +445,7 @@ final class NotchOverlayController {
         observeScreenChanges()
         installEventMonitors()
         _ = codexRadarViewModel
+        _ = skillInsightsCoordinator
         updateFrames()
     }
 
@@ -666,6 +668,7 @@ final class NotchOverlayController {
 
         let detailView = DetailPanelView(
             viewModel: viewModel,
+            skillInsightsCoordinator: skillInsightsCoordinator,
             remoteViewModel: remoteViewModel,
             newAPIViewModel: newAPIViewModel,
             subAPIViewModel: subAPIViewModel,
@@ -862,6 +865,9 @@ final class NotchOverlayController {
         switch selectedDetailPage {
         case .codex:
             viewModel.refreshAll(forceRateLimitRefresh: false)
+        case .skillInsights:
+            guard settings.skillInsightsEnabled else { return }
+            skillInsightsCoordinator.refreshWhenPresented()
         case .codexRadar:
             guard settings.codexRadarEnabled else {
                 return

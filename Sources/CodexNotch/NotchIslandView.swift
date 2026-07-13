@@ -3,6 +3,7 @@ import SwiftUI
 
 enum DetailPage: String, CaseIterable, Identifiable {
     case codex
+    case skillInsights
     case codexRadar
     case remoteCodex
     case newAPI
@@ -14,6 +15,8 @@ enum DetailPage: String, CaseIterable, Identifiable {
         switch self {
         case .codex:
             "Codex"
+        case .skillInsights:
+            "Skills"
         case .codexRadar:
             "Codex Radar"
         case .remoteCodex:
@@ -297,6 +300,7 @@ private struct CollapsedMetricRow: View {
 
 struct DetailPanelView: View {
     @ObservedObject var viewModel: UsageViewModel
+    @ObservedObject var skillInsightsCoordinator: SkillInsightsFeatureCoordinator
     @ObservedObject var remoteViewModel: RemoteMonitorViewModel
     @ObservedObject var newAPIViewModel: BalanceMonitorViewModel
     @ObservedObject var subAPIViewModel: BalanceMonitorViewModel
@@ -335,6 +339,8 @@ struct DetailPanelView: View {
                     switch selectedPage {
                     case .codex:
                         localContent
+                    case .skillInsights:
+                        skillInsightsContent
                     case .codexRadar:
                         codexRadarContent
                     case .remoteCodex:
@@ -437,6 +443,8 @@ struct DetailPanelView: View {
         switch selectedPage {
         case .codex:
             "Codex Monitor"
+        case .skillInsights:
+            "Skill Insights"
         case .codexRadar:
             "Codex Radar"
         case .remoteCodex:
@@ -452,6 +460,8 @@ struct DetailPanelView: View {
         switch selectedPage {
         case .codex:
             return snapshot.isRunning ? "Running" : "Idle"
+        case .skillInsights:
+            return skillInsightsCoordinator.snapshot.quality.rawValue
         case .codexRadar:
             return codexRadarHeaderStatus
         case .remoteCodex:
@@ -473,6 +483,8 @@ struct DetailPanelView: View {
         switch selectedPage {
         case .codex:
             snapshot.isRunning ? MonitorTheme.running : MonitorTheme.textTertiary
+        case .skillInsights:
+            skillInsightsQualityColor
         case .codexRadar:
             codexRadarHeaderStatusColor
         case .remoteCodex:
@@ -518,6 +530,8 @@ struct DetailPanelView: View {
         switch selectedPage {
         case .codex:
             viewModel.isRefreshing
+        case .skillInsights:
+            skillInsightsCoordinator.isAnalyzing
         case .codexRadar:
             codexRadarViewModel.isRefreshing
         case .remoteCodex:
@@ -533,6 +547,8 @@ struct DetailPanelView: View {
         switch selectedPage {
         case .codex:
             "刷新 Codex"
+        case .skillInsights:
+            "增量分析最近 7 天"
         case .codexRadar:
             "刷新 Codex Radar"
         case .remoteCodex:
@@ -554,6 +570,8 @@ struct DetailPanelView: View {
                     detailPage = page
                     if page == .codexRadar {
                         codexRadarViewModel.refreshWhenPresented()
+                    } else if page == .skillInsights {
+                        skillInsightsCoordinator.refreshWhenPresented()
                     }
                 }
             }
@@ -565,6 +583,9 @@ struct DetailPanelView: View {
 
     private var availablePages: [DetailPage] {
         var pages: [DetailPage] = [.codex]
+        if settings.skillInsightsEnabled {
+            pages.append(.skillInsights)
+        }
         if settings.codexRadarEnabled {
             pages.append(.codexRadar)
         }
@@ -588,6 +609,8 @@ struct DetailPanelView: View {
         switch selectedPage {
         case .codex:
             onLocalRefresh()
+        case .skillInsights:
+            skillInsightsCoordinator.analyzeRecentWeek()
         case .codexRadar:
             onCodexRadarRefresh()
         case .remoteCodex:
@@ -613,6 +636,21 @@ struct DetailPanelView: View {
             }
         }
         .frame(maxHeight: .infinity, alignment: .bottom)
+    }
+
+    private var skillInsightsContent: some View {
+        SkillInsightsPanelView(viewModel: skillInsightsCoordinator)
+    }
+
+    private var skillInsightsQualityColor: Color {
+        switch skillInsightsCoordinator.snapshot.quality {
+        case .complete:
+            MonitorTheme.healthy
+        case .partial:
+            MonitorTheme.warning
+        case .unavailable:
+            MonitorTheme.textTertiary
+        }
     }
 
     private var localQuotaStrip: some View {
