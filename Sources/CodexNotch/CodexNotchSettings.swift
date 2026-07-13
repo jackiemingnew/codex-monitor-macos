@@ -76,6 +76,7 @@ final class CodexNotchSettings: ObservableObject {
         static let enablePulse = "enablePulse"
         static let hudDisplayMode = "hudDisplayMode"
         static let overlayHorizontalPosition = "overlayHorizontalPosition"
+        static let overlayVerticalPosition = "overlayVerticalPosition"
         static let taskHistoryRange = "taskHistoryRange"
         static let notchDisplaySource = "notchDisplaySource"
         static let remoteMonitorEnabled = "remoteMonitorEnabled"
@@ -208,6 +209,7 @@ final class CodexNotchSettings: ObservableObject {
     }
 
     @Published private(set) var overlayHorizontalPosition: CGFloat
+    @Published private(set) var overlayVerticalPosition: CGFloat
 
     @Published var taskHistoryRange: TaskHistoryRange {
         didSet {
@@ -496,6 +498,9 @@ final class CodexNotchSettings: ObservableObject {
         self.hudDisplayMode = HUDDisplayMode(rawValue: defaults.string(forKey: Keys.hudDisplayMode) ?? "") ?? .floatingHUD
         self.overlayHorizontalPosition = Self.clampedOverlayHorizontalPosition(
             defaults.object(forKey: Keys.overlayHorizontalPosition) as? Double ?? 0
+        )
+        self.overlayVerticalPosition = Self.clampedOverlayVerticalPosition(
+            defaults.object(forKey: Keys.overlayVerticalPosition) as? Double ?? 0
         )
         self.taskHistoryRange = TaskHistoryRange(rawValue: defaults.string(forKey: Keys.taskHistoryRange) ?? "") ?? .threeDays
         self.notchDisplaySource = NotchDisplaySource(rawValue: defaults.string(forKey: Keys.notchDisplaySource) ?? "") ?? .codex
@@ -864,9 +869,30 @@ final class CodexNotchSettings: ObservableObject {
         defaults.set(Double(position), forKey: Keys.overlayHorizontalPosition)
     }
 
+    func setOverlayVerticalPosition(_ value: CGFloat) {
+        let position = Self.clampedOverlayVerticalPosition(Double(value))
+        overlayVerticalPosition = position
+        defaults.set(Double(position), forKey: Keys.overlayVerticalPosition)
+    }
+
+    func setOverlayPosition(horizontal: CGFloat, vertical: CGFloat) {
+        setOverlayHorizontalPosition(horizontal)
+        setOverlayVerticalPosition(vertical)
+    }
+
     func resetOverlayHorizontalPosition() {
         overlayHorizontalPosition = 0
         defaults.removeObject(forKey: Keys.overlayHorizontalPosition)
+    }
+
+    func resetOverlayVerticalPosition() {
+        overlayVerticalPosition = 0
+        defaults.removeObject(forKey: Keys.overlayVerticalPosition)
+    }
+
+    func resetOverlayPosition() {
+        resetOverlayHorizontalPosition()
+        resetOverlayVerticalPosition()
     }
 
     private static func migrateLegacyRefreshDefaultsIfNeeded(defaults: UserDefaults) {
@@ -1650,6 +1676,10 @@ final class CodexNotchSettings: ObservableObject {
 
     private static func clampedOverlayHorizontalPosition(_ value: Double) -> CGFloat {
         CGFloat(Swift.min(1, Swift.max(-1, value)))
+    }
+
+    private static func clampedOverlayVerticalPosition(_ value: Double) -> CGFloat {
+        CGFloat(Swift.min(1, Swift.max(0, value)))
     }
 
     private static func originChanged(

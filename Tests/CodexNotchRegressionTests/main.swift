@@ -229,17 +229,33 @@ runner.check(
     IslandMetrics.clampedOverlayCenterX(920, in: overlayScreenFrame) == 920,
     "overlay drag should preserve an in-bounds horizontal offset"
 )
-var overlayDragSession = OverlayDragSession(pointerX: 720, centerX: 720)
+var overlayDragSession = OverlayDragSession(
+    pointer: CGPoint(x: 720, y: 800),
+    centerX: 720,
+    topEdge: 850
+)
 runner.check(
-    overlayDragSession.update(pointerX: 820, in: overlayScreenFrame) == 820,
+    overlayDragSession.update(
+        pointer: CGPoint(x: 820, y: 800),
+        screenFrame: overlayScreenFrame,
+        topEdgeRange: 430...900
+    ).centerX == 820,
     "overlay drag should follow global pointer movement one-to-one"
 )
 runner.check(
-    overlayDragSession.update(pointerX: 1_500, in: overlayScreenFrame) == 1_180,
+    overlayDragSession.update(
+        pointer: CGPoint(x: 1_500, y: 800),
+        screenFrame: overlayScreenFrame,
+        topEdgeRange: 430...900
+    ).centerX == 1_180,
     "overlay drag should clamp at the right edge"
 )
 runner.check(
-    overlayDragSession.update(pointerX: 1_499, in: overlayScreenFrame) == 1_179,
+    overlayDragSession.update(
+        pointer: CGPoint(x: 1_499, y: 800),
+        screenFrame: overlayScreenFrame,
+        topEdgeRange: 430...900
+    ).centerX == 1_179,
     "overlay drag should leave a clamped edge after one point of reverse movement"
 )
 let normalizedOverlayPosition = IslandMetrics.normalizedOverlayPosition(
@@ -1797,7 +1813,8 @@ let menuBarModeReloadedSettings = CodexNotchSettings(
 runner.check(menuBarModeReloadedSettings.hudDisplayMode == .menuBar, "menu-bar HUD mode should persist across launches")
 settings.hudDisplayMode = .floatingHUD
 runner.check(settings.overlayHorizontalPosition == 0, "overlay position should default to the primary screen center")
-settings.setOverlayHorizontalPosition(0.42)
+runner.check(settings.overlayVerticalPosition == 0, "overlay position should default to the top edge")
+settings.setOverlayPosition(horizontal: 0.42, vertical: 0.36)
 let overlayPositionReloadedSettings = CodexNotchSettings(
     defaults: settingsDefaults,
     secretStores: SecretStoreFactory(keychain: MemorySecretStore(), database: MemorySecretStore()),
@@ -1805,13 +1822,21 @@ let overlayPositionReloadedSettings = CodexNotchSettings(
 )
 runner.check(
     abs(overlayPositionReloadedSettings.overlayHorizontalPosition - 0.42) < 0.001,
-    "overlay position should persist across app restarts"
+    "horizontal overlay position should persist across app restarts"
+)
+runner.check(
+    abs(overlayPositionReloadedSettings.overlayVerticalPosition - 0.36) < 0.001,
+    "vertical overlay position should persist across app restarts"
 )
 overlayPositionReloadedSettings.setOverlayHorizontalPosition(4)
 runner.check(overlayPositionReloadedSettings.overlayHorizontalPosition == 1, "persisted overlay position should clamp to the right edge")
-overlayPositionReloadedSettings.resetOverlayHorizontalPosition()
+overlayPositionReloadedSettings.setOverlayVerticalPosition(4)
+runner.check(overlayPositionReloadedSettings.overlayVerticalPosition == 1, "persisted overlay position should clamp to the bottom edge")
+overlayPositionReloadedSettings.resetOverlayPosition()
 runner.check(overlayPositionReloadedSettings.overlayHorizontalPosition == 0, "reset should return the overlay to the default center")
+runner.check(overlayPositionReloadedSettings.overlayVerticalPosition == 0, "reset should return the overlay to the default top edge")
 runner.check(settingsDefaults.object(forKey: "overlayHorizontalPosition") == nil, "reset should clear the persisted overlay position")
+runner.check(settingsDefaults.object(forKey: "overlayVerticalPosition") == nil, "reset should clear the persisted vertical overlay position")
 runner.check(!settings.showSparkQuota, "Spark quota display should default to disabled")
 runner.check(!settings.showContextMetrics, "context metrics display should default to disabled")
 settings.activeRefreshInterval = 2

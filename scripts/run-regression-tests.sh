@@ -14,6 +14,14 @@ unset CODEX_USAGE_DELTA_DB
 
 bash "$ROOT_DIR/scripts/test-notarize-release-contract.sh"
 
+swiftc \
+  -swift-version 6 \
+  "$ROOT_DIR/Sources/CodexNotch/IslandMetrics.swift" \
+  "$ROOT_DIR/Tests/HUDPlacementRegressionTests/main.swift" \
+  -o "$BUILD_DIR/HUDPlacementRegressionTests"
+
+"$BUILD_DIR/HUDPlacementRegressionTests"
+
 swift build -c release --build-path "${BUILD_DIR}/package-build"
 
 swiftc \
