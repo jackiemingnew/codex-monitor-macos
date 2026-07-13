@@ -9,7 +9,7 @@ enum SkillJSONLStopReason: Equatable, Sendable {
     case cancelled
 }
 
-enum SkillJSONLRowClassification: Sendable {
+enum SkillJSONLRowClassification: String, Codable, Equatable, Sendable {
     case parse
     case irrelevant
 }
@@ -24,6 +24,7 @@ struct SkillJSONLReadResult: Sendable {
     let skippedIrrelevantOversizedRows: Int
     let peakPhysicalFootprintBytes: UInt64
     let discardingOversizedRow: Bool
+    let oversizedRowClassification: SkillJSONLRowClassification?
     let hasIncompleteRow: Bool
     let stopReason: SkillJSONLStopReason
 }
@@ -40,6 +41,7 @@ enum SkillJSONLReader {
         byteBudget: UInt64,
         maxRowBytes: Int,
         initialDiscardingOversizedRow: Bool,
+        initialOversizedRowClassification: SkillJSONLRowClassification? = nil,
         wallDeadlineUptime: TimeInterval,
         cpuDeadlineNanoseconds: UInt64,
         shouldCancel: @escaping @Sendable () -> Bool,
@@ -54,7 +56,9 @@ enum SkillJSONLReader {
         var lineBuffer = Data()
         lineBuffer.reserveCapacity(min(maxRowBytes, chunkBytes))
         var discardingOversizedRow = initialDiscardingOversizedRow
-        var oversizedRowClassification: SkillJSONLRowClassification = .parse
+        var oversizedRowClassification: SkillJSONLRowClassification = initialDiscardingOversizedRow
+            ? initialOversizedRowClassification ?? .parse
+            : .parse
         var analyzedLines = 0
         var parsedRows = 0
         var filteredRows = 0
@@ -195,6 +199,7 @@ enum SkillJSONLReader {
             skippedIrrelevantOversizedRows: skippedIrrelevantOversizedRows,
             peakPhysicalFootprintBytes: peakPhysicalFootprintBytes,
             discardingOversizedRow: discardingOversizedRow,
+            oversizedRowClassification: discardingOversizedRow ? oversizedRowClassification : nil,
             hasIncompleteRow: !lineBuffer.isEmpty,
             stopReason: stopReason ?? .endOfFile
         )

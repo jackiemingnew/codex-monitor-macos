@@ -6,6 +6,7 @@ struct SkillAnalysisOutcome: Sendable {
     let performance: SkillAnalysisPerformance
     let quality: SkillInsightsQuality
     let diagnostics: [String]
+    let wasCancelled: Bool
 }
 
 final class SkillSessionAnalyzer: @unchecked Sendable {
@@ -118,6 +119,14 @@ final class SkillSessionAnalyzer: @unchecked Sendable {
         shouldCancel: @escaping @Sendable () -> Bool = { false }
     ) -> SkillAnalysisOutcome {
         let startedAt = Date()
+        guard !shouldCancel() else {
+            return SkillAnalysisOutcome(
+                performance: .empty,
+                quality: .partial,
+                diagnostics: [stopDiagnostic(for: .cancelled)],
+                wasCancelled: true
+            )
+        }
         let wallDeadline = ProcessInfo.processInfo.systemUptime + maxWallTime
         let reservedCPUSec = min(0.25, maxCPUTime * 0.05)
         let cpuDeadline = SkillProcessResourceSnapshot.processCPUNanoseconds()
@@ -130,12 +139,25 @@ final class SkillSessionAnalyzer: @unchecked Sendable {
             return SkillAnalysisOutcome(
                 performance: performance,
                 quality: .unavailable,
-                diagnostics: ["Skill analysis is unavailable because the catalog is empty."]
+                diagnostics: ["Skill analysis is unavailable because the catalog is empty."],
+                wasCancelled: false
             )
         }
 
         let matcher = SkillMatcher(catalog: catalog.skills)
         let candidates = candidateFiles(now: now)
+        guard !shouldCancel() else {
+            var performance = SkillAnalysisPerformance.empty
+            performance.candidateFiles = candidates.files.count
+            performance.pendingFiles = candidates.files.count
+            performance.durationMilliseconds = elapsedMilliseconds(since: startedAt)
+            return SkillAnalysisOutcome(
+                performance: performance,
+                quality: .partial,
+                diagnostics: [stopDiagnostic(for: .cancelled)],
+                wasCancelled: true
+            )
+        }
         var diagnostics = candidates.diagnostics
         var performance = SkillAnalysisPerformance.empty
         performance.analyzerVersion = Self.analyzerVersion
@@ -143,6 +165,7 @@ final class SkillSessionAnalyzer: @unchecked Sendable {
         var runQuality = catalog.quality == .complete && !candidates.isPartial
             ? SkillInsightsQuality.complete
             : .partial
+        var wasCancelled = false
         var remainingRunBytes = maxBytesPerRun
         var checkpoints: [String: SkillFileCheckpoint]
         do {
@@ -163,7 +186,8 @@ final class SkillSessionAnalyzer: @unchecked Sendable {
             return SkillAnalysisOutcome(
                 performance: performance,
                 quality: .partial,
-                diagnostics: Array(Set(diagnostics)).sorted()
+                diagnostics: Array(Set(diagnostics)).sorted(),
+                wasCancelled: false
             )
         }
         let analysisFingerprint = SkillCatalogLoader.analysisFingerprint(
@@ -179,13 +203,25 @@ final class SkillSessionAnalyzer: @unchecked Sendable {
             && storedFingerprint != analysisFingerprint
             && storedFingerprint != legacyFingerprint
         var resetSucceeded = true
-        if force || catalogChanged {
+        if shouldCancel() {
+            wasCancelled = true
+            runQuality = .partial
+            diagnostics.append(stopDiagnostic(for: .cancelled))
+        }
+        if !wasCancelled, force || catalogChanged {
             do {
-                try observationStore.removeDerivedData(for: candidates.files.map(\.path))
+                try observationStore.removeDerivedData(
+                    for: candidates.files.map(\.path),
+                    shouldCancel: shouldCancel
+                )
                 checkpoints.removeAll(keepingCapacity: true)
                 if catalogChanged {
                     diagnostics.append("The Skill catalog changed; recent rollout evidence was reanalyzed.")
                 }
+            } catch SkillObservationStoreError.cancelled {
+                wasCancelled = true
+                runQuality = .partial
+                diagnostics.append(stopDiagnostic(for: .cancelled))
             } catch {
                 resetSucceeded = false
                 runQuality = .partial
@@ -197,6 +233,10 @@ final class SkillSessionAnalyzer: @unchecked Sendable {
         var pendingPaths = Set<String>()
         var partialPaths = Set<String>()
         for (index, candidate) in orderedCandidates.enumerated() {
+            if wasCancelled {
+                pendingPaths.formUnion(orderedCandidates[index...].map(\.path))
+                break
+            }
             let budgetStopReason: SkillJSONLStopReason?
             if shouldCancel() {
                 budgetStopReason = .cancelled
@@ -212,6 +252,9 @@ final class SkillSessionAnalyzer: @unchecked Sendable {
             if let budgetStopReason {
                 pendingPaths.formUnion(orderedCandidates[index...].map(\.path))
                 runQuality = .partial
+                if budgetStopReason == .cancelled {
+                    wasCancelled = true
+                }
                 diagnostics.append(stopDiagnostic(for: budgetStopReason))
                 break
             }
@@ -239,7 +282,17 @@ final class SkillSessionAnalyzer: @unchecked Sendable {
                             && $0.modifiedAtNanoseconds != candidate.signature.modifiedAtNanoseconds)
                 } ?? false
                 if wasReplaced {
-                    try observationStore.removeDerivedData(for: [candidate.path])
+                    if shouldCancel() {
+                        wasCancelled = true
+                        pendingPaths.formUnion(orderedCandidates[index...].map(\.path))
+                        runQuality = .partial
+                        diagnostics.append(stopDiagnostic(for: .cancelled))
+                        break
+                    }
+                    try observationStore.removeDerivedData(
+                        for: [candidate.path],
+                        shouldCancel: shouldCancel
+                    )
                     checkpoint = nil
                 }
 
@@ -256,8 +309,19 @@ final class SkillSessionAnalyzer: @unchecked Sendable {
                         shouldCancel: shouldCancel
                     )
                 }
+                if result.stopReason == .cancelled || shouldCancel() {
+                    wasCancelled = true
+                    pendingPaths.formUnion(orderedCandidates[index...].map(\.path))
+                    runQuality = .partial
+                    diagnostics.append(stopDiagnostic(for: .cancelled))
+                    break
+                }
                 let databaseStartedAt = Date()
-                try observationStore.persist(result.observations, checkpoint: result.checkpoint)
+                try observationStore.persist(
+                    result.observations,
+                    checkpoint: result.checkpoint,
+                    shouldCancel: shouldCancel
+                )
                 performance.databaseDurationMilliseconds += elapsedMilliseconds(since: databaseStartedAt)
                 checkpoints[candidate.path] = result.checkpoint
 
@@ -299,16 +363,41 @@ final class SkillSessionAnalyzer: @unchecked Sendable {
                     diagnostics.append(stopDiagnostic(for: result.stopReason))
                     break
                 }
+            } catch SkillObservationStoreError.cancelled {
+                wasCancelled = true
+                pendingPaths.formUnion(orderedCandidates[index...].map(\.path))
+                runQuality = .partial
+                diagnostics.append(stopDiagnostic(for: .cancelled))
+                break
             } catch {
+                if shouldCancel() {
+                    wasCancelled = true
+                    pendingPaths.formUnion(orderedCandidates[index...].map(\.path))
+                    runQuality = .partial
+                    diagnostics.append(stopDiagnostic(for: .cancelled))
+                    break
+                }
                 partialPaths.insert(candidate.path)
                 runQuality = .partial
                 diagnostics.append("A rollout file could not be analyzed: \(redactedPathLabel(candidate.path)).")
             }
         }
 
-        if resetSucceeded, storedFingerprint != analysisFingerprint {
+        if !wasCancelled, shouldCancel() {
+            wasCancelled = true
+            runQuality = .partial
+            diagnostics.append(stopDiagnostic(for: .cancelled))
+        }
+        if !wasCancelled, resetSucceeded, storedFingerprint != analysisFingerprint {
             do {
-                try observationStore.saveAnalysisFingerprint(analysisFingerprint)
+                try observationStore.saveAnalysisFingerprint(
+                    analysisFingerprint,
+                    shouldCancel: shouldCancel
+                )
+            } catch SkillObservationStoreError.cancelled {
+                wasCancelled = true
+                runQuality = .partial
+                diagnostics.append(stopDiagnostic(for: .cancelled))
             } catch {
                 runQuality = .partial
                 diagnostics.append("The Skill catalog analysis fingerprint could not be persisted.")
@@ -317,7 +406,7 @@ final class SkillSessionAnalyzer: @unchecked Sendable {
         performance.pendingFiles = pendingPaths.count
         performance.partialFiles = partialPaths.count + candidates.unavailableFileCount
         performance.durationMilliseconds = elapsedMilliseconds(since: startedAt)
-        performance.lastCompletedAt = now
+        performance.lastCompletedAt = wasCancelled ? nil : now
         performance.modelTokens = 0
         let resourceDelta = resourceStart.delta(to: SkillProcessResourceSnapshot.capture())
         performance.cpuMilliseconds = resourceDelta.cpuMilliseconds
@@ -331,7 +420,8 @@ final class SkillSessionAnalyzer: @unchecked Sendable {
         return SkillAnalysisOutcome(
             performance: performance,
             quality: runQuality,
-            diagnostics: Array(Set(diagnostics)).sorted()
+            diagnostics: Array(Set(diagnostics)).sorted(),
+            wasCancelled: wasCancelled
         )
     }
 
@@ -523,6 +613,7 @@ final class SkillSessionAnalyzer: @unchecked Sendable {
             byteBudget: byteBudget > boundary.bytesRead ? byteBudget - boundary.bytesRead : 0,
             maxRowBytes: maxRowBytes,
             initialDiscardingOversizedRow: checkpoint?.discardingOversizedRow ?? false,
+            initialOversizedRowClassification: checkpoint?.oversizedRowClassification,
             wallDeadlineUptime: wallDeadlineUptime,
             cpuDeadlineNanoseconds: cpuDeadlineNanoseconds,
             shouldCancel: shouldCancel
@@ -575,6 +666,7 @@ final class SkillSessionAnalyzer: @unchecked Sendable {
             lastAnalyzedAt: now,
             status: status,
             discardingOversizedRow: readResult.discardingOversizedRow,
+            oversizedRowClassification: readResult.oversizedRowClassification,
             cursorState: cursor
         )
         return FileScanResult(

@@ -159,6 +159,7 @@ struct SkillFileCheckpoint: Codable, Equatable, Sendable {
     let lastAnalyzedAt: Date
     let status: SkillInsightsQuality
     let discardingOversizedRow: Bool
+    let oversizedRowClassification: SkillJSONLRowClassification?
     let cursorState: SkillAnalysisCursorState
 }
 

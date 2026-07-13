@@ -57,8 +57,18 @@ final class SkillObservationStore: @unchecked Sendable {
         metadataValue(for: "analysis_fingerprint")
     }
 
-    func saveAnalysisFingerprint(_ fingerprint: String) throws {
-        try setMetadata(key: "analysis_fingerprint", value: fingerprint)
+    func saveAnalysisFingerprint(
+        _ fingerprint: String,
+        shouldCancel: @escaping @Sendable () -> Bool = { false }
+    ) throws {
+        try throwIfCancelled(shouldCancel)
+        try withConnection { database in
+            try transaction(database) {
+                try throwIfCancelled(shouldCancel)
+                try setMetadataLocked(key: "analysis_fingerprint", value: fingerprint, database: database)
+                try throwIfCancelled(shouldCancel)
+            }
+        }
     }
 
     func checkpoints(for paths: [String]) throws -> [String: SkillFileCheckpoint] {
@@ -66,7 +76,8 @@ final class SkillObservationStore: @unchecked Sendable {
             let statement = try prepare(
                 """
                 select path, inode, size, modified_at_nanoseconds, processed_offset,
-                       last_analyzed_ms, status, discarding_oversized_row, cursor_state_json
+                       last_analyzed_ms, status, discarding_oversized_row, cursor_state_json,
+                       oversized_row_classification
                 from skill_scan_files where path = ?;
                 """,
                 database: database
@@ -87,10 +98,15 @@ final class SkillObservationStore: @unchecked Sendable {
         }
     }
 
-    func removeDerivedData(for paths: [String]) throws {
+    func removeDerivedData(
+        for paths: [String],
+        shouldCancel: @escaping @Sendable () -> Bool = { false }
+    ) throws {
         guard !paths.isEmpty else { return }
+        try throwIfCancelled(shouldCancel)
         try withConnection { database in
             try transaction(database) {
+                try throwIfCancelled(shouldCancel)
                 let observationDelete = try prepare(
                     "delete from skill_observations where source_file_path = ?;",
                     database: database
@@ -102,21 +118,26 @@ final class SkillObservationStore: @unchecked Sendable {
                 )
                 defer { sqlite3_finalize(checkpointDelete) }
                 for path in Set(paths) {
+                    try throwIfCancelled(shouldCancel)
                     try executeBoundText(observationDelete, value: path, database: database)
                     try executeBoundText(checkpointDelete, value: path, database: database)
                 }
+                try throwIfCancelled(shouldCancel)
             }
         }
     }
 
     func persist(
         _ observations: [SkillObservationRecord],
-        checkpoint: SkillFileCheckpoint
+        checkpoint: SkillFileCheckpoint,
+        shouldCancel: @escaping @Sendable () -> Bool = { false }
     ) throws {
+        try throwIfCancelled(shouldCancel)
         let cursorData = try JSONEncoder().encode(checkpoint.cursorState)
         let cursorJSON = String(decoding: cursorData, as: UTF8.self)
         try withConnection { database in
             try transaction(database) {
+                try throwIfCancelled(shouldCancel)
                 let observationStatement = try prepare(
                     """
                     insert or ignore into skill_observations(
@@ -128,7 +149,10 @@ final class SkillObservationStore: @unchecked Sendable {
                     database: database
                 )
                 defer { sqlite3_finalize(observationStatement) }
-                for observation in observations {
+                for (index, observation) in observations.enumerated() {
+                    if index.isMultiple(of: 128) {
+                        try throwIfCancelled(shouldCancel)
+                    }
                     sqlite3_reset(observationStatement)
                     sqlite3_clear_bindings(observationStatement)
                     try bind(observation.sessionID, to: observationStatement, at: 1, database: database)
@@ -154,12 +178,14 @@ final class SkillObservationStore: @unchecked Sendable {
                     }
                 }
 
+                try throwIfCancelled(shouldCancel)
                 let checkpointStatement = try prepare(
                     """
                     insert into skill_scan_files(
                       path, inode, size, modified_at_nanoseconds, processed_offset,
-                      last_analyzed_ms, status, discarding_oversized_row, cursor_state_json
-                    ) values(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                      last_analyzed_ms, status, discarding_oversized_row, cursor_state_json,
+                      oversized_row_classification
+                    ) values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     on conflict(path) do update set
                       inode = excluded.inode,
                       size = excluded.size,
@@ -168,7 +194,8 @@ final class SkillObservationStore: @unchecked Sendable {
                       last_analyzed_ms = excluded.last_analyzed_ms,
                       status = excluded.status,
                       discarding_oversized_row = excluded.discarding_oversized_row,
-                      cursor_state_json = excluded.cursor_state_json;
+                      cursor_state_json = excluded.cursor_state_json,
+                      oversized_row_classification = excluded.oversized_row_classification;
                     """,
                     database: database
                 )
@@ -182,56 +209,72 @@ final class SkillObservationStore: @unchecked Sendable {
                 try bind(checkpoint.status.rawValue, to: checkpointStatement, at: 7, database: database)
                 sqlite3_bind_int(checkpointStatement, 8, checkpoint.discardingOversizedRow ? 1 : 0)
                 try bind(cursorJSON, to: checkpointStatement, at: 9, database: database)
+                try bind(
+                    checkpoint.oversizedRowClassification?.rawValue,
+                    to: checkpointStatement,
+                    at: 10,
+                    database: database
+                )
                 guard sqlite3_step(checkpointStatement) == SQLITE_DONE else {
                     throw sqliteError(database)
                 }
+                try throwIfCancelled(shouldCancel)
             }
         }
     }
 
-    func recordRun(_ performance: SkillAnalysisPerformance, quality: SkillInsightsQuality) throws {
+    func recordRun(
+        _ performance: SkillAnalysisPerformance,
+        quality: SkillInsightsQuality,
+        shouldCancel: @escaping @Sendable () -> Bool = { false }
+    ) throws {
+        try throwIfCancelled(shouldCancel)
         guard let completedAt = performance.lastCompletedAt else {
             throw SkillObservationStoreError.unavailable
         }
         try withConnection { database in
-            let statement = try prepare(
-                """
-                insert into skill_scan_runs(
-                  completed_at_ms, quality, candidate_files, analyzed_files, unchanged_files,
-                  pending_files, analyzed_lines, parsed_rows, filtered_rows, malformed_lines,
-                  skipped_oversized_rows, skipped_irrelevant_oversized_rows, partial_files,
-                  analyzed_bytes, boundary_probe_bytes, cpu_ms, disk_read_bytes,
-                  disk_write_bytes, peak_physical_footprint_bytes, database_duration_ms,
-                  resource_metrics_available, was_deferred, duration_ms, analyzer_version, model_tokens
-                ) values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0);
-                """,
-                database: database
-            )
-            defer { sqlite3_finalize(statement) }
-            sqlite3_bind_int64(statement, 1, milliseconds(completedAt))
-            try bind(quality.rawValue, to: statement, at: 2, database: database)
-            let values = [
-                performance.candidateFiles, performance.analyzedFiles, performance.unchangedFiles,
-                performance.pendingFiles, performance.analyzedLines, performance.parsedRows,
-                performance.filteredRows, performance.malformedLines, performance.skippedOversizedRows,
-                performance.skippedIrrelevantOversizedRows, performance.partialFiles
-            ]
-            for (index, value) in values.enumerated() {
-                sqlite3_bind_int64(statement, Int32(index + 3), Int64(value))
-            }
-            sqlite3_bind_int64(statement, 14, Int64(clamping: performance.analyzedBytes))
-            sqlite3_bind_int64(statement, 15, Int64(clamping: performance.boundaryProbeBytes))
-            sqlite3_bind_int64(statement, 16, Int64(performance.cpuMilliseconds))
-            sqlite3_bind_int64(statement, 17, Int64(clamping: performance.diskReadBytes))
-            sqlite3_bind_int64(statement, 18, Int64(clamping: performance.diskWriteBytes))
-            sqlite3_bind_int64(statement, 19, Int64(clamping: performance.peakPhysicalFootprintBytes))
-            sqlite3_bind_int64(statement, 20, Int64(performance.databaseDurationMilliseconds))
-            sqlite3_bind_int(statement, 21, performance.resourceMetricsAvailable ? 1 : 0)
-            sqlite3_bind_int(statement, 22, performance.wasDeferred ? 1 : 0)
-            sqlite3_bind_int64(statement, 23, Int64(performance.durationMilliseconds))
-            sqlite3_bind_int64(statement, 24, Int64(performance.analyzerVersion))
-            guard sqlite3_step(statement) == SQLITE_DONE else {
-                throw sqliteError(database)
+            try transaction(database) {
+                try throwIfCancelled(shouldCancel)
+                let statement = try prepare(
+                    """
+                    insert into skill_scan_runs(
+                      completed_at_ms, quality, candidate_files, analyzed_files, unchanged_files,
+                      pending_files, analyzed_lines, parsed_rows, filtered_rows, malformed_lines,
+                      skipped_oversized_rows, skipped_irrelevant_oversized_rows, partial_files,
+                      analyzed_bytes, boundary_probe_bytes, cpu_ms, disk_read_bytes,
+                      disk_write_bytes, peak_physical_footprint_bytes, database_duration_ms,
+                      resource_metrics_available, was_deferred, duration_ms, analyzer_version, model_tokens
+                    ) values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0);
+                    """,
+                    database: database
+                )
+                defer { sqlite3_finalize(statement) }
+                sqlite3_bind_int64(statement, 1, milliseconds(completedAt))
+                try bind(quality.rawValue, to: statement, at: 2, database: database)
+                let values = [
+                    performance.candidateFiles, performance.analyzedFiles, performance.unchangedFiles,
+                    performance.pendingFiles, performance.analyzedLines, performance.parsedRows,
+                    performance.filteredRows, performance.malformedLines, performance.skippedOversizedRows,
+                    performance.skippedIrrelevantOversizedRows, performance.partialFiles
+                ]
+                for (index, value) in values.enumerated() {
+                    sqlite3_bind_int64(statement, Int32(index + 3), Int64(value))
+                }
+                sqlite3_bind_int64(statement, 14, Int64(clamping: performance.analyzedBytes))
+                sqlite3_bind_int64(statement, 15, Int64(clamping: performance.boundaryProbeBytes))
+                sqlite3_bind_int64(statement, 16, Int64(performance.cpuMilliseconds))
+                sqlite3_bind_int64(statement, 17, Int64(clamping: performance.diskReadBytes))
+                sqlite3_bind_int64(statement, 18, Int64(clamping: performance.diskWriteBytes))
+                sqlite3_bind_int64(statement, 19, Int64(clamping: performance.peakPhysicalFootprintBytes))
+                sqlite3_bind_int64(statement, 20, Int64(performance.databaseDurationMilliseconds))
+                sqlite3_bind_int(statement, 21, performance.resourceMetricsAvailable ? 1 : 0)
+                sqlite3_bind_int(statement, 22, performance.wasDeferred ? 1 : 0)
+                sqlite3_bind_int64(statement, 23, Int64(performance.durationMilliseconds))
+                sqlite3_bind_int64(statement, 24, Int64(performance.analyzerVersion))
+                guard sqlite3_step(statement) == SQLITE_DONE else {
+                    throw sqliteError(database)
+                }
+                try throwIfCancelled(shouldCancel)
             }
         }
     }
@@ -436,9 +479,14 @@ final class SkillObservationStore: @unchecked Sendable {
         return max(now, last.addingTimeInterval(Self.automaticInterval))
     }
 
-    func markAutomaticRun(at date: Date) throws {
+    func markAutomaticRun(
+        at date: Date,
+        shouldCancel: @escaping @Sendable () -> Bool = { false }
+    ) throws {
+        try throwIfCancelled(shouldCancel)
         try withConnection { database in
             try transaction(database) {
+                try throwIfCancelled(shouldCancel)
                 try setMetadataLocked(
                     key: "last_automatic_run_ms",
                     value: String(milliseconds(date)),
@@ -446,22 +494,35 @@ final class SkillObservationStore: @unchecked Sendable {
                 )
                 try setMetadataLocked(key: "last_automatic_deferred_ms", value: "", database: database)
                 try setMetadataLocked(key: "last_automatic_deferred_reason", value: "", database: database)
+                try throwIfCancelled(shouldCancel)
             }
         }
     }
 
-    func markAutomaticDeferral(at date: Date, reason: String) throws {
+    func markAutomaticDeferral(
+        at date: Date,
+        reason: String,
+        shouldCancel: @escaping @Sendable () -> Bool = { false }
+    ) throws {
+        try throwIfCancelled(shouldCancel)
         try withConnection { database in
             try transaction(database) {
+                try throwIfCancelled(shouldCancel)
                 let stamp = String(milliseconds(date))
                 try setMetadataLocked(key: "last_automatic_run_ms", value: stamp, database: database)
                 try setMetadataLocked(key: "last_automatic_deferred_ms", value: stamp, database: database)
                 try setMetadataLocked(key: "last_automatic_deferred_reason", value: reason, database: database)
+                try throwIfCancelled(shouldCancel)
             }
         }
     }
 
-    func enforceRetention(now: Date, retentionDays: Int = 30) throws {
+    func enforceRetention(
+        now: Date,
+        retentionDays: Int = 30,
+        shouldCancel: @escaping @Sendable () -> Bool = { false }
+    ) throws {
+        try throwIfCancelled(shouldCancel)
         if let last = metadataDate(for: "last_retention_ms"),
            now.timeIntervalSince(last) < Self.automaticInterval {
             return
@@ -469,14 +530,19 @@ final class SkillObservationStore: @unchecked Sendable {
         let cutoff = milliseconds(now.addingTimeInterval(-TimeInterval(retentionDays * 24 * 60 * 60)))
         try withConnection { database in
             try transaction(database) {
+                try throwIfCancelled(shouldCancel)
                 try exec("delete from skill_observations where observed_at_ms < \(cutoff);", database: database)
+                try throwIfCancelled(shouldCancel)
                 try exec("delete from skill_scan_runs where completed_at_ms < \(cutoff);", database: database)
+                try throwIfCancelled(shouldCancel)
                 try exec("delete from skill_scan_files where last_analyzed_ms < \(cutoff);", database: database)
+                try throwIfCancelled(shouldCancel)
                 try setMetadataLocked(
                     key: "last_retention_ms",
                     value: String(milliseconds(now)),
                     database: database
                 )
+                try throwIfCancelled(shouldCancel)
             }
         }
     }
@@ -611,12 +677,6 @@ final class SkillObservationStore: @unchecked Sendable {
         }
     }
 
-    private func setMetadata(key: String, value: String) throws {
-        try withConnection { database in
-            try setMetadataLocked(key: key, value: value, database: database)
-        }
-    }
-
     private func setMetadataLocked(key: String, value: String, database: OpaquePointer) throws {
         let statement = try prepare(
             """
@@ -629,6 +689,12 @@ final class SkillObservationStore: @unchecked Sendable {
         try bind(key, to: statement, at: 1, database: database)
         try bind(value, to: statement, at: 2, database: database)
         guard sqlite3_step(statement) == SQLITE_DONE else { throw sqliteError(database) }
+    }
+
+    private func throwIfCancelled(_ shouldCancel: @Sendable () -> Bool) throws {
+        if shouldCancel() {
+            throw SkillObservationStoreError.cancelled
+        }
     }
 
     private func withConnection<T>(_ operation: (OpaquePointer) throws -> T) throws -> T {
@@ -682,6 +748,13 @@ final class SkillObservationStore: @unchecked Sendable {
         let existing = try tableColumns("skill_scan_runs", database: database)
         for (name, definition) in columns where !existing.contains(name) {
             try exec("alter table skill_scan_runs add column \(name) \(definition);", database: database)
+        }
+        let scanFileColumns = try tableColumns("skill_scan_files", database: database)
+        if !scanFileColumns.contains("oversized_row_classification") {
+            try exec(
+                "alter table skill_scan_files add column oversized_row_classification text;",
+                database: database
+            )
         }
 
         if try metadataValueLocked(for: "neutral_evidence_migration_v1", database: database) == nil {
@@ -810,6 +883,9 @@ final class SkillObservationStore: @unchecked Sendable {
               let cursor = try? JSONDecoder().decode(SkillAnalysisCursorState.self, from: cursorData) else {
             return nil
         }
+        let discardingOversizedRow = sqlite3_column_int(statement, 7) != 0
+        let storedOversizedClassification = text(statement, 9)
+            .flatMap(SkillJSONLRowClassification.init(rawValue:))
         return SkillFileCheckpoint(
             path: path,
             inode: unsigned(statement, 1),
@@ -818,7 +894,10 @@ final class SkillObservationStore: @unchecked Sendable {
             processedOffset: unsigned(statement, 4),
             lastAnalyzedAt: Date(timeIntervalSince1970: Double(sqlite3_column_int64(statement, 5)) / 1_000),
             status: status,
-            discardingOversizedRow: sqlite3_column_int(statement, 7) != 0,
+            discardingOversizedRow: discardingOversizedRow,
+            oversizedRowClassification: discardingOversizedRow
+                ? storedOversizedClassification ?? .parse
+                : nil,
             cursorState: cursor
         )
     }
@@ -860,7 +939,8 @@ final class SkillObservationStore: @unchecked Sendable {
           last_analyzed_ms integer not null,
           status text not null,
           discarding_oversized_row integer not null default 0,
-          cursor_state_json text not null
+          cursor_state_json text not null,
+          oversized_row_classification text
         );
         create table if not exists skill_observations(
           id integer primary key autoincrement,
@@ -918,6 +998,7 @@ final class SkillObservationStore: @unchecked Sendable {
 }
 
 enum SkillObservationStoreError: Error {
+    case cancelled
     case unavailable
     case sqlite(String)
 }

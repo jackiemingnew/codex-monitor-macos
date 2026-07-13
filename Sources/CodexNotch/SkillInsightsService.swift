@@ -52,7 +52,13 @@ final class SkillInsightsService: @unchecked Sendable {
         now: Date = Date(),
         shouldCancel: @escaping @Sendable () -> Bool = { false }
     ) -> SkillInsightsSnapshot {
+        guard !shouldCancel() else {
+            return .empty
+        }
         if automatic, !observationStore.shouldRunAutomatically(now: now) {
+            guard !shouldCancel() else {
+                return .empty
+            }
             return currentSnapshot(now: now)
         }
         if automatic {
@@ -62,8 +68,17 @@ final class SkillInsightsService: @unchecked Sendable {
         }
 
         if automatic, let reason = automaticDeferralReason() {
+            guard !shouldCancel() else {
+                return .empty
+            }
             do {
-                try observationStore.markAutomaticDeferral(at: now, reason: reason)
+                try observationStore.markAutomaticDeferral(
+                    at: now,
+                    reason: reason,
+                    shouldCancel: shouldCancel
+                )
+            } catch SkillObservationStoreError.cancelled {
+                return .empty
             } catch {
                 return observationStore.buildSnapshot(
                     catalog: cachedCatalogForDeferredAttempt(now: now),
@@ -80,29 +95,54 @@ final class SkillInsightsService: @unchecked Sendable {
 
         var scheduleDiagnostics: [String] = []
         if automatic {
+            guard !shouldCancel() else {
+                return .empty
+            }
             do {
-                try observationStore.markAutomaticRun(at: now)
+                try observationStore.markAutomaticRun(at: now, shouldCancel: shouldCancel)
+            } catch SkillObservationStoreError.cancelled {
+                return .empty
             } catch {
                 scheduleDiagnostics.append("The weekly automatic Skill schedule marker could not be persisted.")
             }
         }
         let catalog = catalog(now: now, refresh: true)
+        guard !shouldCancel() else {
+            return .empty
+        }
         let outcome = analyzer.analyze(
             catalog: catalog,
             now: now,
             force: force,
             shouldCancel: shouldCancel
         )
+        guard !outcome.wasCancelled, !shouldCancel() else {
+            return .empty
+        }
         var diagnostics = outcome.diagnostics + scheduleDiagnostics
         do {
-            try observationStore.recordRun(outcome.performance, quality: outcome.quality)
+            try observationStore.recordRun(
+                outcome.performance,
+                quality: outcome.quality,
+                shouldCancel: shouldCancel
+            )
+        } catch SkillObservationStoreError.cancelled {
+            return .empty
         } catch {
             diagnostics.append("The derived Skill observation database could not persist the completed run.")
         }
+        guard !shouldCancel() else {
+            return .empty
+        }
         do {
-            try observationStore.enforceRetention(now: now)
+            try observationStore.enforceRetention(now: now, shouldCancel: shouldCancel)
+        } catch SkillObservationStoreError.cancelled {
+            return .empty
         } catch {
             diagnostics.append("The weekly Skill observation retention cleanup could not complete.")
+        }
+        guard !shouldCancel() else {
+            return .empty
         }
         return observationStore.buildSnapshot(
             catalog: catalog,

@@ -130,6 +130,29 @@ final class AppServerLoaderSequence: @unchecked Sendable {
     }
 }
 
+final class SkillCancellationProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private let cancelOnCall: Int
+    private var calls = 0
+
+    init(cancelOnCall: Int) {
+        self.cancelOnCall = cancelOnCall
+    }
+
+    func shouldCancel() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        calls += 1
+        return calls >= cancelOnCall
+    }
+
+    var callCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return calls
+    }
+}
+
 let runner = TestRunner()
 let repositoryRoot = URL(fileURLWithPath: #filePath)
     .deletingLastPathComponent()
@@ -7032,6 +7055,247 @@ runner.checkEqual(
     0,
     "a deterministically irrelevant oversized row should not count as an unknown relevant loss"
 )
+
+let splitIrrelevantOversizedURL = skillInsightsRoot.appendingPathComponent("split-irrelevant-oversized.jsonl")
+let splitIrrelevantOversizedLine = """
+{"timestamp":"\(skillTimestamp(skillNow))","type":"response_item","payload":{"type":"reasoning","text":"\(String(repeating: "y", count: 24 * 1024))"}}
+
+"""
+let splitIrrelevantOversizedBytes = UInt64(Data(splitIrrelevantOversizedLine.utf8).count)
+try splitIrrelevantOversizedLine.write(
+    to: splitIrrelevantOversizedURL,
+    atomically: true,
+    encoding: .utf8
+)
+let splitIrrelevantFirstHandle = try FileHandle(forReadingFrom: splitIrrelevantOversizedURL)
+let splitIrrelevantFirstResult = try SkillJSONLReader.read(
+    handle: splitIrrelevantFirstHandle,
+    startOffset: 0,
+    fileSize: splitIrrelevantOversizedBytes,
+    byteBudget: 12 * 1024,
+    maxRowBytes: 8 * 1024,
+    initialDiscardingOversizedRow: false,
+    wallDeadlineUptime: ProcessInfo.processInfo.systemUptime + 5,
+    cpuDeadlineNanoseconds: SkillProcessResourceSnapshot.processCPUNanoseconds() + 5_000_000_000,
+    shouldCancel: { false },
+    process: { _, _ in }
+)
+try splitIrrelevantFirstHandle.close()
+runner.check(
+    splitIrrelevantFirstResult.discardingOversizedRow,
+    "a split oversized row should checkpoint that the row is still being discarded"
+)
+runner.checkEqual(
+    splitIrrelevantFirstResult.oversizedRowClassification,
+    .irrelevant,
+    "a split oversized row should checkpoint its deterministic classification"
+)
+let splitIrrelevantSecondHandle = try FileHandle(forReadingFrom: splitIrrelevantOversizedURL)
+let splitIrrelevantSecondResult = try SkillJSONLReader.read(
+    handle: splitIrrelevantSecondHandle,
+    startOffset: splitIrrelevantFirstResult.processedOffset,
+    fileSize: splitIrrelevantOversizedBytes,
+    byteBudget: splitIrrelevantOversizedBytes - splitIrrelevantFirstResult.processedOffset,
+    maxRowBytes: 8 * 1024,
+    initialDiscardingOversizedRow: splitIrrelevantFirstResult.discardingOversizedRow,
+    initialOversizedRowClassification: splitIrrelevantFirstResult.oversizedRowClassification,
+    wallDeadlineUptime: ProcessInfo.processInfo.systemUptime + 5,
+    cpuDeadlineNanoseconds: SkillProcessResourceSnapshot.processCPUNanoseconds() + 5_000_000_000,
+    shouldCancel: { false },
+    process: { _, _ in }
+)
+try splitIrrelevantSecondHandle.close()
+runner.checkEqual(
+    splitIrrelevantSecondResult.skippedIrrelevantOversizedRows,
+    1,
+    "an irrelevant oversized row should retain its classification across checkpoint resume"
+)
+runner.checkEqual(
+    splitIrrelevantSecondResult.skippedOversizedRows,
+    0,
+    "resuming an irrelevant oversized row must not degrade it into unknown relevant loss"
+)
+
+let classificationStoreURL = skillInsightsRoot.appendingPathComponent("classification-checkpoint.sqlite")
+let classificationStore = SkillObservationStore(databaseURL: classificationStoreURL)
+let classificationCheckpointPath = "/synthetic/split-oversized.jsonl"
+let classificationCheckpoint = SkillFileCheckpoint(
+    path: classificationCheckpointPath,
+    inode: 1,
+    size: splitIrrelevantOversizedBytes,
+    modifiedAtNanoseconds: 1,
+    processedOffset: splitIrrelevantFirstResult.processedOffset,
+    lastAnalyzedAt: skillNow,
+    status: .partial,
+    discardingOversizedRow: true,
+    oversizedRowClassification: splitIrrelevantFirstResult.oversizedRowClassification,
+    cursorState: .empty(sessionID: "classification-session")
+)
+try classificationStore.persist([], checkpoint: classificationCheckpoint)
+let persistedClassificationCheckpoint = try classificationStore.checkpoints(
+    for: [classificationCheckpointPath]
+)[classificationCheckpointPath]
+runner.checkEqual(
+    persistedClassificationCheckpoint?.oversizedRowClassification,
+    .irrelevant,
+    "the derived SQLite checkpoint should round-trip the oversized row classification"
+)
+
+let cancelledTransactionStoreURL = skillInsightsRoot.appendingPathComponent("cancelled-transaction.sqlite")
+let cancelledTransactionStore = SkillObservationStore(databaseURL: cancelledTransactionStoreURL)
+let cancelledTransactionProbe = SkillCancellationProbe(cancelOnCall: 3)
+var cancelledTransactionObserved = false
+do {
+    try cancelledTransactionStore.persist(
+        [],
+        checkpoint: classificationCheckpoint,
+        shouldCancel: cancelledTransactionProbe.shouldCancel
+    )
+} catch SkillObservationStoreError.cancelled {
+    cancelledTransactionObserved = true
+}
+runner.check(
+    cancelledTransactionObserved,
+    "cancellation during a derived SQLite transaction should surface as cancellation"
+)
+let cancelledTransactionCheckpointCount = try Shell.sqliteJSON(
+    database: cancelledTransactionStoreURL.path,
+    query: "select count(*) as count from skill_scan_files;",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count
+runner.checkEqual(
+    cancelledTransactionCheckpointCount,
+    0,
+    "cancellation during persistence should roll back the checkpoint transaction"
+)
+
+let legacyCheckpointStoreURL = skillInsightsRoot.appendingPathComponent("legacy-checkpoint.sqlite")
+let legacyCheckpointPath = "/synthetic/legacy-oversized.jsonl"
+let legacyCursorJSON = String(
+    decoding: try JSONEncoder().encode(SkillAnalysisCursorState.empty(sessionID: "legacy-checkpoint-session")),
+    as: UTF8.self
+)
+_ = try Shell.run("/usr/bin/sqlite3", [
+    legacyCheckpointStoreURL.path,
+    """
+    create table skill_scan_files(
+      path text primary key,
+      inode integer not null,
+      size integer not null,
+      modified_at_nanoseconds integer not null,
+      processed_offset integer not null,
+      last_analyzed_ms integer not null,
+      status text not null,
+      discarding_oversized_row integer not null default 0,
+      cursor_state_json text not null
+    );
+    insert into skill_scan_files(
+      path, inode, size, modified_at_nanoseconds, processed_offset,
+      last_analyzed_ms, status, discarding_oversized_row, cursor_state_json
+    ) values(
+      '\(legacyCheckpointPath)', 1, \(splitIrrelevantOversizedBytes), 1,
+      \(splitIrrelevantFirstResult.processedOffset), \(Int64(skillNow.timeIntervalSince1970 * 1_000)),
+      'PARTIAL', 1, '\(legacyCursorJSON)'
+    );
+    """
+])
+let legacyCheckpointStore = SkillObservationStore(databaseURL: legacyCheckpointStoreURL)
+let migratedLegacyCheckpoint = try legacyCheckpointStore.checkpoints(
+    for: [legacyCheckpointPath]
+)[legacyCheckpointPath]
+runner.checkEqual(
+    migratedLegacyCheckpoint?.oversizedRowClassification,
+    .parse,
+    "a legacy in-progress oversized row should migrate with conservative unknown classification"
+)
+
+let preCancelledDatabaseURL = skillInsightsRoot.appendingPathComponent("pre-cancelled-observations.sqlite")
+let preCancelledService = SkillInsightsService(
+    codexDirectory: skillCodexHome,
+    configURL: skillConfigURL,
+    skillRoots: [skillRoot],
+    databaseURL: preCancelledDatabaseURL
+)
+_ = preCancelledService.analyzeRecentWeek(
+    force: false,
+    automatic: false,
+    now: skillNow,
+    shouldCancel: { true }
+)
+runner.check(
+    !FileManager.default.fileExists(atPath: preCancelledDatabaseURL.path),
+    "a pre-cancelled analysis should not open or create its derived SQLite store"
+)
+
+let cancelledHome = skillInsightsRoot.appendingPathComponent("cancelled-home", isDirectory: true)
+let cancelledSessions = cancelledHome.appendingPathComponent("sessions", isDirectory: true)
+try FileManager.default.createDirectory(at: cancelledSessions, withIntermediateDirectories: true)
+let cancelledSessionID = "019f5d70-0000-7000-8000-000000000003"
+let cancelledRolloutURL = cancelledSessions.appendingPathComponent("rollout-cancelled-\(cancelledSessionID).jsonl")
+let cancelledRollout = skillJSONLine([
+    "timestamp": skillTimestamp(skillNow),
+    "type": "response_item",
+    "payload": ["type": "reasoning", "text": String(repeating: "c", count: 2 * 1024 * 1024)]
+])
+try cancelledRollout.write(to: cancelledRolloutURL, atomically: true, encoding: .utf8)
+let cancelledStatePath = cancelledHome.appendingPathComponent("state_5.sqlite").path
+_ = try Shell.run("/usr/bin/sqlite3", [
+    cancelledStatePath,
+    """
+    create table threads(
+      id text, title text, tokens_used integer, rollout_path text,
+      created_at integer, updated_at integer, archived integer default 0
+    );
+    insert into threads(id, title, tokens_used, rollout_path, created_at, updated_at, archived)
+    values(
+      '\(cancelledSessionID)', 'Cancelled fixture', 0, '\(cancelledRolloutURL.path)',
+      \(Int(skillNow.timeIntervalSince1970)), \(Int(skillNow.timeIntervalSince1970)), 0
+    );
+    """
+])
+let cancelledDatabaseURL = skillInsightsRoot.appendingPathComponent("cancelled-observations.sqlite")
+let cancelledService = SkillInsightsService(
+    codexDirectory: cancelledHome,
+    configURL: skillConfigURL,
+    skillRoots: [skillRoot],
+    databaseURL: cancelledDatabaseURL,
+    maxRowBytes: 8 * 1024,
+    maxBytesPerFilePerRun: 4 * 1024 * 1024,
+    maxBytesPerRun: 4 * 1024 * 1024
+)
+let cancellationProbe = SkillCancellationProbe(cancelOnCall: 8)
+_ = cancelledService.analyzeRecentWeek(
+    force: false,
+    automatic: false,
+    now: skillNow,
+    shouldCancel: cancellationProbe.shouldCancel
+)
+runner.check(
+    cancellationProbe.callCount >= 8,
+    "the cancellation fixture should interrupt an analysis that has already started"
+)
+let cancelledRunCount = try Shell.sqliteJSON(
+    database: cancelledDatabaseURL.path,
+    query: "select count(*) as count from skill_scan_runs;",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count
+let cancelledCheckpointCount = try Shell.sqliteJSON(
+    database: cancelledDatabaseURL.path,
+    query: "select count(*) as count from skill_scan_files;",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count
+let cancelledFingerprintCount = try Shell.sqliteJSON(
+    database: cancelledDatabaseURL.path,
+    query: "select count(*) as count from skill_metadata where key='analysis_fingerprint';",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count
+runner.checkEqual(cancelledRunCount, 0, "a cancelled analysis must not persist a completed scan run")
+runner.checkEqual(cancelledCheckpointCount, 0, "a cancelled analysis must not advance file checkpoints")
+runner.checkEqual(cancelledFingerprintCount, 0, "a cancelled analysis must not persist its analysis fingerprint")
 
 let pendingHome = skillInsightsRoot.appendingPathComponent("pending-home", isDirectory: true)
 let pendingSessions = pendingHome.appendingPathComponent("sessions", isDirectory: true)
