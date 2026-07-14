@@ -9,50 +9,80 @@ final class BalanceMonitorViewModel: ObservableObject {
     let source: BalanceMonitorSource
 
     private let settings: CodexNotchSettings
+    private let refreshCoordinator = RefreshCoordinator<RefreshLane>()
     private var refreshTimer: Timer?
     private var settingsTimer: Timer?
-    private var refreshTask: Task<Void, Never>?
     private var cancellables: Set<AnyCancellable> = []
-    private var pendingRefresh = false
     private var consecutiveFailures = 0
-    private var refreshGeneration = 0
     private var observedSettings: BalanceMonitorSettingsSnapshot?
     private var loadedSettings: BalanceMonitorSettingsSnapshot?
+    private var isSourceVisible = false
+    private var lastSuccessfulAt: Date?
 
     init(source: BalanceMonitorSource, settings: CodexNotchSettings) {
         self.source = source
         self.settings = settings
         self.snapshot = .disabled(source: source)
         observeSettings()
-        refreshSnapshot()
+        observeRefreshEnvironment()
+        refreshSnapshot(reason: .startup)
     }
 
     func refreshNow() {
         consecutiveFailures = 0
-        refreshSnapshot(cancelInFlight: true)
+        refreshSnapshot(reason: .manual, mode: .replace)
     }
 
     func refresh() {
-        refreshSnapshot()
+        refreshSnapshot(reason: .timer)
     }
 
-    private func refreshSnapshot(cancelInFlight: Bool = false) {
+    func refreshWhenPresented(now: Date = Date()) {
+        let freshness = AdaptiveRefreshPolicy.freshness(
+            lastSuccessfulAt: lastSuccessfulAt,
+            now: now,
+            maximumAge: max(1, settings.balanceRefreshInterval(for: source))
+        )
+        if freshness.requiresRefresh {
+            refreshSnapshot(reason: .presentation)
+        } else {
+            scheduleRefresh()
+        }
+    }
+
+    func setSourceVisible(_ visible: Bool) {
+        guard isSourceVisible != visible else {
+            return
+        }
+        isSourceVisible = visible
         refreshTimer?.invalidate()
         refreshTimer = nil
-
-        if cancelInFlight {
-            invalidateInFlightRefresh()
+        if settings.balanceMonitorEnabled(for: source),
+           !refreshCoordinator.isInFlight(refreshLane),
+           snapshot.panelState != .disabled,
+           snapshot.panelState != .notConfigured {
+            scheduleRefresh()
         }
+    }
+
+    private func refreshSnapshot(
+        reason: RefreshReason,
+        mode: RefreshRequestMode = .coalesce
+    ) {
+        refreshTimer?.invalidate()
+        refreshTimer = nil
 
         guard settings.balanceMonitorEnabled(for: source) else {
             invalidateInFlightRefresh()
             loadedSettings = nil
+            lastSuccessfulAt = nil
             snapshot = .disabled(source: source)
             return
         }
         guard settings.loadSecretsIfNeeded() else {
             invalidateInFlightRefresh()
             loadedSettings = nil
+            lastSuccessfulAt = nil
             snapshot = BalanceMonitorSnapshot(
                 source: source,
                 panelState: .error,
@@ -69,19 +99,22 @@ final class BalanceMonitorViewModel: ObservableObject {
               !targets.isEmpty else {
             invalidateInFlightRefresh()
             loadedSettings = nil
+            lastSuccessfulAt = nil
             snapshot = .notConfigured(source: source)
             return
         }
 
-        guard !isRefreshing else {
-            pendingRefresh = true
+        let lane = refreshLane
+        let start = refreshCoordinator.begin(lane, reason: reason, mode: mode)
+        guard case let .started(token) = start else {
             return
         }
 
         isRefreshing = true
-        refreshGeneration += 1
-        let generation = refreshGeneration
         let canPreserveSnapshot = loadedSettings == settingsSnapshot
+        if !canPreserveSnapshot {
+            lastSuccessfulAt = nil
+        }
         if snapshot.accounts.isEmpty || !canPreserveSnapshot {
             snapshot = BalanceMonitorSnapshot(
                 source: source,
@@ -95,61 +128,66 @@ final class BalanceMonitorViewModel: ObservableObject {
         let source = source
         let totalTimeout = max(8, (targets.compactMap(\.configuration?.timeout).max() ?? 6) * 3 + 3)
 
-        refreshTask = Task.detached(priority: .utility) {
+        let task = Task.detached(priority: .utility) {
             do {
                 let nextSnapshot = try await Self.withTimeout(seconds: totalTimeout) {
                     await Self.fetchCombinedSnapshot(source: source, targets: targets)
                 }
                 await MainActor.run {
-                    guard generation == self.refreshGeneration else {
+                    let completion = self.refreshCoordinator.complete(token)
+                    self.updateRefreshingState()
+                    guard completion.isCurrent else {
                         return
                     }
                     guard self.currentSettingsSnapshot() == settingsSnapshot,
                           self.settings.balanceMonitorEnabled(for: self.source) else {
-                        self.finishRefreshAndRunPending()
                         if !self.settings.balanceMonitorEnabled(for: self.source) {
                             self.snapshot = .disabled(source: self.source)
                         }
+                        self.runPendingRefreshIfNeeded(completion)
                         return
                     }
-                    self.consecutiveFailures = nextSnapshot.accounts.allSatisfy { $0.state == .error }
-                        ? self.consecutiveFailures + 1
-                        : 0
-                    self.isRefreshing = false
-                    self.refreshTask = nil
+                    let hasSuccessfulAccount = nextSnapshot.accounts.contains { $0.state != .error }
+                    self.consecutiveFailures = hasSuccessfulAccount
+                        ? 0
+                        : self.consecutiveFailures + 1
                     self.loadedSettings = settingsSnapshot
                     self.snapshot = nextSnapshot
+                    if hasSuccessfulAccount {
+                        self.lastSuccessfulAt = nextSnapshot.lastUpdated
+                    }
                     self.scheduleRefresh()
-                    self.runPendingRefreshIfNeeded()
+                    self.runPendingRefreshIfNeeded(completion)
                 }
             } catch {
                 await MainActor.run {
-                    guard generation == self.refreshGeneration else {
+                    let completion = self.refreshCoordinator.complete(token)
+                    self.updateRefreshingState()
+                    guard completion.isCurrent else {
                         return
                     }
                     guard self.currentSettingsSnapshot() == settingsSnapshot,
                           self.settings.balanceMonitorEnabled(for: self.source) else {
-                        self.finishRefreshAndRunPending()
                         if !self.settings.balanceMonitorEnabled(for: self.source) {
                             self.snapshot = .disabled(source: self.source)
                         }
+                        self.runPendingRefreshIfNeeded(completion)
                         return
                     }
                     self.consecutiveFailures += 1
-                    self.isRefreshing = false
-                    self.refreshTask = nil
                     self.snapshot = BalanceMonitorSnapshot(
                         source: self.source,
                         panelState: .error,
                         accounts: canPreserveSnapshot ? self.snapshot.accounts : [],
                         message: self.localizedMessage(for: error),
-                        lastUpdated: Date()
+                        lastUpdated: canPreserveSnapshot ? self.snapshot.lastUpdated : nil
                     )
                     self.scheduleRefresh()
-                    self.runPendingRefreshIfNeeded()
+                    self.runPendingRefreshIfNeeded(completion)
                 }
             }
         }
+        refreshCoordinator.attach(task, to: token)
     }
 
     private func observeSettings() {
@@ -165,6 +203,19 @@ final class BalanceMonitorViewModel: ObservableObject {
             .store(in: &cancellables)
     }
 
+    private func observeRefreshEnvironment() {
+        Publishers.Merge(
+            NotificationCenter.default.publisher(for: .NSProcessInfoPowerStateDidChange),
+            NotificationCenter.default.publisher(for: ProcessInfo.thermalStateDidChangeNotification)
+        )
+        .sink { [weak self] _ in
+            Task { @MainActor in
+                self?.refreshEnvironmentDidChange()
+            }
+        }
+        .store(in: &cancellables)
+    }
+
     private func settingsMayHaveChanged() {
         let next = BalanceMonitorSettingsSnapshot(source: source, settings: settings)
         guard next != observedSettings else {
@@ -175,7 +226,7 @@ final class BalanceMonitorViewModel: ObservableObject {
         let timer = Timer.scheduledTimer(withTimeInterval: 0.45, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 self?.consecutiveFailures = 0
-                self?.refreshSnapshot(cancelInFlight: true)
+                self?.refreshSnapshot(reason: .settings, mode: .replace)
             }
         }
         timer.tolerance = 0.2
@@ -187,11 +238,24 @@ final class BalanceMonitorViewModel: ObservableObject {
             return
         }
 
+        refreshTimer?.invalidate()
         let base = settings.balanceRefreshInterval(for: source)
-        let interval = BalanceRefreshCadence.refreshInterval(
-            base: base,
+        let decision = AdaptiveRefreshPolicy.remote(
+            adaptiveEnabled: settings.adaptiveRefreshEnabled,
+            isVisible: isSourceVisible,
+            environment: .current,
+            baseInterval: base,
             consecutiveFailures: consecutiveFailures
         )
+        RefreshShadowMetrics.shared.recordSchedule(
+            lane: refreshLane,
+            fixedInterval: BalanceRefreshCadence.refreshInterval(
+                base: base,
+                consecutiveFailures: consecutiveFailures
+            ),
+            candidateInterval: decision.candidateInterval
+        )
+        let interval = decision.interval
         let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 self?.refresh()
@@ -201,26 +265,40 @@ final class BalanceMonitorViewModel: ObservableObject {
         refreshTimer = timer
     }
 
-    private func finishRefreshAndRunPending() {
-        isRefreshing = false
-        refreshTask = nil
-        runPendingRefreshIfNeeded()
-    }
-
     private func invalidateInFlightRefresh() {
-        refreshGeneration += 1
-        refreshTask?.cancel()
-        refreshTask = nil
-        pendingRefresh = false
-        isRefreshing = false
+        refreshCoordinator.invalidate(refreshLane)
+        updateRefreshingState()
     }
 
-    private func runPendingRefreshIfNeeded() {
-        guard pendingRefresh else {
+    private func runPendingRefreshIfNeeded(_ completion: RefreshCompletion) {
+        guard completion.shouldRunPending else {
             return
         }
-        pendingRefresh = false
-        refreshSnapshot()
+        refreshSnapshot(reason: .timer)
+    }
+
+    private var refreshLane: RefreshLane {
+        switch source {
+        case .newAPI:
+            .newAPI
+        case .subAPI:
+            .subAPI
+        }
+    }
+
+    private func updateRefreshingState() {
+        isRefreshing = refreshCoordinator.isInFlight(refreshLane)
+    }
+
+    private func refreshEnvironmentDidChange() {
+        guard settings.adaptiveRefreshEnabled else {
+            return
+        }
+        refreshTimer?.invalidate()
+        refreshTimer = nil
+        if settings.balanceMonitorEnabled(for: source), !refreshCoordinator.isInFlight(refreshLane) {
+            scheduleRefresh()
+        }
     }
 
     private func currentSettingsSnapshot() -> BalanceMonitorSettingsSnapshot {
@@ -427,6 +505,7 @@ private struct BalanceMonitorSettingsSnapshot: Equatable {
     let accounts: [BalanceAccountConfiguration]
     let defaultThresholds: BalanceThresholdConfiguration
     let refreshInterval: TimeInterval
+    let adaptiveRefreshEnabled: Bool
 
     @MainActor
     init(source: BalanceMonitorSource, settings: CodexNotchSettings) {
@@ -435,6 +514,7 @@ private struct BalanceMonitorSettingsSnapshot: Equatable {
         accounts = settings.balanceAccounts(for: source)
         defaultThresholds = settings.balanceDefaultThresholds(for: source)
         refreshInterval = settings.balanceRefreshInterval(for: source)
+        adaptiveRefreshEnabled = settings.adaptiveRefreshEnabled
     }
 }
 

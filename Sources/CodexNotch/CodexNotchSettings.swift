@@ -66,6 +66,7 @@ final class CodexNotchSettings: ObservableObject {
         static let usageRefreshInterval = "usageRefreshInterval"
         static let watcherRefreshInterval = "watcherRefreshInterval"
         static let fileChangeRefreshMinimumGap = "fileChangeRefreshMinimumGap"
+        static let adaptiveRefreshEnabled = "adaptiveRefreshEnabled"
         static let rateLimitSource = "rateLimitSource"
         static let showPeriodUsage = "showPeriodUsage"
         static let showSparkQuota = "showSparkQuota"
@@ -151,6 +152,12 @@ final class CodexNotchSettings: ObservableObject {
     @Published var fileChangeRefreshMinimumGap: TimeInterval {
         didSet {
             normalizeFileChangeRefreshMinimumGap()
+        }
+    }
+
+    @Published var adaptiveRefreshEnabled: Bool {
+        didSet {
+            defaults.set(adaptiveRefreshEnabled, forKey: Keys.adaptiveRefreshEnabled)
         }
     }
 
@@ -487,6 +494,17 @@ final class CodexNotchSettings: ObservableObject {
         self.usageRefreshInterval = Self.clamped(defaults.object(forKey: Keys.usageRefreshInterval) as? TimeInterval ?? 300, min: 15, max: 300)
         self.watcherRefreshInterval = Self.clamped(defaults.object(forKey: Keys.watcherRefreshInterval) as? TimeInterval ?? 180, min: 8, max: 300)
         self.fileChangeRefreshMinimumGap = Self.clamped(defaults.object(forKey: Keys.fileChangeRefreshMinimumGap) as? TimeInterval ?? 15, min: 1, max: 30)
+        let storedAdaptiveRefreshEnabled = defaults.object(forKey: Keys.adaptiveRefreshEnabled) as? Bool
+        let hasExistingInstallation = Self.hasPreAdaptiveInstallationState(defaults: defaults)
+            || (defaults === UserDefaults.standard && Self.hasExistingInstallationArtifacts())
+        let loadedAdaptiveRefreshEnabled = Self.adaptiveRefreshDefault(
+            storedValue: storedAdaptiveRefreshEnabled,
+            hasExistingInstallation: hasExistingInstallation
+        )
+        self.adaptiveRefreshEnabled = loadedAdaptiveRefreshEnabled
+        if storedAdaptiveRefreshEnabled == nil {
+            defaults.set(loadedAdaptiveRefreshEnabled, forKey: Keys.adaptiveRefreshEnabled)
+        }
         self.rateLimitSource = RateLimitSourcePreference(rawValue: defaults.string(forKey: Keys.rateLimitSource) ?? "") ?? .appServerFirst
         self.showPeriodUsage = defaults.object(forKey: Keys.showPeriodUsage) as? Bool ?? true
         self.showSparkQuota = defaults.object(forKey: Keys.showSparkQuota) as? Bool ?? false
@@ -861,6 +879,7 @@ final class CodexNotchSettings: ObservableObject {
         usageRefreshInterval = 300
         watcherRefreshInterval = 180
         fileChangeRefreshMinimumGap = 15
+        adaptiveRefreshEnabled = true
     }
 
     func setOverlayHorizontalPosition(_ value: CGFloat) {
@@ -924,6 +943,45 @@ final class CodexNotchSettings: ObservableObject {
         defaults.set(300, forKey: Keys.usageRefreshInterval)
         defaults.set(180, forKey: Keys.watcherRefreshInterval)
         defaults.set(15, forKey: Keys.fileChangeRefreshMinimumGap)
+    }
+
+    static func adaptiveRefreshDefault(
+        storedValue: Bool?,
+        hasExistingInstallation: Bool
+    ) -> Bool {
+        storedValue ?? !hasExistingInstallation
+    }
+
+    private static func hasPreAdaptiveInstallationState(defaults: UserDefaults) -> Bool {
+        [
+            Keys.activeRefreshInterval,
+            Keys.idleRefreshInterval,
+            Keys.usageRefreshInterval,
+            Keys.watcherRefreshInterval,
+            Keys.fileChangeRefreshMinimumGap,
+            Keys.rateLimitSource,
+            Keys.hudDisplayMode,
+            Keys.notchDisplaySource,
+            Keys.remoteMonitorEnabled,
+            Keys.skillInsightsEnabled
+        ].contains { defaults.object(forKey: $0) != nil }
+    }
+
+    private static func hasExistingInstallationArtifacts() -> Bool {
+        let fileManager = FileManager.default
+        let applicationSupport = fileManager.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support", isDirectory: true)
+        let codexNotchSupport = applicationSupport.appendingPathComponent("CodexNotch", isDirectory: true)
+        let candidates = [
+            codexNotchSupport.appendingPathComponent("usage-deltas.sqlite"),
+            codexNotchSupport.appendingPathComponent("skill-observations.sqlite"),
+            fileManager.homeDirectoryForCurrentUser
+                .appendingPathComponent(".codex/context-guard/usage-deltas.sqlite")
+        ]
+        return candidates.contains { fileManager.fileExists(atPath: $0.path) }
     }
 
     private static func storedTimeInterval(defaults: UserDefaults, key: String) -> TimeInterval? {

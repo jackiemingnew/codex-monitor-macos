@@ -7,48 +7,78 @@ final class RemoteMonitorViewModel: ObservableObject {
     @Published private(set) var isRefreshing = false
 
     private let settings: CodexNotchSettings
+    private let refreshCoordinator = RefreshCoordinator<RefreshLane>()
     private var refreshTimer: Timer?
     private var settingsTimer: Timer?
-    private var refreshTask: Task<Void, Never>?
     private var cancellables: Set<AnyCancellable> = []
-    private var pendingRefresh = false
     private var consecutiveFailures = 0
-    private var refreshGeneration = 0
     private var observedSettings: RemoteMonitorSettingsSnapshot?
     private var loadedSettings: RemoteMonitorSettingsSnapshot?
+    private var isSourceVisible = false
+    private var lastSuccessfulAt: Date?
 
     init(settings: CodexNotchSettings) {
         self.settings = settings
         observeSettings()
-        refreshRemoteSnapshot()
+        observeRefreshEnvironment()
+        refreshRemoteSnapshot(reason: .startup)
     }
 
     func refreshNow() {
         consecutiveFailures = 0
-        refreshRemoteSnapshot(cancelInFlight: true)
+        refreshRemoteSnapshot(reason: .manual, mode: .replace)
     }
 
     func refresh() {
-        refreshRemoteSnapshot()
+        refreshRemoteSnapshot(reason: .timer)
     }
 
-    private func refreshRemoteSnapshot(cancelInFlight: Bool = false) {
+    func refreshWhenPresented(now: Date = Date()) {
+        let freshness = AdaptiveRefreshPolicy.freshness(
+            lastSuccessfulAt: lastSuccessfulAt,
+            now: now,
+            maximumAge: max(1, settings.cliproxyRefreshInterval)
+        )
+        if freshness.requiresRefresh {
+            refreshRemoteSnapshot(reason: .presentation)
+        } else {
+            scheduleStatusRefresh()
+        }
+    }
+
+    func setSourceVisible(_ visible: Bool) {
+        guard isSourceVisible != visible else {
+            return
+        }
+        isSourceVisible = visible
         refreshTimer?.invalidate()
         refreshTimer = nil
-
-        if cancelInFlight {
-            invalidateInFlightRefresh()
+        if !refreshCoordinator.isInFlight(.remoteCodex),
+           settings.remoteMonitorEnabled,
+           snapshot.panelState != .disabled,
+           snapshot.panelState != .notConfigured {
+            scheduleStatusRefresh()
         }
+    }
+
+    private func refreshRemoteSnapshot(
+        reason: RefreshReason,
+        mode: RefreshRequestMode = .coalesce
+    ) {
+        refreshTimer?.invalidate()
+        refreshTimer = nil
 
         guard settings.remoteMonitorEnabled else {
             invalidateInFlightRefresh()
             loadedSettings = nil
+            lastSuccessfulAt = nil
             snapshot = .disabled
             return
         }
         guard settings.loadSecretsIfNeeded() else {
             invalidateInFlightRefresh()
             loadedSettings = nil
+            lastSuccessfulAt = nil
             snapshot = RemoteMonitorSnapshot(
                 panelState: .error,
                 accounts: [],
@@ -71,19 +101,21 @@ final class RemoteMonitorViewModel: ObservableObject {
               !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             invalidateInFlightRefresh()
             loadedSettings = nil
+            lastSuccessfulAt = nil
             snapshot = .notConfigured
             return
         }
 
-        guard !isRefreshing else {
-            pendingRefresh = true
+        let start = refreshCoordinator.begin(.remoteCodex, reason: reason, mode: mode)
+        guard case let .started(token) = start else {
             return
         }
 
         isRefreshing = true
-        refreshGeneration += 1
-        let generation = refreshGeneration
         let canPreserveSnapshot = loadedSettings == settingsSnapshot
+        if !canPreserveSnapshot {
+            lastSuccessfulAt = nil
+        }
         let previousAccounts = canPreserveSnapshot && dataSource == .cpaManagerPlus ? snapshot.accounts : []
         if snapshot.accounts.isEmpty || !canPreserveSnapshot {
             snapshot = RemoteMonitorSnapshot(
@@ -108,7 +140,7 @@ final class RemoteMonitorViewModel: ObservableObject {
         )
         let totalTimeout = max(10, configuration.timeout * 4)
 
-        refreshTask = Task.detached(priority: .utility) {
+        let task = Task.detached(priority: .utility) {
             do {
                 let result = try await Self.withTimeout(seconds: totalTimeout) {
                     try await RemoteCodexProvider(
@@ -117,21 +149,21 @@ final class RemoteMonitorViewModel: ObservableObject {
                     ).fetch()
                 }
                 await MainActor.run {
-                    guard generation == self.refreshGeneration else {
+                    let completion = self.refreshCoordinator.complete(token)
+                    self.updateRefreshingState()
+                    guard completion.isCurrent else {
                         return
                     }
                     guard self.settings.remoteMonitorEnabled,
                           self.settings.remoteCodexDataSource == dataSource,
                           self.currentConfiguration() == configuration else {
-                        self.finishRefreshAndRunPending()
                         if !self.settings.remoteMonitorEnabled {
                             self.snapshot = .disabled
                         }
+                        self.runPendingRefreshIfNeeded(completion)
                         return
                     }
                     self.consecutiveFailures = 0
-                    self.isRefreshing = false
-                    self.refreshTask = nil
                     self.loadedSettings = settingsSnapshot
                     let accounts = RemoteCodexAccount.preservingQuota(
                         in: result.accounts,
@@ -143,31 +175,32 @@ final class RemoteMonitorViewModel: ObservableObject {
                         usageMessageOverride: result.usageMessage,
                         usageUnavailableForSource: result.usageUnavailableForSource
                     )
+                    self.lastSuccessfulAt = self.snapshot.lastUpdated
                     self.scheduleStatusRefresh()
-                    self.runPendingRefreshIfNeeded()
+                    self.runPendingRefreshIfNeeded(completion)
                 }
             } catch {
                 await MainActor.run {
-                    guard generation == self.refreshGeneration else {
+                    let completion = self.refreshCoordinator.complete(token)
+                    self.updateRefreshingState()
+                    guard completion.isCurrent else {
                         return
                     }
                     guard self.settings.remoteMonitorEnabled,
                           self.settings.remoteCodexDataSource == dataSource,
                           self.currentConfiguration() == configuration else {
-                        self.finishRefreshAndRunPending()
                         if !self.settings.remoteMonitorEnabled {
                             self.snapshot = .disabled
                         }
+                        self.runPendingRefreshIfNeeded(completion)
                         return
                     }
                     self.consecutiveFailures += 1
-                    self.isRefreshing = false
-                    self.refreshTask = nil
                     self.snapshot = RemoteMonitorSnapshot(
                         panelState: .error,
                         accounts: canPreserveSnapshot ? self.snapshot.accounts : [],
                         message: self.localizedMessage(for: error),
-                        lastUpdated: Date(),
+                        lastUpdated: canPreserveSnapshot ? self.snapshot.lastUpdated : nil,
                         usage24h: canPreserveSnapshot ? self.snapshot.usage24h : 0,
                         usage7d: canPreserveSnapshot ? self.snapshot.usage7d : 0,
                         usage30d: canPreserveSnapshot ? self.snapshot.usage30d : 0,
@@ -175,10 +208,11 @@ final class RemoteMonitorViewModel: ObservableObject {
                         usageUnavailableForSource: canPreserveSnapshot ? self.snapshot.usageUnavailableForSource : false
                     )
                     self.scheduleStatusRefresh()
-                    self.runPendingRefreshIfNeeded()
+                    self.runPendingRefreshIfNeeded(completion)
                 }
             }
         }
+        refreshCoordinator.attach(task, to: token)
     }
 
     private func observeSettings() {
@@ -192,6 +226,19 @@ final class RemoteMonitorViewModel: ObservableObject {
                 }
             }
             .store(in: &cancellables)
+    }
+
+    private func observeRefreshEnvironment() {
+        Publishers.Merge(
+            NotificationCenter.default.publisher(for: .NSProcessInfoPowerStateDidChange),
+            NotificationCenter.default.publisher(for: ProcessInfo.thermalStateDidChangeNotification)
+        )
+        .sink { [weak self] _ in
+            Task { @MainActor in
+                self?.refreshEnvironmentDidChange()
+            }
+        }
+        .store(in: &cancellables)
     }
 
     private func settingsMayHaveChanged() {
@@ -208,7 +255,7 @@ final class RemoteMonitorViewModel: ObservableObject {
         let timer = Timer.scheduledTimer(withTimeInterval: 0.45, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 self?.consecutiveFailures = 0
-                self?.refreshRemoteSnapshot()
+                self?.refreshRemoteSnapshot(reason: .settings, mode: .replace)
             }
         }
         timer.tolerance = 0.2
@@ -220,8 +267,23 @@ final class RemoteMonitorViewModel: ObservableObject {
             return
         }
 
+        refreshTimer?.invalidate()
         let base = settings.cliproxyRefreshInterval
-        let interval = consecutiveFailures == 0 ? base : min(300, base * Double(consecutiveFailures + 1))
+        let decision = AdaptiveRefreshPolicy.remote(
+            adaptiveEnabled: settings.adaptiveRefreshEnabled,
+            isVisible: isSourceVisible,
+            environment: .current,
+            baseInterval: base,
+            consecutiveFailures: consecutiveFailures
+        )
+        RefreshShadowMetrics.shared.recordSchedule(
+            lane: .remoteCodex,
+            fixedInterval: consecutiveFailures == 0
+                ? base
+                : AdaptiveRefreshPolicy.failureBackoff(consecutiveFailures: consecutiveFailures),
+            candidateInterval: decision.candidateInterval
+        )
+        let interval = decision.interval
         let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 self?.refresh()
@@ -231,26 +293,31 @@ final class RemoteMonitorViewModel: ObservableObject {
         refreshTimer = timer
     }
 
-    private func finishRefreshAndRunPending() {
-        isRefreshing = false
-        refreshTask = nil
-        runPendingRefreshIfNeeded()
-    }
-
     private func invalidateInFlightRefresh() {
-        refreshGeneration += 1
-        refreshTask?.cancel()
-        refreshTask = nil
-        pendingRefresh = false
-        isRefreshing = false
+        refreshCoordinator.invalidate(.remoteCodex)
+        updateRefreshingState()
     }
 
-    private func runPendingRefreshIfNeeded() {
-        guard pendingRefresh else {
+    private func runPendingRefreshIfNeeded(_ completion: RefreshCompletion) {
+        guard completion.shouldRunPending else {
             return
         }
-        pendingRefresh = false
-        refreshRemoteSnapshot()
+        refreshRemoteSnapshot(reason: .timer)
+    }
+
+    private func updateRefreshingState() {
+        isRefreshing = refreshCoordinator.isInFlight(.remoteCodex)
+    }
+
+    private func refreshEnvironmentDidChange() {
+        guard settings.adaptiveRefreshEnabled else {
+            return
+        }
+        refreshTimer?.invalidate()
+        refreshTimer = nil
+        if settings.remoteMonitorEnabled, !refreshCoordinator.isInFlight(.remoteCodex) {
+            scheduleStatusRefresh()
+        }
     }
 
     private func snapshot(
@@ -406,6 +473,7 @@ private struct RemoteMonitorSettingsSnapshot: Equatable {
     let cliproxyRequestTimeout: TimeInterval
     let cliproxyAllowInsecureTLS: Bool
     let cliproxyTLSCertificateSHA256: String
+    let adaptiveRefreshEnabled: Bool
 
     @MainActor
     init(settings: CodexNotchSettings) {
@@ -417,5 +485,6 @@ private struct RemoteMonitorSettingsSnapshot: Equatable {
         cliproxyRequestTimeout = settings.cliproxyRequestTimeout
         cliproxyAllowInsecureTLS = settings.cliproxyAllowInsecureTLS
         cliproxyTLSCertificateSHA256 = settings.cliproxyTLSCertificateSHA256
+        adaptiveRefreshEnabled = settings.adaptiveRefreshEnabled
     }
 }

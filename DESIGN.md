@@ -99,6 +99,9 @@ Do not scale font size with viewport width. Do not use negative letter spacing.
 - Keep `Codex`, `Skills`, `Codex Radar`, `CLIProxyAPI`, `NewAPI`, and `Sub2API` visually related.
 - Keep Skill Insights in the expanded detail panel; never add its weekly metrics
   to the collapsed capsule or menu-bar item.
+- Treat a source as presentation-visible only while its expanded detail tab is
+  selected. The collapsed capsule and menu-bar item render cached state without
+  selecting the foreground refresh cadence.
 - Present catalog cost, evidence counts, completeness, and recommendations as a
   compact operational table. Keep heuristic evidence visibly distinct from
   confirmed use and label per-Skill Token as unavailable.
@@ -115,6 +118,11 @@ Do not scale font size with viewport width. Do not use negative letter spacing.
 - Quota bars should be quiet until thresholds matter.
 - Healthy quota is green; warning and critical states take over only at thresholds.
 - `Today`, 5h, 7d, and 30d values should scan as numbers first, explanations second.
+- Keep pace language deterministic and compact: either the current rate lasts
+  until reset or it has a projected exhaustion time. Hide pace when inputs are
+  insufficient rather than implying precision.
+- Show quota source and freshness as secondary provenance. Never expose paths,
+  account identifiers, credentials, prompts, or tool payloads.
 
 ### Settings
 

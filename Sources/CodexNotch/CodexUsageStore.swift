@@ -399,6 +399,7 @@ final class CodexUsageStore: @unchecked Sendable {
                 tasks: taskResult.tasks,
                 isRunning: taskResult.tasks.contains { $0.status == .running },
                 lastUpdated: now,
+                rateLimitCapturedAt: rateLimitResult.snapshot.capturedAt,
                 errorMessage: nil,
                 monitorStats: MonitorPerformanceStats(
                     lastSnapshotDurationMs: snapshotDurationMs,
@@ -454,7 +455,9 @@ final class CodexUsageStore: @unchecked Sendable {
         return uniqueExistingPaths(
             candidateRateLimitPaths(from: threads, recentLimit: 4)
                 + recentSessionActivityWatchPaths(limit: 8)
-                + sqliteFileSet(deltaDatabase)
+                + sqliteFileSet(stateDatabase)
+                + sqliteFileSet(logsDatabase)
+                + [sessionIndexPath]
         )
     }
 
@@ -609,6 +612,7 @@ final class CodexUsageStore: @unchecked Sendable {
             tasks: [],
             isRunning: false,
             lastUpdated: now,
+            rateLimitCapturedAt: nil,
             errorMessage: error.localizedDescription,
             monitorStats: MonitorPerformanceStats(
                 lastSnapshotDurationMs: snapshotDurationMs,
@@ -696,6 +700,7 @@ final class CodexUsageStore: @unchecked Sendable {
             tasks: taskResult.tasks,
             isRunning: taskResult.tasks.contains { $0.status == .running },
             lastUpdated: now,
+            rateLimitCapturedAt: cache.rateLimits.capturedAt,
             errorMessage: nil,
             monitorStats: MonitorPerformanceStats(
                 lastSnapshotDurationMs: snapshotDurationMs,

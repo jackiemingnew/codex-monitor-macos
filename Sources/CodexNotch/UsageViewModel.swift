@@ -15,6 +15,7 @@ final class UsageViewModel: ObservableObject {
 
     private let store: CodexUsageStore
     private let settings: CodexNotchSettings
+    private let refreshCoordinator = RefreshCoordinator<RefreshLane>()
     private var fastTimer: Timer?
     private var usageTimer: Timer?
     private var appServerRateLimitTimer: Timer?
@@ -27,27 +28,23 @@ final class UsageViewModel: ObservableObject {
     private var fileChangeRefreshTimers: [Timer] = []
     private var fileWatchers: [CodexFileWatcher] = []
     private var watchedPaths: [String] = []
-    private var isRefreshingSnapshot = false
-    private var isRefreshingUsage = false
-    private var isRefreshingWatchPaths = false
-    private var isRefreshingAppServer = false
-    private var pendingSnapshotRefresh = false
     private var pendingSnapshotBypassFastCache = false
-    private var pendingUsageRefresh = false
-    private var pendingWatchPathsRefresh = false
     private var lastFileChangeRefreshScheduledAt: Date = .distantPast
-    private var watcherRefreshGeneration = 0
     private var observedSettings: LocalUsageSettingsSnapshot?
     private var isDetailVisible = false
+    private var isSourceVisible = false
+    private var lastSnapshotSuccessfulAt: Date?
+    private var lastUsageSuccessfulAt: Date?
 
     init(store: CodexUsageStore = CodexUsageStore(), settings: CodexNotchSettings = CodexNotchSettings()) {
         self.store = store
         self.settings = settings
-        refresh(bypassFastCache: true)
+        requestSnapshot(bypassFastCache: true, reason: .startup)
         scheduleUsageRefresh(after: 20)
         scheduleWatcherRefresh(after: 20)
-        refreshAppServerRateLimits(force: true)
+        refreshAppServerRateLimits(force: true, reason: .startup)
         observeSettings()
+        observeRefreshEnvironment()
     }
 
     func setDetailVisible(_ visible: Bool) {
@@ -55,21 +52,64 @@ final class UsageViewModel: ObservableObject {
             return
         }
         isDetailVisible = visible
-        fastTimer?.invalidate()
-        fastTimer = nil
-        pendingSnapshotTimer?.invalidate()
-        pendingSnapshotTimer = nil
+        rescheduleFastRefreshForVisibilityChange()
+    }
 
-        if visible {
-            refresh(bypassFastCache: true)
-        } else if !isRefreshingSnapshot {
-            scheduleFastRefresh()
+    func setSourceVisible(_ visible: Bool) {
+        guard isSourceVisible != visible else {
+            return
         }
+        isSourceVisible = visible
+        rescheduleFastRefreshForVisibilityChange()
     }
 
     func refresh(bypassFastCache: Bool = false) {
-        guard !isRefreshingSnapshot else {
-            pendingSnapshotRefresh = true
+        requestSnapshot(
+            bypassFastCache: bypassFastCache,
+            reason: .manual,
+            mode: .coalesce
+        )
+    }
+
+    func refreshWhenPresented(now: Date = Date()) {
+        let snapshotFreshness = AdaptiveRefreshPolicy.freshness(
+            lastSuccessfulAt: lastSnapshotSuccessfulAt,
+            now: now,
+            maximumAge: snapshot.isRunning
+                ? DetailCadence.activeRefreshInterval
+                : DetailCadence.idleRefreshInterval
+        )
+        let usageFreshness = AdaptiveRefreshPolicy.freshness(
+            lastSuccessfulAt: lastUsageSuccessfulAt,
+            now: now,
+            maximumAge: settings.adaptiveRefreshEnabled
+                ? AdaptiveRefreshPolicy.normalBackgroundInterval
+                : max(1, settings.usageRefreshInterval)
+        )
+
+        if snapshotFreshness.requiresRefresh {
+            requestSnapshot(bypassFastCache: true, reason: .presentation)
+            if settings.rateLimitSource == .appServerFirst {
+                refreshAppServerRateLimits(reason: .presentation)
+            }
+        } else {
+            rescheduleFastRefreshForVisibilityChange()
+        }
+        if usageFreshness.requiresRefresh {
+            refreshUsageTotals(reason: .presentation)
+        }
+    }
+
+    private func requestSnapshot(
+        bypassFastCache: Bool = false,
+        reason: RefreshReason,
+        mode: RefreshRequestMode = .coalesce
+    ) {
+        if mode == .replace {
+            pendingSnapshotBypassFastCache = false
+        }
+        let start = refreshCoordinator.begin(.localSnapshot, reason: reason, mode: mode)
+        guard case let .started(token) = start else {
             pendingSnapshotBypassFastCache = pendingSnapshotBypassFastCache || bypassFastCache
             return
         }
@@ -77,7 +117,6 @@ final class UsageViewModel: ObservableObject {
         fastTimer = nil
         pendingSnapshotTimer?.invalidate()
         pendingSnapshotTimer = nil
-        isRefreshingSnapshot = true
         updateRefreshingState()
         let fallbackUsage = currentUsage
         let rateLimitSource = settings.rateLimitSource
@@ -85,7 +124,7 @@ final class UsageViewModel: ObservableObject {
         let includeContextUsage = settings.showContextMetrics
         let contextTaskLimit = currentContextTaskLimit
 
-        Task.detached(priority: .utility) { [store, fallbackUsage, bypassFastCache, rateLimitSource, taskHistoryRange, includeContextUsage, contextTaskLimit] in
+        let task = Task.detached(priority: .utility) { [store, fallbackUsage, bypassFastCache, rateLimitSource, taskHistoryRange, includeContextUsage, contextTaskLimit] in
             let nextSnapshot = store.loadSnapshot(
                 includePeriodUsage: false,
                 fallbackUsage: fallbackUsage,
@@ -96,6 +135,11 @@ final class UsageViewModel: ObservableObject {
                 contextTaskLimit: contextTaskLimit
             )
             await MainActor.run {
+                let completion = self.refreshCoordinator.complete(token)
+                guard completion.isCurrent else {
+                    self.updateRefreshingState()
+                    return
+                }
                 let wasRunning = self.snapshot.isRunning
                 var mergedSnapshot = self.stabilizedSnapshot(nextSnapshot)
                 if mergedSnapshot.usage1h == nil {
@@ -112,56 +156,64 @@ final class UsageViewModel: ObservableObject {
                 mergedSnapshot.monitorStats.lastUsageDurationMs = self.snapshot.monitorStats.lastUsageDurationMs
                 mergedSnapshot.monitorStats.watchedPathCount = self.snapshot.monitorStats.watchedPathCount
                 self.snapshot = mergedSnapshot
-                self.isRefreshingSnapshot = false
+                if nextSnapshot.errorMessage == nil {
+                    self.lastSnapshotSuccessfulAt = nextSnapshot.lastUpdated
+                }
                 self.updateRefreshingState()
-                let shouldRefreshAgain = self.pendingSnapshotRefresh
                 let shouldBypassFastCache = self.pendingSnapshotBypassFastCache
-                self.pendingSnapshotRefresh = false
                 self.pendingSnapshotBypassFastCache = false
                 if wasRunning && !self.snapshot.isRunning {
                     self.scheduleCompletionFollowUp()
                 }
-                if shouldRefreshAgain {
+                if completion.shouldRunPending {
                     self.schedulePendingSnapshotRefresh(bypassFastCache: shouldBypassFastCache)
                 } else {
                     self.scheduleFastRefresh()
                 }
             }
         }
+        refreshCoordinator.attach(task, to: token)
     }
 
     func refreshAll(forceRateLimitRefresh: Bool = true) {
-        refreshUsageTotals()
+        refreshUsageTotals(reason: .manual, mode: .replace)
         if settings.rateLimitSource == .appServerFirst {
             if forceRateLimitRefresh {
-                refreshAppServerRateLimits(force: true)
+                refreshAppServerRateLimits(force: true, reason: .manual, mode: .replace)
             } else {
-                refresh(bypassFastCache: true)
-                refreshAppServerRateLimits()
+                requestSnapshot(bypassFastCache: true, reason: .manual, mode: .replace)
+                refreshAppServerRateLimits(reason: .manual, mode: .replace)
             }
         } else {
-            refresh(bypassFastCache: true)
+            requestSnapshot(bypassFastCache: true, reason: .manual, mode: .replace)
         }
     }
 
-    private func refreshUsageTotals() {
-        guard !isRefreshingUsage else {
-            pendingUsageRefresh = true
+    private func refreshUsageTotals(
+        reason: RefreshReason,
+        mode: RefreshRequestMode = .coalesce
+    ) {
+        let start = refreshCoordinator.begin(.usageTotals, reason: reason, mode: mode)
+        guard case let .started(token) = start else {
             return
         }
         usageTimer?.invalidate()
         usageTimer = nil
         pendingUsageTimer?.invalidate()
         pendingUsageTimer = nil
-        isRefreshingUsage = true
         updateRefreshingState()
 
-        Task.detached(priority: .utility) { [store] in
+        let task = Task.detached(priority: .utility) { [store] in
             let startedAt = Date()
             let usage = store.loadUsageTotals()
             let dailyUsage = store.loadDailyUsage()
             let durationMs = max(0, Int((Date().timeIntervalSince(startedAt) * 1_000).rounded()))
             await MainActor.run {
+                let completion = self.refreshCoordinator.complete(token)
+                guard completion.isCurrent else {
+                    self.updateRefreshingState()
+                    return
+                }
                 if let usage {
                     self.snapshot.usage24h = usage.day
                     self.snapshot.usage7d = usage.week
@@ -170,26 +222,38 @@ final class UsageViewModel: ObservableObject {
                     self.snapshot.tasks = self.snapshot.tasks.map {
                         $0.withTodaySharePercent(totalTokens: dailyUsage.usageTodayTokens)
                     }
+                    self.lastUsageSuccessfulAt = Date()
                 }
                 self.snapshot.monitorStats.lastUsageDurationMs = durationMs
-                self.isRefreshingUsage = false
                 self.updateRefreshingState()
-                let shouldRefreshAgain = self.pendingUsageRefresh
-                self.pendingUsageRefresh = false
-                if shouldRefreshAgain {
+                if completion.shouldRunPending {
                     self.schedulePendingUsageRefresh()
                 } else {
                     self.scheduleUsageRefresh()
                 }
             }
         }
+        refreshCoordinator.attach(task, to: token)
     }
 
     private func scheduleFastRefresh() {
-        let interval = currentFastRefreshInterval
+        let fixedInterval = currentFixedFastRefreshInterval
+        let decision = AdaptiveRefreshPolicy.localSnapshot(
+            adaptiveEnabled: settings.adaptiveRefreshEnabled,
+            isVisible: isSourceCurrentlyVisible,
+            isRunning: snapshot.isRunning,
+            environment: .current,
+            fixedInterval: fixedInterval
+        )
+        RefreshShadowMetrics.shared.recordSchedule(
+            lane: .localSnapshot,
+            fixedInterval: fixedInterval,
+            candidateInterval: decision.candidateInterval
+        )
+        let interval = decision.interval
         let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
             Task { @MainActor in
-                self?.refresh()
+                self?.requestSnapshot(reason: .timer)
             }
         }
         timer.tolerance = interval * 0.35
@@ -201,12 +265,12 @@ final class UsageViewModel: ObservableObject {
         fastTimer = nil
         pendingSnapshotTimer?.invalidate()
 
-        let interval = currentFastRefreshInterval
+        let interval = currentRefreshDecision.interval
         let delay = RefreshCadence.pendingSnapshotDelay(for: interval)
         let timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 self?.pendingSnapshotTimer = nil
-                self?.refresh(bypassFastCache: bypassFastCache)
+                self?.requestSnapshot(bypassFastCache: bypassFastCache, reason: .timer)
             }
         }
         timer.tolerance = min(1, delay * 0.35)
@@ -215,10 +279,29 @@ final class UsageViewModel: ObservableObject {
 
     private func scheduleUsageRefresh(after delay: TimeInterval? = nil) {
         usageTimer?.invalidate()
-        let interval = delay ?? settings.usageRefreshInterval
+        let fixedInterval = delay ?? settings.usageRefreshInterval
+        let decision = delay == nil
+            ? AdaptiveRefreshPolicy.localBackground(
+                adaptiveEnabled: settings.adaptiveRefreshEnabled,
+                environment: .current,
+                fixedInterval: fixedInterval
+            )
+            : RefreshCadenceDecision(
+                interval: fixedInterval,
+                candidateInterval: fixedInterval,
+                reasonCode: "startup_delay"
+            )
+        if delay == nil {
+            RefreshShadowMetrics.shared.recordSchedule(
+                lane: .usageTotals,
+                fixedInterval: fixedInterval,
+                candidateInterval: decision.candidateInterval
+            )
+        }
+        let interval = decision.interval
         let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
             Task { @MainActor in
-                self?.refreshUsageTotals()
+                self?.refreshUsageTotals(reason: .timer)
             }
         }
         timer.tolerance = min(30, max(5, interval * 0.35))
@@ -234,7 +317,7 @@ final class UsageViewModel: ObservableObject {
         let timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 self?.pendingUsageTimer = nil
-                self?.refreshUsageTotals()
+                self?.refreshUsageTotals(reason: .timer)
             }
         }
         timer.tolerance = min(5, delay * 0.35)
@@ -243,10 +326,29 @@ final class UsageViewModel: ObservableObject {
 
     private func scheduleWatcherRefresh(after delay: TimeInterval? = nil) {
         watcherRefreshTimer?.invalidate()
-        let interval = delay ?? settings.watcherRefreshInterval
+        let fixedInterval = delay ?? settings.watcherRefreshInterval
+        let decision = delay == nil
+            ? AdaptiveRefreshPolicy.localBackground(
+                adaptiveEnabled: settings.adaptiveRefreshEnabled,
+                environment: .current,
+                fixedInterval: fixedInterval
+            )
+            : RefreshCadenceDecision(
+                interval: fixedInterval,
+                candidateInterval: fixedInterval,
+                reasonCode: "startup_delay"
+            )
+        if delay == nil {
+            RefreshShadowMetrics.shared.recordSchedule(
+                lane: .watchPaths,
+                fixedInterval: fixedInterval,
+                candidateInterval: decision.candidateInterval
+            )
+        }
+        let interval = decision.interval
         let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
             Task { @MainActor in
-                self?.refreshWatchPaths()
+                self?.refreshWatchPaths(reason: .timer)
             }
         }
         timer.tolerance = min(30, max(3, interval * 0.35))
@@ -258,7 +360,7 @@ final class UsageViewModel: ObservableObject {
         completionFollowUpTimers = [8, 30].map { delay in
             let timer = Timer.scheduledTimer(withTimeInterval: TimeInterval(delay), repeats: false) { [weak self] _ in
                 Task { @MainActor in
-                    self?.refresh(bypassFastCache: true)
+                    self?.requestSnapshot(bypassFastCache: true, reason: .fileEvent, mode: .enqueue)
                 }
             }
             timer.tolerance = min(5, TimeInterval(delay) * 0.35)
@@ -276,64 +378,82 @@ final class UsageViewModel: ObservableObject {
         let interval = max(1, delay ?? store.appServerRefreshDelay())
         let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
             Task { @MainActor in
-                self?.refreshAppServerRateLimits()
+                self?.refreshAppServerRateLimits(reason: .timer)
             }
         }
         timer.tolerance = min(10, max(1, interval * 0.1))
         appServerRateLimitTimer = timer
     }
 
-    private func refreshAppServerRateLimits(force: Bool = false) {
+    private func refreshAppServerRateLimits(
+        force: Bool = false,
+        reason: RefreshReason,
+        mode: RefreshRequestMode = .coalesce
+    ) {
         appServerRateLimitTimer?.invalidate()
         appServerRateLimitTimer = nil
         guard settings.rateLimitSource == .appServerFirst else {
+            refreshCoordinator.invalidate(.appServerQuota)
             return
         }
-        guard !isRefreshingAppServer else {
-            refresh(bypassFastCache: true)
+        let start = refreshCoordinator.begin(.appServerQuota, reason: reason, mode: mode)
+        guard case let .started(token) = start else {
             return
         }
-        isRefreshingAppServer = true
 
-        Task.detached(priority: .utility) { [store] in
+        let task = Task.detached(priority: .utility) { [store] in
             let refreshed = store.refreshAppServerRateLimits(force: force)
             let nextDelay = store.appServerRefreshDelay()
             await MainActor.run {
-                self.isRefreshingAppServer = false
-                if refreshed || force {
-                    self.refresh(bypassFastCache: true)
-                }
-                self.scheduleAppServerRateLimitRefresh(after: nextDelay)
-            }
-        }
-    }
-
-    private func refreshWatchPaths() {
-        guard !isRefreshingWatchPaths else {
-            pendingWatchPathsRefresh = true
-            return
-        }
-        isRefreshingWatchPaths = true
-        watcherRefreshGeneration += 1
-        let generation = watcherRefreshGeneration
-        Task.detached(priority: .utility) { [store] in
-            let paths = store.rateLimitWatchPaths()
-            await MainActor.run {
-                guard generation == self.watcherRefreshGeneration else {
+                let completion = self.refreshCoordinator.complete(token)
+                guard completion.isCurrent else {
                     return
                 }
-                self.isRefreshingWatchPaths = false
+                if refreshed || force {
+                    self.requestSnapshot(
+                        bypassFastCache: true,
+                        reason: reason,
+                        mode: .enqueue
+                    )
+                }
+                if completion.shouldRunPending {
+                    self.refreshAppServerRateLimits(
+                        force: false,
+                        reason: reason
+                    )
+                } else {
+                    self.scheduleAppServerRateLimitRefresh(after: nextDelay)
+                }
+            }
+        }
+        refreshCoordinator.attach(task, to: token)
+    }
+
+    private func refreshWatchPaths(
+        reason: RefreshReason,
+        mode: RefreshRequestMode = .coalesce
+    ) {
+        let start = refreshCoordinator.begin(.watchPaths, reason: reason, mode: mode)
+        guard case let .started(token) = start else {
+            return
+        }
+        let task = Task.detached(priority: .utility) { [store] in
+            let paths = store.rateLimitWatchPaths()
+            await MainActor.run {
+                let completion = self.refreshCoordinator.complete(token)
+                guard completion.isCurrent else {
+                    return
+                }
                 self.installFileWatchers(for: paths)
                 self.snapshot.monitorStats.watchedPathCount = self.watchedPaths.count
-                let shouldRefreshAgain = self.pendingWatchPathsRefresh
-                self.pendingWatchPathsRefresh = false
-                if shouldRefreshAgain {
-                    self.refreshWatchPaths()
+                if completion.shouldRunPending {
+                    self.refreshWatchPaths(reason: reason)
                 } else {
                     self.scheduleWatcherRefresh()
                 }
             }
         }
+        refreshCoordinator.attach(task, to: token)
     }
 
     private func installFileWatchers(for paths: [String]) {
@@ -375,8 +495,8 @@ final class UsageViewModel: ObservableObject {
         let delay = max(1, settings.fileChangeRefreshMinimumGap)
         let timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
             Task { @MainActor in
-                self?.refresh(bypassFastCache: true)
-                self?.refreshWatchPaths()
+                self?.requestSnapshot(bypassFastCache: true, reason: .fileEvent, mode: .enqueue)
+                self?.refreshWatchPaths(reason: .fileEvent, mode: .enqueue)
             }
         }
         timer.tolerance = min(5, delay * 0.35)
@@ -394,6 +514,19 @@ final class UsageViewModel: ObservableObject {
                 }
             }
             .store(in: &cancellables)
+    }
+
+    private func observeRefreshEnvironment() {
+        Publishers.Merge(
+            NotificationCenter.default.publisher(for: .NSProcessInfoPowerStateDidChange),
+            NotificationCenter.default.publisher(for: ProcessInfo.thermalStateDidChangeNotification)
+        )
+        .sink { [weak self] _ in
+            Task { @MainActor in
+                self?.refreshEnvironmentDidChange()
+            }
+        }
+        .store(in: &cancellables)
     }
 
     private func settingsMayHaveChanged() {
@@ -432,13 +565,51 @@ final class UsageViewModel: ObservableObject {
         pendingUsageTimer = nil
         watcherRefreshTimer?.invalidate()
         watcherRefreshTimer = nil
+        refreshCoordinator.invalidateAll([
+            .localSnapshot,
+            .usageTotals,
+            .watchPaths,
+            .appServerQuota
+        ])
+        updateRefreshingState()
 
-        refreshUsageTotals()
-        refreshWatchPaths()
+        refreshUsageTotals(reason: .settings, mode: .replace)
+        refreshWatchPaths(reason: .settings, mode: .replace)
         if settings.rateLimitSource == .appServerFirst {
-            refreshAppServerRateLimits(force: true)
+            refreshAppServerRateLimits(force: true, reason: .settings, mode: .replace)
         } else {
-            refresh(bypassFastCache: true)
+            requestSnapshot(bypassFastCache: true, reason: .settings, mode: .replace)
+        }
+    }
+
+    private func refreshEnvironmentDidChange() {
+        guard settings.adaptiveRefreshEnabled else {
+            return
+        }
+        fastTimer?.invalidate()
+        fastTimer = nil
+        usageTimer?.invalidate()
+        usageTimer = nil
+        watcherRefreshTimer?.invalidate()
+        watcherRefreshTimer = nil
+        if !refreshCoordinator.isInFlight(.localSnapshot) {
+            scheduleFastRefresh()
+        }
+        if !refreshCoordinator.isInFlight(.usageTotals) {
+            scheduleUsageRefresh()
+        }
+        if !refreshCoordinator.isInFlight(.watchPaths) {
+            scheduleWatcherRefresh()
+        }
+    }
+
+    private func rescheduleFastRefreshForVisibilityChange() {
+        fastTimer?.invalidate()
+        fastTimer = nil
+        pendingSnapshotTimer?.invalidate()
+        pendingSnapshotTimer = nil
+        if !refreshCoordinator.isInFlight(.localSnapshot) {
+            scheduleFastRefresh()
         }
     }
 
@@ -450,7 +621,7 @@ final class UsageViewModel: ObservableObject {
         )
     }
 
-    private var currentFastRefreshInterval: TimeInterval {
+    private var currentFixedFastRefreshInterval: TimeInterval {
         let foldedInterval = snapshot.isRunning ? settings.activeRefreshInterval : settings.idleRefreshInterval
         guard isDetailVisible else {
             return foldedInterval
@@ -462,12 +633,26 @@ final class UsageViewModel: ObservableObject {
         return min(foldedInterval, detailInterval)
     }
 
+    private var currentRefreshDecision: RefreshCadenceDecision {
+        AdaptiveRefreshPolicy.localSnapshot(
+            adaptiveEnabled: settings.adaptiveRefreshEnabled,
+            isVisible: isSourceCurrentlyVisible,
+            isRunning: snapshot.isRunning,
+            environment: .current,
+            fixedInterval: currentFixedFastRefreshInterval
+        )
+    }
+
+    private var isSourceCurrentlyVisible: Bool {
+        isSourceVisible || isDetailVisible
+    }
+
     private var currentContextTaskLimit: Int {
         isDetailVisible ? DetailCadence.detailContextTaskLimit : DetailCadence.summaryContextTaskLimit
     }
 
     private func updateRefreshingState() {
-        isRefreshing = isRefreshingSnapshot || isRefreshingUsage
+        isRefreshing = refreshCoordinator.hasAnyInFlight(in: [.localSnapshot, .usageTotals])
     }
 
     private func stabilizedSnapshot(_ next: UsageSnapshot) -> UsageSnapshot {
@@ -475,6 +660,12 @@ final class UsageViewModel: ObservableObject {
         let previous = self.snapshot
 
         snapshot.stabilizeQuota(from: previous)
+
+        if snapshot.monitorStats.lastRateLimitSource == "none"
+            || snapshot.monitorStats.lastRateLimitSource == "error" {
+            snapshot.monitorStats.lastRateLimitSource = previous.monitorStats.lastRateLimitSource
+            snapshot.rateLimitCapturedAt = previous.rateLimitCapturedAt
+        }
 
         if snapshot.errorMessage != nil,
            snapshot.usage1h == nil,
@@ -527,6 +718,7 @@ private struct LocalUsageSettingsSnapshot: Equatable {
     let usageRefreshInterval: TimeInterval
     let watcherRefreshInterval: TimeInterval
     let fileChangeRefreshMinimumGap: TimeInterval
+    let adaptiveRefreshEnabled: Bool
     let rateLimitSource: RateLimitSourcePreference
     let showContextMetrics: Bool
     let taskHistoryRange: TaskHistoryRange
@@ -538,6 +730,7 @@ private struct LocalUsageSettingsSnapshot: Equatable {
         usageRefreshInterval = settings.usageRefreshInterval
         watcherRefreshInterval = settings.watcherRefreshInterval
         fileChangeRefreshMinimumGap = settings.fileChangeRefreshMinimumGap
+        adaptiveRefreshEnabled = settings.adaptiveRefreshEnabled
         rateLimitSource = settings.rateLimitSource
         showContextMetrics = settings.showContextMetrics
         taskHistoryRange = settings.taskHistoryRange

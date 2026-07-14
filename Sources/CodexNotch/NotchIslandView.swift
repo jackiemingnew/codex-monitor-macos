@@ -568,11 +568,6 @@ struct DetailPanelView: View {
                     isSelected: selectedPage == page
                 ) {
                     detailPage = page
-                    if page == .codexRadar {
-                        codexRadarViewModel.refreshWhenPresented()
-                    } else if page == .skillInsights {
-                        skillInsightsCoordinator.refreshWhenPresented()
-                    }
                 }
             }
         }
@@ -625,6 +620,7 @@ struct DetailPanelView: View {
     private var localContent: some View {
         VStack(spacing: MonitorTheme.Spacing.row) {
             localQuotaStrip
+            localDataProvenance
             if settings.showSparkQuota {
                 sparkQuotaStrip
             }
@@ -660,11 +656,7 @@ struct DetailPanelView: View {
                     label: window.title,
                     value: Formatters.percent(window.remainingPercent),
                     percent: window.remainingPercent,
-                    resetText: quotaResetText(
-                        for: window.resetsAt,
-                        percent: window.remainingPercent,
-                        style: window.usesDateResetStyle ? .date : .time
-                    ),
+                    metaText: quotaMetaText(for: window),
                     color: quotaColor(for: window.remainingPercent)
                 )
             }
@@ -691,6 +683,33 @@ struct DetailPanelView: View {
             RoundedRectangle(cornerRadius: MonitorTheme.Radius.section, style: .continuous)
                 .stroke(MonitorTheme.hairline, lineWidth: MonitorTheme.Stroke.hairline)
         )
+    }
+
+    private var localDataProvenance: some View {
+        HStack(spacing: MonitorTheme.Spacing.compact) {
+            Circle()
+                .fill(quotaFreshnessColor)
+                .frame(width: 5, height: 5)
+                .accessibilityHidden(true)
+            Text(quotaSourceLabel)
+                .font(MonitorTheme.Typography.quotaMeta)
+                .foregroundStyle(MonitorTheme.textSecondary)
+                .lineLimit(1)
+            Text("· \(quotaFreshnessLabel)")
+                .font(MonitorTheme.Typography.quotaMeta)
+                .foregroundStyle(quotaFreshnessColor)
+                .lineLimit(1)
+            Spacer(minLength: MonitorTheme.Spacing.row)
+            if let capturedAt = snapshot.rateLimitCapturedAt {
+                Text("\(Formatters.relativeAge(capturedAt))前更新")
+                    .font(MonitorTheme.Typography.quotaMeta)
+                    .foregroundStyle(MonitorTheme.textTertiary)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.horizontal, MonitorTheme.Spacing.inline)
+        .frame(height: IslandMetrics.detailProvenanceHeight)
+        .accessibilityElement(children: .combine)
     }
 
     private var sparkQuotaStrip: some View {
@@ -791,6 +810,88 @@ struct DetailPanelView: View {
             return nil
         }
         return Formatters.quotaResetText(resetAt, style: style)
+    }
+
+    private func quotaMetaText(for window: MainQuotaWindow, now: Date = Date()) -> String? {
+        let resetText = quotaResetText(
+            for: window.resetsAt,
+            percent: window.remainingPercent,
+            style: window.usesDateResetStyle ? .date : .time
+        )
+        let paceText: String?
+        if let pace = QuotaPace.calculate(
+            remainingPercent: window.remainingPercent,
+            resetsAt: window.resetsAt,
+            windowMinutes: window.effectiveWindowMinutes,
+            now: now
+        ) {
+            switch pace.outcome {
+            case .sustainable:
+                paceText = "按当前速度可用到恢复"
+            case let .exhaustsBeforeReset(date):
+                paceText = "预计\(Formatters.compactDuration(until: date, now: now))后耗尽"
+            }
+        } else {
+            paceText = nil
+        }
+        let parts = [resetText, paceText].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private var quotaSourceLabel: String {
+        switch snapshot.monitorStats.lastRateLimitSource {
+        case "app-server-fresh", "app-server-stale":
+            "额度：Codex app-server"
+        case "local-jsonl":
+            "额度：本地 JSONL"
+        default:
+            "额度来源不可用"
+        }
+    }
+
+    private var quotaFreshness: RefreshFreshness {
+        switch snapshot.monitorStats.lastRateLimitSource {
+        case "app-server-stale":
+            return .stale
+        case "app-server-fresh":
+            return AdaptiveRefreshPolicy.freshness(
+                lastSuccessfulAt: snapshot.rateLimitCapturedAt,
+                maximumAge: 5 * 60
+            )
+        case "local-jsonl":
+            return AdaptiveRefreshPolicy.freshness(
+                lastSuccessfulAt: snapshot.rateLimitCapturedAt,
+                maximumAge: 15 * 60
+            )
+        default:
+            return .unavailable
+        }
+    }
+
+    private var quotaFreshnessLabel: String {
+        switch quotaFreshness {
+        case .fresh:
+            "新鲜"
+        case .stale:
+            "缓存"
+        case .expired:
+            "可能过期"
+        case .unavailable:
+            "不可用"
+        }
+    }
+
+    private var quotaFreshnessColor: Color {
+        switch quotaFreshness {
+        case .fresh:
+            MonitorTheme.healthy
+        case .stale:
+            MonitorTheme.warning
+        case .expired:
+            MonitorTheme.critical
+        case .unavailable:
+            MonitorTheme.textTertiary
+        }
     }
 
     private var codexRadarHeaderStatus: String {
@@ -1208,7 +1309,7 @@ private struct QuotaBarCell: View {
     let label: String
     let value: String
     let percent: Int?
-    let resetText: String?
+    let metaText: String?
     let color: Color
 
     var body: some View {
@@ -1234,16 +1335,16 @@ private struct QuotaBarCell: View {
 
             CapsuleQuotaBar(value: percent, color: color)
 
-            Text(resetText ?? " ")
+            Text(metaText ?? " ")
                 .font(MonitorTheme.Typography.quotaMeta)
                 .foregroundStyle(MonitorTheme.textTertiary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.72)
                 .allowsTightening(true)
                 .truncationMode(.tail)
-                .opacity(resetText == nil ? 0 : 1)
+                .opacity(metaText == nil ? 0 : 1)
                 .frame(maxWidth: .infinity, alignment: .trailing)
-                .accessibilityHidden(resetText == nil)
+                .accessibilityHidden(metaText == nil)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }

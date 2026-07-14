@@ -13,6 +13,7 @@ enum IslandMetrics {
     static let detailBottomPadding: CGFloat = 12
     static let detailOverlap: CGFloat = 18
     static let detailQuotaHeight: CGFloat = 66
+    static let detailProvenanceHeight: CGFloat = 18
     static let detailSparkHeight: CGFloat = 32
     static let detailTaskHeaderHeight: CGFloat = 28
     static let detailTaskRowHeight: CGFloat = 34
@@ -132,6 +133,8 @@ enum IslandMetrics {
             + detailPageSwitcherHeight
             + 10
             + detailQuotaHeight
+            + 8
+            + detailProvenanceHeight
             + 8
             + sparkHeight
             + taskTableHeight(taskRows: rows)

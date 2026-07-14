@@ -55,6 +55,7 @@ struct UsageSnapshot: Equatable {
     var tasks: [CodexTask]
     var isRunning: Bool
     var lastUpdated: Date
+    var rateLimitCapturedAt: Date? = nil
     var errorMessage: String?
     var monitorStats: MonitorPerformanceStats = .empty
 
@@ -213,6 +214,17 @@ struct MainQuotaWindow: Identifiable, Equatable {
             minutes >= 24 * 60
         case .fiveHour:
             false
+        }
+    }
+
+    var effectiveWindowMinutes: Int {
+        switch kind {
+        case .fiveHour:
+            300
+        case .weekly:
+            10_080
+        case let .custom(minutes):
+            minutes
         }
     }
 
@@ -752,7 +764,7 @@ enum BalanceRefreshCadence {
         guard consecutiveFailures > 0 else {
             return base
         }
-        return min(30, base)
+        return AdaptiveRefreshPolicy.failureBackoff(consecutiveFailures: consecutiveFailures)
     }
 }
 
