@@ -228,7 +228,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var overlayController: NotchOverlayController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.mainMenu = Self.makeMainMenu()
+        NSApp.mainMenu = makeMainMenu()
         overlayController = NotchOverlayController()
         overlayController?.show()
     }
@@ -237,29 +237,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         false
     }
 
-    private static func makeMainMenu() -> NSMenu {
+    private func makeMainMenu() -> NSMenu {
         let mainMenu = NSMenu()
 
         let appItem = NSMenuItem()
         mainMenu.addItem(appItem)
         let appMenu = NSMenu(title: "codex监测")
+        let toggleItem = NSMenuItem(
+            title: "显示/隐藏详情",
+            action: #selector(toggleMonitorDetails),
+            keyEquivalent: "m"
+        )
+        toggleItem.keyEquivalentModifierMask = [.control, .option, .command]
+        toggleItem.target = self
+        appMenu.addItem(toggleItem)
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "退出 codex监测", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
 
         let editItem = NSMenuItem()
         mainMenu.addItem(editItem)
         let editMenu = NSMenu(title: "编辑")
-        editMenu.addItem(editMenuItem("撤销", action: Selector(("undo:")), key: "z"))
-        editMenu.addItem(editMenuItem("重做", action: Selector(("redo:")), key: "Z", modifiers: [.command, .shift]))
+        editMenu.addItem(Self.editMenuItem("撤销", action: Selector(("undo:")), key: "z"))
+        editMenu.addItem(Self.editMenuItem("重做", action: Selector(("redo:")), key: "Z", modifiers: [.command, .shift]))
         editMenu.addItem(.separator())
-        editMenu.addItem(editMenuItem("剪切", action: #selector(NSText.cut(_:)), key: "x"))
-        editMenu.addItem(editMenuItem("拷贝", action: #selector(NSText.copy(_:)), key: "c"))
-        editMenu.addItem(editMenuItem("粘贴", action: #selector(NSText.paste(_:)), key: "v"))
+        editMenu.addItem(Self.editMenuItem("剪切", action: #selector(NSText.cut(_:)), key: "x"))
+        editMenu.addItem(Self.editMenuItem("拷贝", action: #selector(NSText.copy(_:)), key: "c"))
+        editMenu.addItem(Self.editMenuItem("粘贴", action: #selector(NSText.paste(_:)), key: "v"))
         editMenu.addItem(.separator())
-        editMenu.addItem(editMenuItem("全选", action: #selector(NSText.selectAll(_:)), key: "a"))
+        editMenu.addItem(Self.editMenuItem("全选", action: #selector(NSText.selectAll(_:)), key: "a"))
         editItem.submenu = editMenu
 
         return mainMenu
+    }
+
+    @MainActor @objc private func toggleMonitorDetails() {
+        MonitorDiagnostics.shared.record(
+            event: "global_hot_key",
+            correlationID: UUID().uuidString,
+            fields: ["shortcut": "control-option-command-m", "status": "triggered"],
+            deduplicate: false
+        )
+        overlayController?.toggleDetails()
     }
 
     private static func editMenuItem(
@@ -419,6 +438,7 @@ final class NotchOverlayController {
     )
     private var cancellables: Set<AnyCancellable> = []
     private var eventMonitors: [Any] = []
+    private var globalHotKey: GlobalHotKey?
     private var overlayHorizontalPosition: CGFloat = 0
     private var overlayVerticalPosition: CGFloat = 0
     private var dragSession: OverlayDragSession?
@@ -449,6 +469,7 @@ final class NotchOverlayController {
         observeScreenChanges()
         observeMenuBarCompatibilityChanges()
         installEventMonitors()
+        installGlobalHotKey()
         _ = codexRadarViewModel
         _ = skillInsightsCoordinator
         updateFrames()
@@ -484,12 +505,7 @@ final class NotchOverlayController {
         )
         let hostingView = CollapsedHostingView(rootView: view)
         hostingView.onClick = { [weak self] in
-            guard let self else {
-                return
-            }
-            withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-                self.overlayState.isExpanded.toggle()
-            }
+            self?.toggleDetails()
         }
         hostingView.onDragBegan = { [weak self] pointer in
             self?.beginOverlayDrag(pointer: pointer)
@@ -599,7 +615,7 @@ final class NotchOverlayController {
             makeStatusItemMenu().popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
             return
         }
-        overlayState.isExpanded.toggle()
+        toggleDetails()
     }
 
     private func makeStatusItemMenu() -> NSMenu {
@@ -698,7 +714,7 @@ final class NotchOverlayController {
                 self?.codexRadarViewModel.refreshNow()
             },
             onPageSelected: { [weak self] page in
-                self?.selectedDetailPage = page
+                self?.selectDetailPage(page)
             }
         )
         let detailHostingView = NSHostingView(rootView: detailView)
@@ -745,6 +761,7 @@ final class NotchOverlayController {
             .sink { [weak self] _ in
                 DispatchQueue.main.async {
                     self?.updateFrames()
+                    self?.updateSourceVisibility()
                 }
             }
             .store(in: &cancellables)
@@ -753,6 +770,7 @@ final class NotchOverlayController {
             .sink { [weak self] _ in
                 DispatchQueue.main.async {
                     self?.updateFrames()
+                    self?.updateSourceVisibility()
                 }
             }
             .store(in: &cancellables)
@@ -761,6 +779,7 @@ final class NotchOverlayController {
             .sink { [weak self] _ in
                 DispatchQueue.main.async {
                     self?.updateFrames()
+                    self?.updateSourceVisibility()
                 }
             }
             .store(in: &cancellables)
@@ -769,6 +788,15 @@ final class NotchOverlayController {
             .sink { [weak self] _ in
                 DispatchQueue.main.async {
                     self?.updateFrames()
+                    self?.updateSourceVisibility()
+                }
+            }
+            .store(in: &cancellables)
+
+        settings.objectWillChange
+            .sink { [weak self] _ in
+                DispatchQueue.main.async {
+                    self?.updateSourceVisibility()
                 }
             }
             .store(in: &cancellables)
@@ -848,6 +876,35 @@ final class NotchOverlayController {
         }
     }
 
+    private func installGlobalHotKey() {
+        let correlationID = UUID().uuidString
+        globalHotKey = GlobalHotKey.registerMonitorToggle { [weak self] in
+            MonitorDiagnostics.shared.record(
+                event: "global_hot_key",
+                correlationID: correlationID,
+                fields: ["shortcut": "control-option-command-m", "status": "triggered"],
+                deduplicate: false
+            )
+            Task { @MainActor [weak self] in
+                self?.toggleDetails()
+            }
+        }
+        MonitorDiagnostics.shared.record(
+            event: "global_hot_key",
+            correlationID: correlationID,
+            fields: [
+                "shortcut": "control-option-command-m",
+                "status": globalHotKey == nil ? "registration_failed" : "registered"
+            ]
+        )
+    }
+
+    func toggleDetails() {
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+            overlayState.isExpanded.toggle()
+        }
+    }
+
     private func closeIfClickIsOutside() {
         guard overlayState.isExpanded else {
             return
@@ -863,7 +920,7 @@ final class NotchOverlayController {
     }
 
     private func setDetailVisible(_ visible: Bool) {
-        viewModel.setDetailVisible(visible)
+        updateSourceVisibility()
         updateFrames()
         if visible {
             let detailWindow = ensureDetailWindow()
@@ -892,10 +949,29 @@ final class NotchOverlayController {
         }
     }
 
+    private func selectDetailPage(_ page: DetailPage) {
+        let changed = selectedDetailPage != page
+        selectedDetailPage = page
+        updateSourceVisibility()
+        if changed, overlayState.isExpanded {
+            refreshDetailData()
+        }
+    }
+
+    private func updateSourceVisibility() {
+        let detailIsVisible = overlayState.isExpanded
+        let codexDetailIsVisible = detailIsVisible && selectedDetailPage == .codex
+        viewModel.setDetailVisible(codexDetailIsVisible)
+        viewModel.setSourceVisible(codexDetailIsVisible)
+        remoteViewModel.setSourceVisible(detailIsVisible && selectedDetailPage == .remoteCodex)
+        newAPIViewModel.setSourceVisible(detailIsVisible && selectedDetailPage == .newAPI)
+        subAPIViewModel.setSourceVisible(detailIsVisible && selectedDetailPage == .subAPI)
+    }
+
     private func refreshDetailData() {
         switch selectedDetailPage {
         case .codex:
-            viewModel.refreshAll(forceRateLimitRefresh: false)
+            viewModel.refreshWhenPresented()
         case .skillInsights:
             guard settings.skillInsightsEnabled else { return }
             skillInsightsCoordinator.refreshWhenPresented()
@@ -908,17 +984,17 @@ final class NotchOverlayController {
             guard settings.remoteMonitorEnabled else {
                 return
             }
-            remoteViewModel.refreshNow()
+            remoteViewModel.refreshWhenPresented()
         case .newAPI:
             guard settings.newAPIMonitorEnabled else {
                 return
             }
-            newAPIViewModel.refreshNow()
+            newAPIViewModel.refreshWhenPresented()
         case .subAPI:
             guard settings.subAPIMonitorEnabled else {
                 return
             }
-            subAPIViewModel.refreshNow()
+            subAPIViewModel.refreshWhenPresented()
         }
     }
 

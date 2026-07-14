@@ -280,7 +280,7 @@ runner.check(
     IslandMetrics.overlayCenterX(normalizedPosition: 1, in: narrowOverlayScreenFrame) == narrowOverlayScreenFrame.midX,
     "screens narrower than the detail panel should force the overlay to center"
 )
-runner.check(fullCodexDetailHeight == 528, "five-row Codex detail with Spark and period usage should be 528 points tall")
+runner.check(fullCodexDetailHeight == 554, "five-row Codex detail should reserve space for quota provenance")
 runner.check(fullCodexDetailHeight - codexDetailWithoutSpark == 40, "Spark strip should add 40 points including its section gap")
 runner.check(fullCodexDetailHeight - codexDetailWithoutPeriod == 56, "period footer should add 56 points including its section gap")
 runner.check(IslandMetrics.visibleTaskRowsHeight == 170, "task viewport should expose exactly five 34 point rows")
@@ -1448,7 +1448,283 @@ runner.check(RefreshCadence.pendingUsageDelay(for: 30) == 8, "coalesced usage re
 runner.check(RefreshCadence.pendingUsageDelay(for: 300) == 15, "coalesced usage refresh should cap long follow-up waits")
 runner.check(BalanceRefreshCadence.refreshInterval(base: 300, consecutiveFailures: 0) == 300, "healthy balance refresh should use the configured interval")
 runner.check(BalanceRefreshCadence.refreshInterval(base: 300, consecutiveFailures: 1) == 30, "failed balance refresh should retry quickly instead of leaving stale timeout state")
-runner.check(BalanceRefreshCadence.refreshInterval(base: 60, consecutiveFailures: 3) == 30, "repeated balance failures should cap retry interval")
+runner.check(BalanceRefreshCadence.refreshInterval(base: 60, consecutiveFailures: 3) == 120, "repeated balance failures should use exponential backoff")
+runner.check(BalanceRefreshCadence.refreshInterval(base: 60, consecutiveFailures: 6) == 1_800, "balance failure backoff should cap at thirty minutes")
+
+let normalRefreshEnvironment = RefreshEnvironment(
+    isLowPowerModeEnabled: false,
+    isThermallyConstrained: false
+)
+let constrainedRefreshEnvironment = RefreshEnvironment(
+    isLowPowerModeEnabled: true,
+    isThermallyConstrained: false
+)
+let fixedIdleDecision = AdaptiveRefreshPolicy.localSnapshot(
+    adaptiveEnabled: false,
+    isVisible: false,
+    isRunning: false,
+    environment: normalRefreshEnvironment,
+    fixedInterval: 180
+)
+runner.check(fixedIdleDecision.interval == 180, "adaptive shadow policy should not change the fixed default")
+runner.check(fixedIdleDecision.candidateInterval == 300, "hidden idle adaptive candidate should use a five minute safety poll")
+runner.check(
+    AdaptiveRefreshPolicy.localSnapshot(
+        adaptiveEnabled: true,
+        isVisible: true,
+        isRunning: true,
+        environment: normalRefreshEnvironment,
+        fixedInterval: 30
+    ).interval == 15,
+    "visible running Codex should refresh within fifteen seconds"
+)
+runner.check(
+    AdaptiveRefreshPolicy.localSnapshot(
+        adaptiveEnabled: true,
+        isVisible: false,
+        isRunning: true,
+        environment: normalRefreshEnvironment,
+        fixedInterval: 30
+    ).interval == 30,
+    "a running source shown only in the collapsed HUD should use the hidden cadence"
+)
+runner.check(
+    AdaptiveRefreshPolicy.localSnapshot(
+        adaptiveEnabled: true,
+        isVisible: true,
+        isRunning: false,
+        environment: normalRefreshEnvironment,
+        fixedInterval: 180
+    ).interval == 90,
+    "an expanded idle detail should refresh within ninety seconds"
+)
+runner.check(
+    AdaptiveRefreshPolicy.localSnapshot(
+        adaptiveEnabled: true,
+        isVisible: true,
+        isRunning: true,
+        environment: constrainedRefreshEnvironment,
+        fixedInterval: 30
+    ).interval == 600,
+    "low power mode should reduce local safety polling to ten minutes"
+)
+runner.check(
+    AdaptiveRefreshPolicy.remote(
+        adaptiveEnabled: true,
+        isVisible: false,
+        environment: normalRefreshEnvironment,
+        baseInterval: 60,
+        consecutiveFailures: 0
+    ).interval == 900,
+    "hidden remote sources should refresh no more than every fifteen minutes"
+)
+runner.check(
+    AdaptiveRefreshPolicy.remote(
+        adaptiveEnabled: true,
+        isVisible: false,
+        environment: constrainedRefreshEnvironment,
+        baseInterval: 60,
+        consecutiveFailures: 0
+    ).interval == 1_800,
+    "constrained hidden remote sources should refresh no more than every thirty minutes"
+)
+runner.check(
+    AdaptiveRefreshPolicy.remote(
+        adaptiveEnabled: true,
+        isVisible: true,
+        environment: constrainedRefreshEnvironment,
+        baseInterval: 60,
+        consecutiveFailures: 0
+    ).interval == 1_800,
+    "constrained visible remote sources should also respect the thirty minute safety cadence"
+)
+runner.check(
+    AdaptiveRefreshPolicy.remote(
+        adaptiveEnabled: true,
+        isVisible: true,
+        environment: constrainedRefreshEnvironment,
+        baseInterval: 60,
+        consecutiveFailures: 1
+    ).interval == 1_800,
+    "constrained adaptive retry should not fall back to a thirty second hot loop"
+)
+let fixedHiddenIdleRefreshes = 86_400 / 180.0
+let adaptiveHiddenIdleRefreshes = 86_400 / AdaptiveRefreshPolicy.localHiddenIdle
+runner.check(
+    1 - adaptiveHiddenIdleRefreshes / fixedHiddenIdleRefreshes >= 0.40,
+    "24 hour hidden-idle replay should reduce scheduled refreshes by at least forty percent"
+)
+let refreshShadowMetrics = RefreshShadowMetrics()
+refreshShadowMetrics.recordSchedule(lane: .localSnapshot, fixedInterval: 180, candidateInterval: 300)
+refreshShadowMetrics.recordSchedule(lane: .localSnapshot, fixedInterval: 180, candidateInterval: 300)
+let refreshShadowSnapshot = refreshShadowMetrics.snapshot()
+runner.check(refreshShadowSnapshot.decisionCount == 2, "shadow metrics should count policy evaluations")
+runner.check(
+    refreshShadowSnapshot.projectedFixedRefreshesPerDay == fixedHiddenIdleRefreshes,
+    "shadow metrics should retain the latest fixed projection per lane without double counting"
+)
+runner.check(
+    refreshShadowSnapshot.projectedAdaptiveRefreshesPerDay == adaptiveHiddenIdleRefreshes,
+    "shadow metrics should retain the latest adaptive projection per lane"
+)
+
+var refreshState = RefreshCoordinatorState<RefreshLane>()
+let firstRefreshToken = runner.require(
+    { () -> RefreshToken<RefreshLane>? in
+        if case let .started(token) = refreshState.begin(.remoteCodex, mode: .coalesce) {
+            return token
+        }
+        return nil
+    }(),
+    "first refresh request should start"
+)
+runner.check(
+    refreshState.begin(.remoteCodex, mode: .coalesce) == .coalesced,
+    "concurrent normal refreshes should coalesce"
+)
+runner.check(
+    refreshState.complete(firstRefreshToken) == RefreshCompletion(isCurrent: true, shouldRunPending: false),
+    "coalesced refreshes should share the in-flight result without a redundant follow-up"
+)
+let secondRefreshToken = runner.require(
+    { () -> RefreshToken<RefreshLane>? in
+        if case let .started(token) = refreshState.begin(.remoteCodex, mode: .coalesce) {
+            return token
+        }
+        return nil
+    }(),
+    "second refresh should start"
+)
+runner.check(
+    refreshState.begin(.remoteCodex, mode: .enqueue) == .coalesced,
+    "file-event style refreshes should enqueue behind in-flight work"
+)
+runner.check(
+    refreshState.complete(secondRefreshToken) == RefreshCompletion(isCurrent: true, shouldRunPending: true),
+    "an enqueued refresh should run exactly once after the current generation"
+)
+let thirdRefreshToken = runner.require(
+    { () -> RefreshToken<RefreshLane>? in
+        if case let .started(token) = refreshState.begin(.remoteCodex, mode: .coalesce) {
+            return token
+        }
+        return nil
+    }(),
+    "queued follow-up refresh should start"
+)
+_ = refreshState.begin(.remoteCodex, mode: .replace)
+runner.check(
+    refreshState.complete(thirdRefreshToken) == .stale,
+    "replaced refresh results must not publish"
+)
+refreshState.invalidate(.remoteCodex)
+runner.check(!refreshState.isInFlight(.remoteCodex), "disabled or reconfigured lanes should invalidate in-flight work")
+
+let freshnessNow = Date(timeIntervalSince1970: 2_000_000)
+runner.check(
+    AdaptiveRefreshPolicy.freshness(
+        lastSuccessfulAt: freshnessNow.addingTimeInterval(-30),
+        now: freshnessNow,
+        maximumAge: 60
+    ) == .fresh,
+    "fresh presentation data should not trigger a new request"
+)
+runner.check(
+    AdaptiveRefreshPolicy.freshness(
+        lastSuccessfulAt: freshnessNow.addingTimeInterval(-90),
+        now: freshnessNow,
+        maximumAge: 60
+    ) == .stale,
+    "stale presentation data should trigger one coalesced request"
+)
+runner.check(
+    AdaptiveRefreshPolicy.freshness(
+        lastSuccessfulAt: freshnessNow.addingTimeInterval(-181),
+        now: freshnessNow,
+        maximumAge: 60
+    ) == .expired,
+    "presentation data older than the bounded grace period should be expired"
+)
+runner.check(
+    AdaptiveRefreshPolicy.freshness(lastSuccessfulAt: nil, now: freshnessNow, maximumAge: 60) == .unavailable,
+    "missing presentation data should be treated as unavailable"
+)
+
+let paceNow = Date(timeIntervalSince1970: 3_000_000)
+let fiveHourReset = Int(paceNow.addingTimeInterval(2.5 * 3_600).timeIntervalSince1970)
+let sustainablePace = runner.require(
+    QuotaPace.calculate(
+        remainingPercent: 70,
+        resetsAt: fiveHourReset,
+        windowMinutes: 300,
+        now: paceNow
+    ),
+    "mature five-hour quota data should produce a deterministic pace"
+)
+runner.check(sustainablePace.outcome == .sustainable, "slow quota burn should last until reset")
+let exhaustingPace = runner.require(
+    QuotaPace.calculate(
+        remainingPercent: 20,
+        resetsAt: fiveHourReset,
+        windowMinutes: 300,
+        now: paceNow
+    ),
+    "fast quota burn should produce an exhaustion estimate"
+)
+if case let .exhaustsBeforeReset(exhaustionDate) = exhaustingPace.outcome {
+    runner.check(exhaustionDate < Date(timeIntervalSince1970: TimeInterval(fiveHourReset)), "quota exhaustion estimate should precede reset")
+} else {
+    runner.check(false, "fast quota burn should be marked as exhausting before reset")
+}
+runner.check(
+    QuotaPace.calculate(remainingPercent: nil, resetsAt: fiveHourReset, windowMinutes: 300, now: paceNow) == nil,
+    "quota pace should remain unavailable when the source lacks a percentage"
+)
+runner.check(
+    QuotaPace.calculate(
+        remainingPercent: 99,
+        resetsAt: Int(paceNow.addingTimeInterval(296 * 60).timeIntervalSince1970),
+        windowMinutes: 300,
+        now: paceNow
+    ) == nil,
+    "five-hour pace should remain hidden before five minutes of evidence"
+)
+runner.check(
+    QuotaPace.calculate(
+        remainingPercent: 99,
+        resetsAt: Int(paceNow.addingTimeInterval((10_080 - 29) * 60).timeIntervalSince1970),
+        windowMinutes: 10_080,
+        now: paceNow
+    ) == nil,
+    "weekly pace should remain hidden before thirty minutes of evidence"
+)
+runner.check(
+    QuotaPace.calculate(
+        remainingPercent: 100,
+        resetsAt: fiveHourReset,
+        windowMinutes: 300,
+        now: paceNow
+    ) == nil,
+    "zero observed consumption should not produce a pace prediction"
+)
+runner.check(
+    QuotaPace.calculate(
+        remainingPercent: 50,
+        resetsAt: Int(paceNow.addingTimeInterval(-1).timeIntervalSince1970),
+        windowMinutes: 300,
+        now: paceNow
+    ) == nil,
+    "an already-reset quota window should not produce a prediction"
+)
+runner.check(
+    QuotaPace.calculate(
+        remainingPercent: 50,
+        resetsAt: fiveHourReset,
+        windowMinutes: Int.max,
+        now: paceNow
+    ) == nil,
+    "an untrusted oversized quota window should not overflow or produce a prediction"
+)
 
 let settingsSuiteName = "CodexNotchRegressionTests-\(UUID().uuidString)"
 let settingsDefaults = runner.require(
@@ -1768,6 +2044,23 @@ runner.check(settings.idleRefreshInterval == 180, "saving unchanged refresh inte
 runner.check(settings.usageRefreshInterval == 300, "saving unchanged refresh intervals should keep the low-power usage default")
 runner.check(settings.watcherRefreshInterval == 180, "saving unchanged refresh intervals should keep the folded low-power watcher default")
 runner.check(settings.fileChangeRefreshMinimumGap == 15, "saving unchanged refresh intervals should keep the folded low-power debounce default")
+runner.check(settings.adaptiveRefreshEnabled, "a clean new installation should default to adaptive refresh after the energy gate passes")
+runner.check(
+    settingsDefaults.object(forKey: "adaptiveRefreshEnabled") as? Bool == true,
+    "first launch should persist the evidence-backed new-install default"
+)
+runner.check(
+    !CodexNotchSettings.adaptiveRefreshDefault(storedValue: false, hasExistingInstallation: false),
+    "an explicit adaptive refresh opt-out should survive future default changes"
+)
+runner.check(
+    CodexNotchSettings.adaptiveRefreshDefault(storedValue: true, hasExistingInstallation: true),
+    "an explicit adaptive refresh opt-in should survive installation migrations"
+)
+runner.check(
+    !CodexNotchSettings.adaptiveRefreshDefault(storedValue: nil, hasExistingInstallation: true),
+    "an existing installation without a recorded choice should retain the conservative fixed default"
+)
 runner.check(settings.codexRadarEnabled, "Codex Radar should default to enabled")
 runner.check(!settings.codexRadarUsesAuthorizedAPI, "Codex Radar should default to Public without reading Keychain")
 runner.check(settings.hudDisplayMode == .floatingHUD, "HUD should default to the existing floating presentation")
@@ -1844,12 +2137,14 @@ settings.idleRefreshInterval = 4
 settings.usageRefreshInterval = 15
 settings.watcherRefreshInterval = 8
 settings.fileChangeRefreshMinimumGap = 1
+settings.adaptiveRefreshEnabled = false
 settings.resetRefreshDefaults()
 runner.check(settings.activeRefreshInterval == 30, "reset refresh defaults should restore folded low-power active refresh")
 runner.check(settings.idleRefreshInterval == 180, "reset refresh defaults should restore folded low-power idle refresh")
 runner.check(settings.usageRefreshInterval == 300, "reset refresh defaults should restore low-power usage refresh")
 runner.check(settings.watcherRefreshInterval == 180, "reset refresh defaults should restore folded low-power watcher refresh")
 runner.check(settings.fileChangeRefreshMinimumGap == 15, "reset refresh defaults should restore folded low-power debounce")
+runner.check(settings.adaptiveRefreshEnabled, "reset refresh defaults should restore the evidence-backed adaptive default")
 
 let legacyRefreshSuiteName = "CodexNotchLegacyRefresh-\(UUID().uuidString)"
 let legacyRefreshDefaults = runner.require(
@@ -5116,8 +5411,14 @@ runner.check(localSnapshot.tasks.first { $0.id == dbBackedSessionID }?.tokenCoun
 let localWatchPaths = Set(localStore.rateLimitWatchPaths())
 let normalizedSessionDirectory = sessionDirectory.resolvingSymlinksInPath().path
 let normalizedRolloutPath = rolloutPath.resolvingSymlinksInPath().path
+let normalizedStateDatabase = URL(fileURLWithPath: stateDatabase).resolvingSymlinksInPath().path
+let normalizedLogsDatabase = URL(fileURLWithPath: logsDatabase).resolvingSymlinksInPath().path
+let normalizedDeltaDatabase = URL(fileURLWithPath: deltaDatabase).resolvingSymlinksInPath().path
 runner.check(localWatchPaths.contains(normalizedSessionDirectory), "local file watchers should include recent session directories so new subagents trigger refreshes")
 runner.check(localWatchPaths.contains(normalizedRolloutPath), "local file watchers should keep watching recent session files for active task updates")
+runner.check(localWatchPaths.contains(normalizedStateDatabase), "local file watchers should observe the Codex-owned state database")
+runner.check(localWatchPaths.contains(normalizedLogsDatabase), "local file watchers should observe the Codex-owned logs database")
+runner.check(!localWatchPaths.contains(normalizedDeltaDatabase), "local file watchers must not observe the monitor-owned delta database")
 
 let mixedUsageRoot = URL(fileURLWithPath: NSTemporaryDirectory())
     .appendingPathComponent("CodexNotchMixedUsage-\(UUID().uuidString)")

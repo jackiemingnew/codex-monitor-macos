@@ -188,4 +188,20 @@ enum Formatters {
         }
         return "\(seconds / 86400)天"
     }
+
+    static func compactDuration(until date: Date, now: Date = Date()) -> String {
+        let seconds = max(0, Int(date.timeIntervalSince(now)))
+        if seconds < 60 {
+            return "不到1分钟"
+        }
+        if seconds < 3_600 {
+            return "\(max(1, seconds / 60))分钟"
+        }
+        if seconds < 86_400 {
+            let hours = max(1, seconds / 3_600)
+            return "\(hours)小时"
+        }
+        let days = max(1, seconds / 86_400)
+        return "\(days)天"
+    }
 }

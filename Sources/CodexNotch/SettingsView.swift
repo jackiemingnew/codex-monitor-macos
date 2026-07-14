@@ -110,6 +110,7 @@ private struct SettingsDraft: Equatable {
     var usageRefreshInterval: TimeInterval = 300
     var watcherRefreshInterval: TimeInterval = 180
     var fileChangeRefreshMinimumGap: TimeInterval = 15
+    var adaptiveRefreshEnabled = true
     var rateLimitSource: RateLimitSourcePreference = .appServerFirst
     var showPeriodUsage = true
     var showSparkQuota = false
@@ -158,6 +159,7 @@ private struct SettingsDraft: Equatable {
         usageRefreshInterval = settings.usageRefreshInterval
         watcherRefreshInterval = settings.watcherRefreshInterval
         fileChangeRefreshMinimumGap = settings.fileChangeRefreshMinimumGap
+        adaptiveRefreshEnabled = settings.adaptiveRefreshEnabled
         rateLimitSource = settings.rateLimitSource
         showPeriodUsage = settings.showPeriodUsage
         showSparkQuota = settings.showSparkQuota
@@ -213,6 +215,7 @@ private struct SettingsDraft: Equatable {
 
     mutating func resetRefreshDefaults() {
         applyPreset(.economy)
+        adaptiveRefreshEnabled = true
     }
 }
 
@@ -433,16 +436,28 @@ struct SettingsView: View {
     @ViewBuilder
     private var codexSettingsContent: some View {
         Section("Codex 刷新") {
-            HelpLabel(
-                title: "刷新模式",
-                help: "快速切换 Codex 运行状态、空闲状态、历史用量和文件监听的刷新频率。自定义数值后会自动变为均衡以外的配置。"
-            )
-            presetControls
-            intervalStepper("运行中", value: $draft.activeRefreshInterval, range: 2...30, help: "检测到 Codex 正在执行任务时的状态刷新间隔。数值越小越实时，功耗也越高。")
-            intervalStepper("空闲", value: $draft.idleRefreshInterval, range: 4...300, help: "Codex 没有运行中任务时的状态刷新间隔。")
-            intervalStepper("历史用量", value: $draft.usageRefreshInterval, range: 15...300, help: "统计 Codex 24小时、7天、30天 token 用量的刷新间隔。")
-            intervalStepper("文件监听", value: $draft.watcherRefreshInterval, range: 8...300, help: "扫描 Codex 会话文件变化的保底间隔，用于补偿文件事件丢失。")
-            intervalStepper("补刷节流", value: $draft.fileChangeRefreshMinimumGap, range: 1...30, help: "文件变化很多时，连续触发刷新之间的最小间隔。")
+            Toggle(isOn: $draft.adaptiveRefreshEnabled) {
+                HelpLabel(
+                    title: "自适应低能耗刷新",
+                    help: "依据对应详情页是否展开、Codex 是否运行、低电量模式和温度压力自动节流。文件事件、手动刷新和额度恢复边界仍会立即响应。性能门槛通过后，新安装默认开启；既有选择保持不变。"
+                )
+            }
+            .accessibilityLabel("自适应低能耗刷新")
+            .accessibilityHint("依据界面可见性、Codex 活跃状态、低电量模式和温度压力自动调整刷新频率")
+
+            Group {
+                HelpLabel(
+                    title: "固定刷新模式",
+                    help: "关闭自适应刷新时使用。快速切换 Codex 运行状态、空闲状态、历史用量和文件监听的刷新频率。"
+                )
+                presetControls
+                intervalStepper("运行中", value: $draft.activeRefreshInterval, range: 2...30, help: "检测到 Codex 正在执行任务时的状态刷新间隔。数值越小越实时，功耗也越高。")
+                intervalStepper("空闲", value: $draft.idleRefreshInterval, range: 4...300, help: "Codex 没有运行中任务时的状态刷新间隔。")
+                intervalStepper("历史用量", value: $draft.usageRefreshInterval, range: 15...300, help: "统计 Codex 24小时、7天、30天 token 用量的刷新间隔。")
+                intervalStepper("文件监听", value: $draft.watcherRefreshInterval, range: 8...300, help: "扫描 Codex 会话文件变化的保底间隔，用于补偿文件事件丢失。")
+                intervalStepper("补刷节流", value: $draft.fileChangeRefreshMinimumGap, range: 1...30, help: "文件变化很多时，连续触发刷新之间的最小间隔。")
+            }
+            .disabled(draft.adaptiveRefreshEnabled)
         }
 
         Section("Codex 数据") {
@@ -630,6 +645,11 @@ struct SettingsView: View {
                 HelpLabel(title: "显示来源", help: "选择顶部收起状态显示哪一种监控数据。自动模式会优先显示有提醒的外部监控，否则显示 Codex。")
             }
             .pickerStyle(.menu)
+
+            Text("全局显示/隐藏快捷键：⌃⌥⌘M")
+                .font(MonitorTheme.Typography.settingsCaption)
+                .foregroundStyle(MonitorTheme.settingsTextSecondary)
+                .accessibilityLabel("全局显示或隐藏快捷键，Control Option Command M")
         }
 
         Section("启动与外观") {
@@ -1711,6 +1731,7 @@ struct SettingsView: View {
         settings.usageRefreshInterval = next.usageRefreshInterval
         settings.watcherRefreshInterval = next.watcherRefreshInterval
         settings.fileChangeRefreshMinimumGap = next.fileChangeRefreshMinimumGap
+        settings.adaptiveRefreshEnabled = next.adaptiveRefreshEnabled
         settings.rateLimitSource = next.rateLimitSource
         settings.showPeriodUsage = next.showPeriodUsage
         settings.showSparkQuota = next.showSparkQuota

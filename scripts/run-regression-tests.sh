@@ -26,6 +26,7 @@ swift build -c release --build-path "${BUILD_DIR}/package-build"
 
 swiftc \
   -swift-version 6 \
+  "${ROOT_DIR}/Sources/CodexNotch/RefreshInfrastructure.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/Models.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/AppInfo.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/Formatters.swift" \

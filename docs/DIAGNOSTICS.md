@@ -1,7 +1,8 @@
 # Codex Monitor Diagnostics
 
-Codex Monitor records quota-resolution decisions so a percentage jump can be
-explained without reading task content or inspecting raw rollout files.
+Codex Monitor records quota-resolution decisions and a small set of operational
+status events so behavior can be explained without reading task content or
+inspecting raw rollout files.
 
 ## Log Location
 
@@ -70,11 +71,16 @@ Local cohort selection is reported separately in `local_selection_reason`:
 
 Unchanged decisions are deduplicated, so normal refreshes do not flood the log.
 
+Each `global_hot_key` event contains only the fixed shortcut identifier and a
+`registered`, `registration_failed`, or `triggered` status. It never records
+arbitrary keys or input text.
+
 ## Privacy Boundary
 
 Diagnostics never include task titles, prompts, rollout paths, account IDs,
 emails, credentials, cookies, or API tokens. Only quota values, timestamps,
-candidate counts, source names, and selection reasons are allowlisted.
+candidate counts, source names, selection reasons, and fixed operational status
+identifiers are allowlisted.
 
 The last successful app-server quota is cached at:
 
