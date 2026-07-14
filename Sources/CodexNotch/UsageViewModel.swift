@@ -150,6 +150,7 @@ final class UsageViewModel: ObservableObject {
                 mergedSnapshot.usage30d = self.snapshot.usage30d
                 mergedSnapshot.periodUsageQuality = self.snapshot.periodUsageQuality
                 mergedSnapshot.dailyUsage = self.snapshot.dailyUsage
+                mergedSnapshot.costUsage = self.snapshot.costUsage
                 mergedSnapshot.tasks = mergedSnapshot.tasks.map {
                     $0.withTodaySharePercent(totalTokens: mergedSnapshot.dailyUsage.usageTodayTokens)
                 }
@@ -193,6 +194,7 @@ final class UsageViewModel: ObservableObject {
         reason: RefreshReason,
         mode: RefreshRequestMode = .coalesce
     ) {
+        refreshCostUsage(reason: reason, mode: mode)
         let start = refreshCoordinator.begin(.usageTotals, reason: reason, mode: mode)
         guard case let .started(token) = start else {
             return
@@ -203,10 +205,14 @@ final class UsageViewModel: ObservableObject {
         pendingUsageTimer = nil
         updateRefreshingState()
 
-        let task = Task.detached(priority: .utility) { [store] in
+        let showsPeriodUsage = settings.showPeriodUsage
+        let task = Task.detached(priority: .utility) { [store, showsPeriodUsage] in
             let startedAt = Date()
             let usage = store.loadUsageTotals()
             let dailyUsage = store.loadDailyUsage()
+            let costUsage = showsPeriodUsage
+                ? store.loadCostUsageSummary()
+                : CostUsageSummary.unavailable
             let durationMs = max(0, Int((Date().timeIntervalSince(startedAt) * 1_000).rounded()))
             await MainActor.run {
                 let completion = self.refreshCoordinator.complete(token)
@@ -224,6 +230,7 @@ final class UsageViewModel: ObservableObject {
                     }
                     self.lastUsageSuccessfulAt = Date()
                 }
+                self.snapshot.costUsage = costUsage
                 self.snapshot.monitorStats.lastUsageDurationMs = durationMs
                 self.updateRefreshingState()
                 if completion.shouldRunPending {
@@ -231,6 +238,50 @@ final class UsageViewModel: ObservableObject {
                 } else {
                     self.scheduleUsageRefresh()
                 }
+            }
+        }
+        refreshCoordinator.attach(task, to: token)
+    }
+
+    private func refreshCostUsage(
+        reason: RefreshReason,
+        mode: RefreshRequestMode = .coalesce
+    ) {
+        let environment = RefreshEnvironment.current
+        guard CostUsageRefreshPolicy.shouldRequestRefresh(
+            showsPeriodUsage: settings.showPeriodUsage,
+            reason: reason,
+            environment: environment
+        ) else {
+            if !settings.showPeriodUsage || environment.isConstrained {
+                refreshCoordinator.invalidate(.costUsage)
+            }
+            if !settings.showPeriodUsage {
+                snapshot.costUsage = .unavailable
+            }
+            return
+        }
+
+        let start = refreshCoordinator.begin(.costUsage, reason: reason, mode: mode)
+        guard case let .started(token) = start else {
+            return
+        }
+        let bypassCadence = reason == .manual
+        let task = Task { [store] in
+            let costUsage = await CostUsageScanExecutor.run { shouldCancel in
+                _ = store.refreshCostUsageSlice(
+                    bypassCadence: bypassCadence,
+                    shouldCancel: shouldCancel
+                )
+                return store.loadCostUsageSummary()
+            }
+            let completion = refreshCoordinator.complete(token)
+            guard completion.isCurrent else {
+                return
+            }
+            snapshot.costUsage = costUsage
+            if completion.shouldRunPending {
+                refreshCostUsage(reason: reason)
             }
         }
         refreshCoordinator.attach(task, to: token)
@@ -497,6 +548,7 @@ final class UsageViewModel: ObservableObject {
             Task { @MainActor in
                 self?.requestSnapshot(bypassFastCache: true, reason: .fileEvent, mode: .enqueue)
                 self?.refreshWatchPaths(reason: .fileEvent, mode: .enqueue)
+                self?.refreshCostUsage(reason: .fileEvent, mode: .coalesce)
             }
         }
         timer.tolerance = min(5, delay * 0.35)
@@ -568,6 +620,7 @@ final class UsageViewModel: ObservableObject {
         refreshCoordinator.invalidateAll([
             .localSnapshot,
             .usageTotals,
+            .costUsage,
             .watchPaths,
             .appServerQuota
         ])
@@ -583,6 +636,9 @@ final class UsageViewModel: ObservableObject {
     }
 
     private func refreshEnvironmentDidChange() {
+        if RefreshEnvironment.current.isConstrained {
+            refreshCoordinator.invalidate(.costUsage)
+        }
         guard settings.adaptiveRefreshEnabled else {
             return
         }
@@ -721,6 +777,7 @@ private struct LocalUsageSettingsSnapshot: Equatable {
     let adaptiveRefreshEnabled: Bool
     let rateLimitSource: RateLimitSourcePreference
     let showContextMetrics: Bool
+    let showPeriodUsage: Bool
     let taskHistoryRange: TaskHistoryRange
 
     @MainActor
@@ -733,6 +790,7 @@ private struct LocalUsageSettingsSnapshot: Equatable {
         adaptiveRefreshEnabled = settings.adaptiveRefreshEnabled
         rateLimitSource = settings.rateLimitSource
         showContextMetrics = settings.showContextMetrics
+        showPeriodUsage = settings.showPeriodUsage
         taskHistoryRange = settings.taskHistoryRange
     }
 }

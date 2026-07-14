@@ -14,6 +14,34 @@ private struct ProcessResourceUsage {
     let peakResidentBytes: UInt64
 }
 
+private struct CostDerivedRowCount: Decodable {
+    let rowCount: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case rowCount = "row_count"
+    }
+}
+
+private func costDerivedRowCount(databasePath: String) -> Int {
+    guard FileManager.default.fileExists(atPath: databasePath) else {
+        return 0
+    }
+    return (try? Shell.sqliteJSON(
+        database: databasePath,
+        query: """
+        select count(*) as row_count from (
+          select 1 from cost_usage_checkpoints
+          union all select 1 from cost_usage_buckets
+          union all select 1 from cost_usage_rows
+          union all select 1 from cost_usage_published_buckets
+          union all select 1 from cost_usage_lineage_points
+        );
+        """,
+        as: [CostDerivedRowCount].self,
+        readOnly: true
+    ).first?.rowCount) ?? 0
+}
+
 private func seconds(_ value: timeval) -> Double {
     Double(value.tv_sec) + Double(value.tv_usec) / 1_000_000
 }
@@ -60,14 +88,14 @@ private struct RefreshEnergyWorker {
               warmupSeconds >= 0,
               measurementSeconds > 0 else {
             FileHandle.standardError.write(
-                Data("usage: RefreshEnergyWorker fixed|adaptive FIXTURE_DIR WARMUP_SECONDS MEASUREMENT_SECONDS LABEL\n".utf8)
+                Data("usage: RefreshEnergyWorker fixed|adaptive|cost-off|cost-on FIXTURE_DIR WARMUP_SECONDS MEASUREMENT_SECONDS LABEL\n".utf8)
             )
             exit(64)
         }
 
         let mode = arguments[1]
-        guard mode == "fixed" || mode == "adaptive" else {
-            FileHandle.standardError.write(Data("mode must be fixed or adaptive\n".utf8))
+        guard ["fixed", "adaptive", "cost-off", "cost-on"].contains(mode) else {
+            FileHandle.standardError.write(Data("unsupported benchmark mode\n".utf8))
             exit(64)
         }
 
@@ -84,9 +112,11 @@ private struct RefreshEnergyWorker {
         defaults.set(300.0, forKey: "usageRefreshInterval")
         defaults.set(180.0, forKey: "watcherRefreshInterval")
         defaults.set(15.0, forKey: "fileChangeRefreshMinimumGap")
-        defaults.set(mode == "adaptive", forKey: "adaptiveRefreshEnabled")
+        defaults.set(mode != "fixed", forKey: "adaptiveRefreshEnabled")
         defaults.set(RateLimitSourcePreference.localFilesOnly.rawValue, forKey: "rateLimitSource")
         defaults.set(false, forKey: "showContextMetrics")
+        let costUsageEnabled = mode != "cost-off"
+        defaults.set(costUsageEnabled, forKey: "showPeriodUsage")
         defaults.set(false, forKey: "skillInsightsEnabled")
         defaults.set(false, forKey: "codexRadarEnabled")
         defaults.set(TaskHistoryRange.threeDays.rawValue, forKey: "taskHistoryRange")
@@ -118,7 +148,11 @@ private struct RefreshEnergyWorker {
         }
 
         RefreshShadowMetrics.shared.resetForTesting()
+        store.resetCostUsagePerformanceStatsForTesting()
         let cacheAtStart = store.sessionFileCacheStats()
+        let costRowsAtStart = costDerivedRowCount(
+            databasePath: fixtureDirectory.appendingPathComponent("usage-deltas.sqlite").path
+        )
         let resourcesAtStart = processResourceUsage()
         let startedAt = Date()
         var lastSampleAt = startedAt
@@ -148,10 +182,15 @@ private struct RefreshEnergyWorker {
         let elapsed = max(0.001, finishedAt.timeIntervalSince(startedAt))
         let cpuSeconds = max(0, resourcesAtEnd.cpuSeconds - resourcesAtStart.cpuSeconds)
         let cacheAtEnd = store.sessionFileCacheStats()
+        let costScanStats = store.costUsagePerformanceStatsSnapshot()
+        let costRowsAtEnd = costDerivedRowCount(
+            databasePath: fixtureDirectory.appendingPathComponent("usage-deltas.sqlite").path
+        )
         let refreshMetrics = RefreshShadowMetrics.shared.snapshot()
         let result: [String: Any] = [
             "label": label,
             "mode": mode,
+            "cost_usage_enabled": costUsageEnabled,
             "warmup_seconds": warmupSeconds,
             "measurement_seconds": elapsed,
             "average_cpu_percent": cpuSeconds / elapsed * 100,
@@ -172,7 +211,12 @@ private struct RefreshEnergyWorker {
             "session_cache_entry_count": cacheAtEnd.entryCount,
             "is_running": viewModel.snapshot.isRunning,
             "is_refreshing": viewModel.isRefreshing,
-            "jsonl_context_scans": viewModel.snapshot.monitorStats.jsonlContextScans
+            "jsonl_context_scans": viewModel.snapshot.monitorStats.jsonlContextScans,
+            "derived_cost_row_delta": costRowsAtEnd - costRowsAtStart,
+            "cost_scan_count": costScanStats.scanCount,
+            "cost_jsonl_bytes_read": costScanStats.jsonlBytesRead,
+            "cost_files_advanced": costScanStats.filesAdvanced,
+            "cost_database_writes": costScanStats.databaseWrites
         ]
 
         do {

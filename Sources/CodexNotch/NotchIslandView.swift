@@ -700,6 +700,15 @@ struct DetailPanelView: View {
                 .foregroundStyle(quotaFreshnessColor)
                 .lineLimit(1)
             Spacer(minLength: MonitorTheme.Spacing.row)
+            if let resetCreditCount = snapshot.resetCreditCount {
+                Text("重置 \(resetCreditCount)次")
+                    .font(MonitorTheme.Typography.quotaMeta)
+                    .foregroundStyle(MonitorTheme.textSecondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    .help("可用且未过期的额度重置次数，来自现有 Codex app-server 配额响应。")
+                    .accessibilityLabel("可用额度重置 \(resetCreditCount) 次")
+            }
             if let capturedAt = snapshot.rateLimitCapturedAt {
                 Text("\(Formatters.relativeAge(capturedAt))前更新")
                     .font(MonitorTheme.Typography.quotaMeta)
@@ -1119,39 +1128,64 @@ struct DetailPanelView: View {
             LocalPeriodUsageCell(
                 label: "今日",
                 value: Formatters.compactTokens(
-                    snapshot.dailyUsage.usageTodayTokens,
-                    isPartial: snapshot.dailyUsage.isPartial
+                    snapshot.costUsage.today.tokenCount
+                        ?? snapshot.dailyUsage.usageTodayTokens,
+                    isPartial: snapshot.costUsage.today.tokenCount == nil
+                        && snapshot.dailyUsage.isPartial
                 ),
                 helpText: Formatters.partialUsageHelp(
                     label: "今日",
-                    isPartial: snapshot.dailyUsage.isPartial,
+                    isPartial: snapshot.costUsage.today.tokenCount == nil
+                        && snapshot.dailyUsage.isPartial,
                     missingBaselineSessions: snapshot.dailyUsage.missingBaselineSessions
+                ),
+                costValue: Formatters.apiEquivalentCost(snapshot.costUsage.today),
+                costHelpText: Formatters.apiEquivalentCostHelp(
+                    label: "今日费用",
+                    window: snapshot.costUsage.today,
+                    summary: snapshot.costUsage
                 )
             )
             localPeriodDivider
             LocalPeriodUsageCell(
                 label: "7天",
                 value: Formatters.compactTokens(
-                    snapshot.usage7d,
-                    isPartial: snapshot.periodUsageQuality.usage7dPartial
+                    snapshot.costUsage.sevenDays.tokenCount ?? snapshot.usage7d,
+                    isPartial: snapshot.costUsage.sevenDays.tokenCount == nil
+                        && snapshot.periodUsageQuality.usage7dPartial
                 ),
                 helpText: Formatters.partialUsageHelp(
                     label: "7天",
-                    isPartial: snapshot.periodUsageQuality.usage7dPartial,
+                    isPartial: snapshot.costUsage.sevenDays.tokenCount == nil
+                        && snapshot.periodUsageQuality.usage7dPartial,
                     missingBaselineSessions: snapshot.periodUsageQuality.missing7dBaselines
+                ),
+                costValue: Formatters.apiEquivalentCost(snapshot.costUsage.sevenDays),
+                costHelpText: Formatters.apiEquivalentCostHelp(
+                    label: "近 7 天费用",
+                    window: snapshot.costUsage.sevenDays,
+                    summary: snapshot.costUsage
                 )
             )
             localPeriodDivider
             LocalPeriodUsageCell(
                 label: "30天",
                 value: Formatters.compactTokens(
-                    snapshot.usage30d,
-                    isPartial: snapshot.periodUsageQuality.usage30dPartial
+                    snapshot.costUsage.thirtyDays.tokenCount ?? snapshot.usage30d,
+                    isPartial: snapshot.costUsage.thirtyDays.tokenCount == nil
+                        && snapshot.periodUsageQuality.usage30dPartial
                 ),
                 helpText: Formatters.partialUsageHelp(
                     label: "30天",
-                    isPartial: snapshot.periodUsageQuality.usage30dPartial,
+                    isPartial: snapshot.costUsage.thirtyDays.tokenCount == nil
+                        && snapshot.periodUsageQuality.usage30dPartial,
                     missingBaselineSessions: snapshot.periodUsageQuality.missing30dBaselines
+                ),
+                costValue: Formatters.apiEquivalentCost(snapshot.costUsage.thirtyDays),
+                costHelpText: Formatters.apiEquivalentCostHelp(
+                    label: "近 30 天费用",
+                    window: snapshot.costUsage.thirtyDays,
+                    summary: snapshot.costUsage
                 )
             )
         }
@@ -1891,20 +1925,20 @@ private struct LocalPeriodUsageCell: View {
     let label: String
     let value: String
     var helpText: String? = nil
+    let costValue: String
+    let costHelpText: String
 
     @ViewBuilder
     var body: some View {
-        if let helpText {
-            cell
-                .help(helpText)
-                .accessibilityHint(helpText)
-        } else {
-            cell
-        }
+        cell
+            .help(combinedHelpText)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(label)，Token \(value)，API 标准单价等值费用 \(costValue)")
+            .accessibilityHint(combinedHelpText)
     }
 
     private var cell: some View {
-        VStack(spacing: 2) {
+        VStack(spacing: 0) {
             Text(label)
                 .font(MonitorTheme.Typography.periodLabel)
                 .foregroundStyle(MonitorTheme.textSecondary)
@@ -1914,8 +1948,18 @@ private struct LocalPeriodUsageCell: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.72)
                 .monospacedDigit()
+            Text(costValue)
+                .font(MonitorTheme.Typography.periodCost)
+                .foregroundStyle(MonitorTheme.textTertiary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.58)
+                .monospacedDigit()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var combinedHelpText: String {
+        [helpText, costHelpText].compactMap { $0 }.joined(separator: " ")
     }
 }
 

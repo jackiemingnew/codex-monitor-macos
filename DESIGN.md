@@ -118,6 +118,10 @@ Do not scale font size with viewport width. Do not use negative letter spacing.
 - Quota bars should be quiet until thresholds matter.
 - Healthy quota is green; warning and critical states take over only at thresholds.
 - `Today`, 5h, 7d, and 30d values should scan as numbers first, explanations second.
+- Keep reset-credit availability in the existing provenance row as tertiary text; do not add a new quota card or increase panel height.
+- Show API-equivalent cost beneath the existing Today/7d/30d token values in the fixed 44px footer. Use tertiary text, monospaced digits, and scaling for long amounts.
+- Show `回填中` instead of a monetary subtotal until the complete local history snapshot is ready. Preserve the last complete amount during later incremental scans; append `*` only when a complete snapshot contains unpriced models. Explain the fact that this is not a subscription bill through help and accessibility text rather than permanent chrome.
+- Once that complete snapshot exists, use its Today/7d/30d token buckets in the footer as well, so the visible Token and cost figures share CodexBar-compatible lineage accounting. Keep CLI/Node/JSON token contracts unchanged.
 - Keep pace language deterministic and compact: either the current rate lasts
   until reset or it has a projected exhaustion time. Hide pace when inputs are
   insufficient rather than implying precision.

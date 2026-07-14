@@ -177,6 +177,13 @@ for metricID in [
     "task.total_tokens",
     "quota.5h",
     "quota.7d",
+    "quota.reset_credits_available",
+    "cost.api_equivalent.today",
+    "cost.api_equivalent.7d",
+    "cost.api_equivalent.30d",
+    "cost.report.quality",
+    "cost.scan.logical_bytes",
+    "cost.scan.database_writes",
     "skill.catalog.enabled_count",
     "skill.catalog.disabled_count",
     "skill.catalog.context_token_estimate",
@@ -746,7 +753,7 @@ let appServerSecondaryReset = Int(appServerFixtureNow.timeIntervalSince1970) + 7
 let appServerSparkPrimaryReset = appServerPrimaryReset + 600
 let appServerSparkSecondaryReset = appServerSecondaryReset + 600
 let appServerRateLimitOutput = """
-{"jsonrpc":"2.0","id":2,"result":{"rateLimits":{"limitId":"codex","limitName":null,"primary":{"usedPercent":17,"windowDurationMins":300,"resetsAt":\(appServerPrimaryReset)},"secondary":{"usedPercent":22,"windowDurationMins":10080,"resetsAt":\(appServerSecondaryReset)}},"rateLimitsByLimitId":{"codex_bengalfox":{"limitId":"codex_bengalfox","limitName":"GPT-5.3-Codex-Spark","primary":{"usedPercent":78,"windowDurationMins":300,"resetsAt":\(appServerSparkPrimaryReset)},"secondary":{"usedPercent":42,"windowDurationMins":10080,"resetsAt":\(appServerSparkSecondaryReset)}},"codex_luna":{"limitId":"codex_luna","limitName":"GPT-5.6-Codex-Luna","primary":{"usedPercent":12,"windowDurationMins":300,"resetsAt":\(appServerSparkPrimaryReset)},"secondary":{"usedPercent":34,"windowDurationMins":10080,"resetsAt":\(appServerSparkSecondaryReset)}},"codex":{"limitId":"codex","limitName":null,"primary":{"usedPercent":17,"windowDurationMins":300,"resetsAt":\(appServerPrimaryReset)},"secondary":{"usedPercent":22,"windowDurationMins":10080,"resetsAt":\(appServerSecondaryReset)}}}}}
+{"jsonrpc":"2.0","id":2,"result":{"rateLimits":{"limitId":"codex","limitName":null,"primary":{"usedPercent":17,"windowDurationMins":300,"resetsAt":\(appServerPrimaryReset)},"secondary":{"usedPercent":22,"windowDurationMins":10080,"resetsAt":\(appServerSecondaryReset)}},"rateLimitsByLimitId":{"codex_bengalfox":{"limitId":"codex_bengalfox","limitName":"GPT-5.3-Codex-Spark","primary":{"usedPercent":78,"windowDurationMins":300,"resetsAt":\(appServerSparkPrimaryReset)},"secondary":{"usedPercent":42,"windowDurationMins":10080,"resetsAt":\(appServerSparkSecondaryReset)}},"codex_luna":{"limitId":"codex_luna","limitName":"GPT-5.6-Codex-Luna","primary":{"usedPercent":12,"windowDurationMins":300,"resetsAt":\(appServerSparkPrimaryReset)},"secondary":{"usedPercent":34,"windowDurationMins":10080,"resetsAt":\(appServerSparkSecondaryReset)}},"codex":{"limitId":"codex","limitName":null,"primary":{"usedPercent":17,"windowDurationMins":300,"resetsAt":\(appServerPrimaryReset)},"secondary":{"usedPercent":22,"windowDurationMins":10080,"resetsAt":\(appServerSecondaryReset)}}},"rateLimitResetCredits":{"availableCount":2,"credits":[{"status":"available","expiresAt":\(appServerSecondaryReset)},{"status":"available"},{"status":"used","expiresAt":\(appServerSecondaryReset)},{"status":"available","expiresAt":1}]}}}
 """
 let appServerSnapshot = runner.require(
     CodexUsageStore().parseAppServerRateLimits(
@@ -766,6 +773,24 @@ runner.check(appServerSnapshot.sparkQuotaWindows.map(\.label) == ["5h", "7d"], "
 runner.check(appServerSnapshot.sparkQuotaWindows.allSatisfy { !$0.id.contains("luna") }, "app-server unknown model quota windows should not appear in Spark quota windows")
 runner.check(appServerSnapshot.sparkQuotaWindows.first?.remainingPercent == 22, "app-server Spark 5h remaining percent should decode")
 runner.check(appServerSnapshot.sparkQuotaWindows.last?.remainingPercent == 58, "app-server Spark 7d remaining percent should decode")
+runner.check(
+    appServerSnapshot.resetCredits?.availableCount(now: appServerFixtureNow) == 2,
+    "app-server reset credits should count only available, unexpired entries"
+)
+
+let zeroResetCreditOutput = appServerRateLimitOutput
+    .replacingOccurrences(
+        of: #""availableCount":2,"credits":[{"status":"available","expiresAt":\#(appServerSecondaryReset)},{"status":"available"},{"status":"used","expiresAt":\#(appServerSecondaryReset)},{"status":"available","expiresAt":1}]"#,
+        with: #""availableCount":0,"credits":[]"#
+    )
+let zeroResetCreditSnapshot = runner.require(
+    CodexUsageStore().parseAppServerRateLimits(output: zeroResetCreditOutput, now: appServerFixtureNow),
+    "zero reset-credit fixture should parse"
+)
+runner.check(
+    zeroResetCreditSnapshot.resetCredits?.availableCount(now: appServerFixtureNow) == 0,
+    "an authoritative zero reset-credit count should remain visible as zero"
+)
 
 let weeklyOnlyReset = Int(appServerFixtureNow.timeIntervalSince1970) + 7 * 24 * 60 * 60
 let weeklyOnlyAppServerOutput = """
@@ -781,6 +806,869 @@ let weeklyOnlyAppServerSnapshot = runner.require(
 runner.check(weeklyOnlyAppServerSnapshot.primaryPercent == 100, "weekly-only app-server quota should expose full remaining usage")
 runner.check(weeklyOnlyAppServerSnapshot.primaryWindowMinutes == 10_080, "weekly-only app-server quota should retain its seven-day duration")
 runner.check(weeklyOnlyAppServerSnapshot.secondaryPercent == nil, "weekly-only app-server quota should not synthesize a secondary window")
+runner.check(weeklyOnlyAppServerSnapshot.resetCredits == nil, "a missing reset-credit field should remain unavailable")
+let legacyRateLimitCacheJSON = #"{"primaryPercent":50,"secondaryPercent":75,"primaryResetsAt":null,"secondaryResetsAt":null,"primaryWindowMinutes":300,"secondaryWindowMinutes":10080,"capturedAt":null,"isPrimaryCodexLimit":true,"sparkQuotaWindows":[]}"#
+let legacyRateLimitCache = runner.require(
+    try? JSONDecoder().decode(RateLimitSnapshot.self, from: Data(legacyRateLimitCacheJSON.utf8)),
+    "a pre-reset-credit cache should remain backward-decodable"
+)
+runner.check(legacyRateLimitCache.resetCredits == nil, "a pre-reset-credit cache should expose an unavailable count")
+
+let standardSolEstimate = runner.require(
+    CostUsagePricing.estimate(
+        model: "gpt-5.6-sol",
+        inputTokens: 100_000,
+        cachedInputTokens: 40_000,
+        outputTokens: 10_000
+    ),
+    "GPT-5.6 Sol pricing should be available"
+)
+runner.check(abs(standardSolEstimate.usd - 0.62) < 0.000_000_1, "cached input should remain a priced subset of input")
+let clampedCachedEstimate = runner.require(
+    CostUsagePricing.estimate(
+        model: "gpt-5.6-sol",
+        inputTokens: 100,
+        cachedInputTokens: 200,
+        outputTokens: 0
+    ),
+    "cached-input clamp fixture should price"
+)
+runner.check(abs(clampedCachedEstimate.usd - 0.000_05) < 0.000_000_001, "cached input must never exceed total input")
+let longContextEstimate = runner.require(
+    CostUsagePricing.estimate(
+        model: "gpt-5.5",
+        inputTokens: 300_000,
+        cachedInputTokens: 0,
+        outputTokens: 100_000
+    ),
+    "GPT-5.5 long-context pricing should be available"
+)
+runner.check(abs(longContextEstimate.usd - 7.5) < 0.000_000_1, "long context should apply 2x input and 1.5x output pricing")
+runner.check(
+    CostUsagePricing.estimate(model: "gpt-5.6-terra", inputTokens: 1, cachedInputTokens: 0, outputTokens: 1) != nil,
+    "GPT-5.6 Terra should have a built-in standard API price"
+)
+runner.check(
+    CostUsagePricing.estimate(model: "gpt-5.6-luna", inputTokens: 1, cachedInputTokens: 0, outputTokens: 1) != nil,
+    "GPT-5.6 Luna should have a built-in standard API price"
+)
+let sparkProxyEstimate = runner.require(
+    CostUsagePricing.estimate(
+        model: "gpt-5.3-codex-spark",
+        inputTokens: 100_000,
+        cachedInputTokens: 0,
+        outputTokens: 10_000
+    ),
+    "Spark proxy pricing should be available"
+)
+runner.check(
+    sparkProxyEstimate.usesSparkProxy,
+    "Spark should disclose the effective GPT-5.3-Codex proxy used by CodexBar's runtime catalog"
+)
+runner.check(
+    CostUsagePricing.estimate(model: "gpt-5.4-mini", inputTokens: 1, cachedInputTokens: 0, outputTokens: 1) != nil,
+    "GPT-5.4 Mini should match the CodexBar corpus pricing table"
+)
+runner.check(
+    CostUsagePricing.estimate(model: "future-unknown-model", inputTokens: 1, cachedInputTokens: 0, outputTokens: 1) == nil,
+    "unknown models must not receive a guessed price"
+)
+runner.check(
+    Formatters.apiEquivalentCost(.unavailable) == "--",
+    "unavailable API-equivalent cost should render as dashes"
+)
+runner.check(
+    Formatters.apiEquivalentCost(CostEstimateWindow(usd: 0.62, isPartial: true)) == "≈$0.62*",
+    "partial API-equivalent cost should use the compact starred form"
+)
+runner.check(
+    !CostUsageRefreshPolicy.shouldRequestRefresh(
+        showsPeriodUsage: true,
+        reason: .presentation,
+        environment: RefreshEnvironment(isLowPowerModeEnabled: false, isThermallyConstrained: false)
+    ),
+    "opening the detail panel must not request a cost scan"
+)
+runner.check(
+    CostUsageRefreshPolicy.shouldRequestRefresh(
+        showsPeriodUsage: true,
+        reason: .timer,
+        environment: RefreshEnvironment(isLowPowerModeEnabled: false, isThermallyConstrained: false)
+    ),
+    "a utility-queue cost refresh must not starve while Codex is running"
+)
+runner.check(
+    !CostUsageRefreshPolicy.shouldRequestRefresh(
+        showsPeriodUsage: true,
+        reason: .timer,
+        environment: RefreshEnvironment(isLowPowerModeEnabled: true, isThermallyConstrained: false)
+    ),
+    "cost backfill should defer in Low Power Mode"
+)
+runner.check(
+    CostUsageRefreshPolicy.shouldRequestRefresh(
+        showsPeriodUsage: true,
+        reason: .timer,
+        environment: RefreshEnvironment(isLowPowerModeEnabled: false, isThermallyConstrained: false)
+    ),
+    "an unconstrained timer refresh may request one bounded background cost slice"
+)
+runner.check(CostUsageScanBudget.automatic.maxBytes == 8 * 1024 * 1024, "automatic cost scans should cap logical reads at 8 MiB")
+runner.check(CostUsageScanBudget.automatic.maxCPUNanoseconds == 50_000_000, "automatic cost scans should cap CPU time at 50ms")
+runner.check(CostUsageScanBudget.automatic.maxWallTime == 0.250, "automatic cost scans should cap wall time at 250ms")
+runner.check(CostUsageScanBudget.automatic.maxRowBytes == 256 * 1024, "cost scans should cap one JSONL row at 256 KiB")
+
+func costTurnContextLine(timestamp: Int, model: String) -> String {
+    #"{"timestamp":\#(timestamp),"type":"turn_context","payload":{"model":"\#(model)"}}"#
+}
+
+func costTokenLine(
+    timestamp: Int,
+    input: Int,
+    cached: Int,
+    output: Int,
+    lastInput: Int,
+    lastCached: Int,
+    lastOutput: Int
+) -> String {
+    #"{"timestamp":\#(timestamp),"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":\#(lastInput),"cached_input_tokens":\#(lastCached),"output_tokens":\#(lastOutput)},"total_token_usage":{"input_tokens":\#(input),"cached_input_tokens":\#(cached),"output_tokens":\#(output)}}}}"#
+}
+
+func costForkLine(timestamp: Int, parentID: String) -> String {
+    #"{"timestamp":\#(timestamp),"type":"session_meta","payload":{"forked_from_id":"\#(parentID)"}}"#
+}
+
+func costSessionMetaLine(timestamp: Int, sessionID: String, parentID: String? = nil) -> String {
+    if let parentID {
+        return #"{"timestamp":\#(timestamp),"type":"session_meta","payload":{"id":"\#(sessionID)","forked_from_id":"\#(parentID)"}}"#
+    }
+    return #"{"timestamp":\#(timestamp),"type":"session_meta","payload":{"id":"\#(sessionID)"}}"#
+}
+
+func writeCostFixture(_ lines: [String], to url: URL) throws {
+    try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: url, options: .atomic)
+}
+
+func appendCostFixture(_ lines: [String], to url: URL) throws {
+    let handle = try FileHandle(forWritingTo: url)
+    defer { try? handle.close() }
+    try handle.seekToEnd()
+    try handle.write(contentsOf: Data((lines.joined(separator: "\n") + "\n").utf8))
+}
+
+let costUsageRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("CodexNotchCostUsage-\(UUID().uuidString)")
+try FileManager.default.createDirectory(at: costUsageRoot, withIntermediateDirectories: true)
+defer {
+    try? FileManager.default.removeItem(at: costUsageRoot)
+}
+let costUsageNow = Date()
+let costEventEpoch = Int(costUsageNow.timeIntervalSince1970) - 20
+let costSessionID = "11111111-1111-4111-8111-111111111111"
+let costSessionURL = costUsageRoot.appendingPathComponent("rollout-\(costSessionID).jsonl")
+try writeCostFixture(
+    [
+        costTurnContextLine(timestamp: costEventEpoch, model: "gpt-5.6-sol"),
+        costTokenLine(
+            timestamp: costEventEpoch + 1,
+            input: 100_000,
+            cached: 40_000,
+            output: 10_000,
+            lastInput: 100_000,
+            lastCached: 40_000,
+            lastOutput: 10_000
+        ),
+        costTurnContextLine(timestamp: costEventEpoch + 2, model: "gpt-5.6-luna"),
+        costTokenLine(
+            timestamp: costEventEpoch + 3,
+            input: 150_000,
+            cached: 50_000,
+            output: 20_000,
+            lastInput: 50_000,
+            lastCached: 10_000,
+            lastOutput: 10_000
+        )
+    ],
+    to: costSessionURL
+)
+let costUsageDatabase = costUsageRoot.appendingPathComponent("usage-deltas.sqlite").path
+let costEstimator = CostUsageEstimator(databasePath: costUsageDatabase)
+costEstimator.updateCandidates(
+    [CostUsageSessionCandidate(sessionID: costSessionID, path: costSessionURL.path)],
+    inventoryTruncated: false
+)
+let firstCostScan = costEstimator.scanSlice(now: costUsageNow, bypassCadence: true)
+runner.check(firstCostScan.isComplete, "a small cost fixture should finish in one budgeted slice")
+runner.check(firstCostScan.jsonlBytesRead > 0, "a cold cost scan should read the fixture")
+let firstCostSummary = costEstimator.loadSummary(now: costUsageNow)
+runner.check(firstCostSummary.quality == .complete, "known-model cost history should be complete after catch-up")
+runner.check(
+    firstCostSummary.today.tokenCount == 170_000,
+    "published footer tokens should use the same complete-corpus deltas as CodexBar costs"
+)
+runner.check(
+    abs((firstCostSummary.today.usd ?? -1) - 0.721) < 0.000_000_1,
+    "model switches should price each confirmed delta with the active model"
+)
+let warmCostScan = costEstimator.scanSlice(now: costUsageNow.addingTimeInterval(1), bypassCadence: true)
+runner.check(warmCostScan.jsonlBytesRead == 0, "a warm unchanged cost scan should read zero JSONL bytes")
+runner.check(warmCostScan.databaseWrites == 0, "a warm unchanged cost scan should write zero derived rows")
+
+try appendCostFixture(
+    [
+        costTokenLine(
+            timestamp: costEventEpoch + 4,
+            input: 170_000,
+            cached: 55_000,
+            output: 22_000,
+            lastInput: 20_000,
+            lastCached: 5_000,
+            lastOutput: 2_000
+        )
+    ],
+    to: costSessionURL
+)
+let appendedCostScan = costEstimator.scanSlice(now: costUsageNow.addingTimeInterval(2), bypassCadence: true)
+runner.check(appendedCostScan.jsonlBytesRead > 0, "an appended cost scan should resume from its complete-line checkpoint")
+let appendedCostSummary = costEstimator.loadSummary(now: costUsageNow)
+runner.check(
+    abs((appendedCostSummary.today.usd ?? -1) - 0.7485) < 0.000_000_1,
+    "checkpoint resume should add only the appended model delta"
+)
+try appendCostFixture(
+    [
+        costTurnContextLine(timestamp: costEventEpoch + 5, model: "future-unknown-model"),
+        costTokenLine(
+            timestamp: costEventEpoch + 6,
+            input: 180_000,
+            cached: 60_000,
+            output: 25_000,
+            lastInput: 10_000,
+            lastCached: 5_000,
+            lastOutput: 3_000
+        )
+    ],
+    to: costSessionURL
+)
+_ = costEstimator.scanSlice(now: costUsageNow.addingTimeInterval(3), bypassCadence: true)
+let unknownModelSummary = costEstimator.loadSummary(now: costUsageNow)
+runner.check(unknownModelSummary.quality == .partial, "unknown-model tokens should make the relevant windows partial")
+runner.check(unknownModelSummary.today.isPartial, "unknown-model cost should display with a partial marker")
+runner.check(
+    abs((unknownModelSummary.today.usd ?? -1) - 0.7485) < 0.000_000_1,
+    "unknown-model tokens should not be assigned a guessed dollar value"
+)
+
+let resumeSessionID = "22222222-2222-4222-8222-222222222222"
+let resumeSessionURL = costUsageRoot.appendingPathComponent("rollout-\(resumeSessionID).jsonl")
+let resumeTurn = costTurnContextLine(timestamp: costEventEpoch, model: "gpt-5.6-sol")
+let resumeEventOne = costTokenLine(
+    timestamp: costEventEpoch + 1,
+    input: 100_000,
+    cached: 40_000,
+    output: 10_000,
+    lastInput: 100_000,
+    lastCached: 40_000,
+    lastOutput: 10_000
+)
+let resumeEventTwo = costTokenLine(
+    timestamp: costEventEpoch + 2,
+    input: 200_000,
+    cached: 80_000,
+    output: 20_000,
+    lastInput: 100_000,
+    lastCached: 40_000,
+    lastOutput: 10_000
+)
+try writeCostFixture([resumeTurn, resumeEventOne, resumeEventTwo], to: resumeSessionURL)
+let resumeEstimator = CostUsageEstimator(
+    databasePath: costUsageRoot.appendingPathComponent("resume-usage-deltas.sqlite").path
+)
+resumeEstimator.updateCandidates(
+    [CostUsageSessionCandidate(sessionID: resumeSessionID, path: resumeSessionURL.path)],
+    inventoryTruncated: false
+)
+let firstLineBudget = UInt64(Data((resumeTurn + "\n" + resumeEventOne + "\n").utf8).count + 10)
+let interruptedCostScan = resumeEstimator.scanSlice(
+    now: costUsageNow,
+    budget: CostUsageScanBudget(
+        maxBytes: firstLineBudget,
+        maxCPUNanoseconds: 1_000_000_000,
+        maxWallTime: 2,
+        maxRowBytes: 256 * 1024
+    ),
+    bypassCadence: true
+)
+runner.check(interruptedCostScan.stopReason == .byteBudget, "a short slice should stop at its byte budget")
+runner.check(!interruptedCostScan.isComplete, "a short slice should leave history partial")
+let interruptedCostSummary = resumeEstimator.loadSummary(now: costUsageNow)
+runner.check(
+    interruptedCostSummary.today.usd == nil,
+    "an incomplete first scan must not publish a partial subtotal as the window estimate"
+)
+runner.check(
+    interruptedCostSummary.today.tokenCount == nil,
+    "an incomplete first scan must not publish a partial token subtotal either"
+)
+runner.check(
+    Formatters.apiEquivalentCost(interruptedCostSummary.today) == "回填中",
+    "an incomplete first scan should expose a compact backfill state"
+)
+let resumedCostScan = resumeEstimator.scanSlice(now: costUsageNow.addingTimeInterval(1), bypassCadence: true)
+runner.check(resumedCostScan.isComplete, "the next slice should resume and finish from a complete-line checkpoint")
+runner.check(
+    abs((resumeEstimator.loadSummary(now: costUsageNow).today.usd ?? -1) - 1.24) < 0.000_000_1,
+    "budgeted checkpoint resume should neither lose nor duplicate token deltas"
+)
+let resumeEventThree = costTokenLine(
+    timestamp: costEventEpoch + 3,
+    input: 300_000,
+    cached: 120_000,
+    output: 30_000,
+    lastInput: 100_000,
+    lastCached: 40_000,
+    lastOutput: 10_000
+)
+let resumeEventFour = costTokenLine(
+    timestamp: costEventEpoch + 4,
+    input: 400_000,
+    cached: 160_000,
+    output: 40_000,
+    lastInput: 100_000,
+    lastCached: 40_000,
+    lastOutput: 10_000
+)
+try appendCostFixture([resumeEventThree, resumeEventFour], to: resumeSessionURL)
+let appendedPartialScan = resumeEstimator.scanSlice(
+    now: costUsageNow.addingTimeInterval(2),
+    budget: CostUsageScanBudget(
+        maxBytes: UInt64(Data((resumeEventThree + "\n").utf8).count + 10),
+        maxCPUNanoseconds: 1_000_000_000,
+        maxWallTime: 2,
+        maxRowBytes: 256 * 1024
+    ),
+    bypassCadence: true
+)
+runner.check(!appendedPartialScan.isComplete, "an appended partial slice should keep its working snapshot private")
+runner.check(
+    abs((resumeEstimator.loadSummary(now: costUsageNow).today.usd ?? -1) - 1.24) < 0.000_000_1,
+    "a partial incremental scan must preserve the last complete published snapshot"
+)
+runner.check(
+    resumeEstimator.scanSlice(now: costUsageNow.addingTimeInterval(3), bypassCadence: true).isComplete,
+    "the appended scan should publish after the full corpus catches up"
+)
+runner.check(
+    abs((resumeEstimator.loadSummary(now: costUsageNow).today.usd ?? -1) - 2.48) < 0.000_000_1,
+    "a completed incremental scan should atomically publish the new total"
+)
+
+let parentSessionID = "33333333-3333-4333-8333-333333333333"
+let childSessionID = "44444444-4444-4444-8444-444444444444"
+let parentSessionURL = costUsageRoot.appendingPathComponent("rollout-\(parentSessionID).jsonl")
+let childSessionURL = costUsageRoot.appendingPathComponent("rollout-\(childSessionID).jsonl")
+try writeCostFixture(
+    [
+        costSessionMetaLine(timestamp: costEventEpoch, sessionID: parentSessionID),
+        costTurnContextLine(timestamp: costEventEpoch, model: "gpt-5.6-sol"),
+        costTokenLine(timestamp: costEventEpoch + 1, input: 100_000, cached: 40_000, output: 10_000, lastInput: 100_000, lastCached: 40_000, lastOutput: 10_000),
+        costTokenLine(timestamp: costEventEpoch + 3, input: 200_000, cached: 80_000, output: 20_000, lastInput: 100_000, lastCached: 40_000, lastOutput: 10_000)
+    ],
+    to: parentSessionURL
+)
+try writeCostFixture(
+    [
+        costSessionMetaLine(
+            timestamp: costEventEpoch + 1,
+            sessionID: childSessionID,
+            parentID: parentSessionID
+        ),
+        costForkLine(
+            timestamp: costEventEpoch + 1,
+            parentID: "99999999-9999-4999-8999-999999999999"
+        ),
+        costTokenLine(
+            timestamp: costEventEpoch + 1,
+            input: 100_000,
+            cached: 40_000,
+            output: 10_000,
+            lastInput: 100_000,
+            lastCached: 40_000,
+            lastOutput: 10_000
+        ),
+        costTurnContextLine(timestamp: costEventEpoch + 2, model: "gpt-5.6-sol"),
+        costTokenLine(timestamp: costEventEpoch + 4, input: 150_000, cached: 60_000, output: 15_000, lastInput: 50_000, lastCached: 20_000, lastOutput: 5_000)
+    ],
+    to: childSessionURL
+)
+try FileManager.default.setAttributes([.modificationDate: costUsageNow.addingTimeInterval(-10)], ofItemAtPath: parentSessionURL.path)
+try FileManager.default.setAttributes([.modificationDate: costUsageNow], ofItemAtPath: childSessionURL.path)
+let forkEstimator = CostUsageEstimator(
+    databasePath: costUsageRoot.appendingPathComponent("fork-usage-deltas.sqlite").path
+)
+forkEstimator.updateCandidates(
+    [
+        CostUsageSessionCandidate(sessionID: parentSessionID, path: parentSessionURL.path),
+        CostUsageSessionCandidate(sessionID: childSessionID, path: childSessionURL.path)
+    ],
+    inventoryTruncated: false
+)
+let deferredForkScan = forkEstimator.scanSlice(now: costUsageNow, bypassCadence: true)
+runner.check(deferredForkScan.stopReason == .deferredFork, "a newest-first child should defer until its parent baseline is cached")
+let completedForkScan = forkEstimator.scanSlice(now: costUsageNow.addingTimeInterval(1), bypassCadence: true)
+runner.check(completedForkScan.isComplete, "a deferred fork should complete on the next bounded slice")
+runner.check(
+    abs((forkEstimator.loadSummary(now: costUsageNow).today.usd ?? -1) - 1.55) < 0.000_000_1,
+    "forked sessions should subtract inherited parent totals before pricing"
+)
+
+let grandchildSessionID = "45454545-4545-4545-8545-454545454545"
+let grandchildSessionURL = costUsageRoot.appendingPathComponent("rollout-\(grandchildSessionID).jsonl")
+try writeCostFixture(
+    [
+        costSessionMetaLine(
+            timestamp: costEventEpoch + 4,
+            sessionID: grandchildSessionID,
+            parentID: childSessionID
+        ),
+        costTurnContextLine(timestamp: costEventEpoch + 5, model: "gpt-5.6-sol"),
+        costTokenLine(
+            timestamp: costEventEpoch + 6,
+            input: 170_000,
+            cached: 68_000,
+            output: 17_000,
+            lastInput: 20_000,
+            lastCached: 8_000,
+            lastOutput: 2_000
+        )
+    ],
+    to: grandchildSessionURL
+)
+try FileManager.default.setAttributes(
+    [.modificationDate: costUsageNow.addingTimeInterval(10)],
+    ofItemAtPath: grandchildSessionURL.path
+)
+let nestedForkEstimator = CostUsageEstimator(
+    databasePath: costUsageRoot.appendingPathComponent("nested-fork-usage-deltas.sqlite").path
+)
+nestedForkEstimator.updateCandidates(
+    [
+        CostUsageSessionCandidate(sessionID: parentSessionID, path: parentSessionURL.path),
+        CostUsageSessionCandidate(sessionID: childSessionID, path: childSessionURL.path),
+        CostUsageSessionCandidate(sessionID: grandchildSessionID, path: grandchildSessionURL.path)
+    ],
+    inventoryTruncated: false
+)
+var nestedForkScan = CostUsageScanMetrics.unavailable
+for offset in 0..<4 {
+    nestedForkScan = nestedForkEstimator.scanSlice(
+        now: costUsageNow.addingTimeInterval(TimeInterval(offset)),
+        bypassCadence: true
+    )
+    if nestedForkScan.isComplete {
+        break
+    }
+}
+runner.check(nestedForkScan.isComplete, "a multi-level fork should resolve through its parent chain")
+runner.check(
+    abs((nestedForkEstimator.loadSummary(now: costUsageNow).today.usd ?? -1) - 1.674) < 0.000_000_1,
+    "a grandchild fork should inherit the parent's absolute cumulative snapshot, not its net delta"
+)
+
+let ambiguousParentID = "46464646-4646-4646-8646-464646464646"
+let ambiguousChildID = "47474747-4747-4747-8747-474747474747"
+let ambiguousParentURL = costUsageRoot.appendingPathComponent("rollout-\(ambiguousParentID).jsonl")
+let ambiguousChildURL = costUsageRoot.appendingPathComponent("rollout-\(ambiguousChildID).jsonl")
+try writeCostFixture(
+    [
+        costSessionMetaLine(
+            timestamp: costEventEpoch + 3,
+            sessionID: ambiguousParentID,
+            parentID: parentSessionID
+        ),
+        costTokenLine(
+            timestamp: costEventEpoch + 3,
+            input: 200_000,
+            cached: 80_000,
+            output: 20_000,
+            lastInput: 200_000,
+            lastCached: 80_000,
+            lastOutput: 20_000
+        ),
+        costSessionMetaLine(timestamp: costEventEpoch + 3, sessionID: parentSessionID),
+        costTurnContextLine(timestamp: costEventEpoch + 4, model: "gpt-5.6-sol"),
+        costTokenLine(
+            timestamp: costEventEpoch + 5,
+            input: 250_000,
+            cached: 100_000,
+            output: 25_000,
+            lastInput: 50_000,
+            lastCached: 20_000,
+            lastOutput: 5_000
+        )
+    ],
+    to: ambiguousParentURL
+)
+try writeCostFixture(
+    [
+        costSessionMetaLine(
+            timestamp: costEventEpoch + 5,
+            sessionID: ambiguousChildID,
+            parentID: ambiguousParentID
+        ),
+        costTurnContextLine(timestamp: costEventEpoch + 5, model: "gpt-5.6-sol"),
+        costTokenLine(
+            timestamp: costEventEpoch + 6,
+            input: 260_000,
+            cached: 104_000,
+            output: 26_000,
+            lastInput: 10_000,
+            lastCached: 4_000,
+            lastOutput: 1_000
+        ),
+        costTokenLine(
+            timestamp: costEventEpoch + 7,
+            input: 270_000,
+            cached: 108_000,
+            output: 27_000,
+            lastInput: 10_000,
+            lastCached: 4_000,
+            lastOutput: 1_000
+        )
+    ],
+    to: ambiguousChildURL
+)
+try FileManager.default.setAttributes(
+    [.modificationDate: costUsageNow.addingTimeInterval(20)],
+    ofItemAtPath: ambiguousParentURL.path
+)
+try FileManager.default.setAttributes(
+    [.modificationDate: costUsageNow.addingTimeInterval(30)],
+    ofItemAtPath: ambiguousChildURL.path
+)
+let ambiguousForkEstimator = CostUsageEstimator(
+    databasePath: costUsageRoot.appendingPathComponent("ambiguous-fork-usage-deltas.sqlite").path
+)
+ambiguousForkEstimator.updateCandidates(
+    [
+        CostUsageSessionCandidate(sessionID: parentSessionID, path: parentSessionURL.path),
+        CostUsageSessionCandidate(sessionID: ambiguousParentID, path: ambiguousParentURL.path),
+        CostUsageSessionCandidate(sessionID: ambiguousChildID, path: ambiguousChildURL.path)
+    ],
+    inventoryTruncated: false
+)
+var ambiguousForkScan = CostUsageScanMetrics.unavailable
+for offset in 0..<5 {
+    ambiguousForkScan = ambiguousForkEstimator.scanSlice(
+        now: costUsageNow.addingTimeInterval(TimeInterval(offset)),
+        bypassCadence: true
+    )
+    if ambiguousForkScan.isComplete {
+        break
+    }
+}
+runner.check(ambiguousForkScan.isComplete, "embedded ancestor metadata should not invalidate a nested fork")
+let embeddedMetadataCost = ambiguousForkEstimator.loadSummary(now: costUsageNow).today.usd ?? -1
+runner.check(
+    abs(embeddedMetadataCost - 1.674) < 0.000_000_1,
+    "later embedded session metadata should preserve CodexBar's first-metadata parent baseline (got \(embeddedMetadataCost))"
+)
+
+let sharedMetadataID = "48484848-4848-4848-8848-484848484848"
+let duplicateFileAID = "49494949-4949-4949-8949-494949494949"
+let duplicateFileBID = "50505050-5050-4050-8050-505050505050"
+let duplicateFileAURL = costUsageRoot.appendingPathComponent("rollout-\(duplicateFileAID).jsonl")
+let duplicateFileBURL = costUsageRoot.appendingPathComponent("rollout-\(duplicateFileBID).jsonl")
+let duplicatedUsageRows = [
+    costSessionMetaLine(timestamp: costEventEpoch, sessionID: sharedMetadataID),
+    costTurnContextLine(timestamp: costEventEpoch, model: "gpt-5.6-sol"),
+    costTokenLine(
+        timestamp: costEventEpoch + 1,
+        input: 10_000,
+        cached: 0,
+        output: 1_000,
+        lastInput: 10_000,
+        lastCached: 0,
+        lastOutput: 1_000
+    ),
+    costTokenLine(
+        timestamp: costEventEpoch + 2,
+        input: 20_000,
+        cached: 0,
+        output: 2_000,
+        lastInput: 10_000,
+        lastCached: 0,
+        lastOutput: 1_000
+    )
+]
+try writeCostFixture(duplicatedUsageRows, to: duplicateFileAURL)
+try writeCostFixture(
+    duplicatedUsageRows + [
+        costTokenLine(
+            timestamp: costEventEpoch + 3,
+            input: 30_000,
+            cached: 0,
+            output: 3_000,
+            lastInput: 10_000,
+            lastCached: 0,
+            lastOutput: 1_000
+        )
+    ],
+    to: duplicateFileBURL
+)
+let duplicateRowsDatabase = costUsageRoot.appendingPathComponent("duplicate-rows-usage-deltas.sqlite").path
+let duplicateRowsEstimator = CostUsageEstimator(databasePath: duplicateRowsDatabase)
+duplicateRowsEstimator.updateCandidates(
+    [
+        CostUsageSessionCandidate(sessionID: duplicateFileAID, path: duplicateFileAURL.path),
+        CostUsageSessionCandidate(sessionID: duplicateFileBID, path: duplicateFileBURL.path)
+    ],
+    inventoryTruncated: false
+)
+runner.check(
+    duplicateRowsEstimator.scanSlice(now: costUsageNow, bypassCadence: true).isComplete,
+    "shared session metadata rows should complete in one bounded scan"
+)
+runner.check(
+    abs((duplicateRowsEstimator.loadSummary(now: costUsageNow).today.usd ?? -1) - 0.24) < 0.000_000_1,
+    "CodexBar-equivalent row identities should count duplicated fork history only once"
+)
+let duplicateRowCount = try Shell.run(
+    "/usr/bin/sqlite3",
+    [duplicateRowsDatabase, "SELECT COUNT(*) - COUNT(DISTINCT row_key) FROM cost_usage_rows;"]
+).trimmingCharacters(in: .whitespacesAndNewlines)
+runner.checkEqual(duplicateRowCount, "2", "two repeated usage rows should remain auditable as hashed occurrences")
+
+let exportedRootMetadataID = "51515151-5151-4151-8151-515151515151"
+let exportedParentID = "52525252-5252-4252-8252-525252525252"
+let exportedChildID = "53535353-5353-4353-8353-535353535353"
+let exportedParentURL = costUsageRoot.appendingPathComponent("rollout-\(exportedParentID).jsonl")
+let exportedChildURL = costUsageRoot.appendingPathComponent("rollout-\(exportedChildID).jsonl")
+try writeCostFixture(
+    [
+        costSessionMetaLine(timestamp: costEventEpoch, sessionID: exportedRootMetadataID),
+        costTurnContextLine(timestamp: costEventEpoch, model: "gpt-5.6-sol"),
+        costTokenLine(timestamp: costEventEpoch + 1, input: 100_000, cached: 0, output: 10_000, lastInput: 100_000, lastCached: 0, lastOutput: 10_000),
+        costTokenLine(timestamp: costEventEpoch + 3, input: 200_000, cached: 0, output: 20_000, lastInput: 100_000, lastCached: 0, lastOutput: 10_000)
+    ],
+    to: exportedParentURL
+)
+try writeCostFixture(
+    [
+        costSessionMetaLine(
+            timestamp: costEventEpoch + 2,
+            sessionID: exportedRootMetadataID,
+            parentID: exportedParentID
+        ),
+        costTurnContextLine(timestamp: costEventEpoch + 2, model: "gpt-5.6-sol"),
+        costTokenLine(timestamp: costEventEpoch + 2, input: 250_000, cached: 0, output: 25_000, lastInput: 50_000, lastCached: 0, lastOutput: 5_000),
+        costTokenLine(timestamp: costEventEpoch + 4, input: 300_000, cached: 0, output: 30_000, lastInput: 50_000, lastCached: 0, lastOutput: 5_000)
+    ],
+    to: exportedChildURL
+)
+try FileManager.default.setAttributes(
+    [.modificationDate: costUsageNow.addingTimeInterval(-10)],
+    ofItemAtPath: exportedParentURL.path
+)
+try FileManager.default.setAttributes(
+    [.modificationDate: costUsageNow],
+    ofItemAtPath: exportedChildURL.path
+)
+let exportedForkEstimator = CostUsageEstimator(
+    databasePath: costUsageRoot.appendingPathComponent("exported-fork-usage-deltas.sqlite").path
+)
+exportedForkEstimator.updateCandidates(
+    [
+        CostUsageSessionCandidate(sessionID: exportedParentID, path: exportedParentURL.path),
+        CostUsageSessionCandidate(sessionID: exportedChildID, path: exportedChildURL.path)
+    ],
+    inventoryTruncated: false
+)
+var exportedForkScan = CostUsageScanMetrics.unavailable
+for offset in 0..<4 {
+    exportedForkScan = exportedForkEstimator.scanSlice(
+        now: costUsageNow.addingTimeInterval(TimeInterval(offset)),
+        bypassCadence: true
+    )
+    if exportedForkScan.isComplete {
+        break
+    }
+}
+runner.check(exportedForkScan.isComplete, "an exported fork with a mismatched filename id should finish via fallback")
+runner.check(
+    abs((exportedForkEstimator.loadSummary(now: costUsageNow).today.usd ?? -1) - 2.0) < 0.000_000_1,
+    "a filename id absent from first session metadata must not be used as a resolvable parent"
+)
+
+let interleavedSessionID = "55555555-5555-4555-8555-555555555555"
+let interleavedSessionURL = costUsageRoot.appendingPathComponent("rollout-\(interleavedSessionID).jsonl")
+try writeCostFixture(
+    [
+        costTurnContextLine(timestamp: costEventEpoch, model: "gpt-5.6-sol"),
+        costTokenLine(timestamp: costEventEpoch + 1, input: 100_000, cached: 40_000, output: 10_000, lastInput: 100_000, lastCached: 40_000, lastOutput: 10_000),
+        costTokenLine(timestamp: costEventEpoch + 2, input: 200_000, cached: 80_000, output: 20_000, lastInput: 100_000, lastCached: 40_000, lastOutput: 10_000),
+        costTokenLine(timestamp: costEventEpoch + 3, input: 150_000, cached: 60_000, output: 15_000, lastInput: 50_000, lastCached: 20_000, lastOutput: 5_000),
+        costTokenLine(timestamp: costEventEpoch + 4, input: 250_000, cached: 100_000, output: 25_000, lastInput: 100_000, lastCached: 40_000, lastOutput: 10_000)
+    ],
+    to: interleavedSessionURL
+)
+let interleavedEstimator = CostUsageEstimator(
+    databasePath: costUsageRoot.appendingPathComponent("interleaved-usage-deltas.sqlite").path
+)
+interleavedEstimator.updateCandidates(
+    [CostUsageSessionCandidate(sessionID: interleavedSessionID, path: interleavedSessionURL.path)],
+    inventoryTruncated: false
+)
+runner.check(
+    interleavedEstimator.scanSlice(now: costUsageNow, bypassCadence: true).isComplete,
+    "interleaved cumulative totals should finish in one small slice"
+)
+runner.check(
+    abs((interleavedEstimator.loadSummary(now: costUsageNow).today.usd ?? -1) - 1.55) < 0.000_000_1,
+    "cumulative rollbacks and interleaved lineage totals should not double count"
+)
+
+let oversizedSessionID = "66666666-6666-4666-8666-666666666666"
+let oversizedSessionURL = costUsageRoot.appendingPathComponent("rollout-\(oversizedSessionID).jsonl")
+let privateMarker = "PRIVATE_PROMPT_MARKER_SHOULD_NOT_PERSIST"
+let oversizedLine = #"{"type":"response_item","payload":{"text":""#
+    + privateMarker
+    + String(repeating: "x", count: 300 * 1024)
+    + #""}}"#
+let relevantOversizedLine = #"{"type":"event_msg","payload":{"type":"token_count","padding":""#
+    + String(repeating: "y", count: 300 * 1024)
+    + #""}}"#
+try writeCostFixture(
+    [
+        oversizedLine,
+        relevantOversizedLine,
+        costTurnContextLine(timestamp: costEventEpoch, model: "gpt-5.6-sol"),
+        costTokenLine(timestamp: costEventEpoch + 1, input: 100_000, cached: 40_000, output: 10_000, lastInput: 100_000, lastCached: 40_000, lastOutput: 10_000)
+    ],
+    to: oversizedSessionURL
+)
+let oversizedDatabase = costUsageRoot.appendingPathComponent("oversized-usage-deltas.sqlite").path
+let oversizedEstimator = CostUsageEstimator(databasePath: oversizedDatabase)
+oversizedEstimator.updateCandidates(
+    [CostUsageSessionCandidate(sessionID: oversizedSessionID, path: oversizedSessionURL.path)],
+    inventoryTruncated: false
+)
+let oversizedScan = oversizedEstimator.scanSlice(now: costUsageNow, bypassCadence: true)
+runner.check(oversizedScan.skippedOversizedRows == 2, "rows above 256 KiB should be skipped without buffering them fully")
+runner.check(!oversizedScan.isComplete, "a relevant skipped oversized row should keep cost quality partial")
+runner.check(oversizedEstimator.loadSummary(now: costUsageNow).quality == .partial, "relevant oversized-row loss should remain visible as partial")
+let oversizedDump = try Shell.run("/usr/bin/sqlite3", [oversizedDatabase, ".dump"])
+runner.check(!oversizedDump.contains(privateMarker), "derived cost SQLite must not persist prompt or response text")
+runner.check(!oversizedDump.contains(oversizedSessionURL.path), "derived cost SQLite must not persist rollout paths")
+
+let oversizedContextSessionID = "67676767-6767-4767-8767-676767676767"
+let oversizedContextSessionURL = costUsageRoot.appendingPathComponent(
+    "rollout-\(oversizedContextSessionID).jsonl"
+)
+let oversizedTurnContext = #"{"timestamp":"2026-07-14T10:00:00Z","type":"turn_context","payload":{"model":"gpt-5.6-luna","padding":""#
+    + String(repeating: "m", count: 300 * 1024)
+    + #""}}"#
+try writeCostFixture(
+    [
+        oversizedTurnContext,
+        costTokenLine(
+            timestamp: costEventEpoch + 1,
+            input: 100_000,
+            cached: 40_000,
+            output: 10_000,
+            lastInput: 100_000,
+            lastCached: 40_000,
+            lastOutput: 10_000
+        )
+    ],
+    to: oversizedContextSessionURL
+)
+let oversizedContextEstimator = CostUsageEstimator(
+    databasePath: costUsageRoot.appendingPathComponent("oversized-context-usage-deltas.sqlite").path
+)
+oversizedContextEstimator.updateCandidates(
+    [CostUsageSessionCandidate(sessionID: oversizedContextSessionID, path: oversizedContextSessionURL.path)],
+    inventoryTruncated: false
+)
+let oversizedContextScan = oversizedContextEstimator.scanSlice(now: costUsageNow, bypassCadence: true)
+runner.check(oversizedContextScan.isComplete, "an oversized turn_context should not make token history partial")
+runner.check(
+    abs((oversizedContextEstimator.loadSummary(now: costUsageNow).today.usd ?? -1) - 0.124) < 0.000_000_1,
+    "an oversized turn_context should retain its prefix model like CodexBar"
+)
+
+let removedSessionA = "68686868-6868-4868-8868-686868686868"
+let removedSessionB = "69696969-6969-4969-8969-696969696969"
+let removedSessionAURL = costUsageRoot.appendingPathComponent("rollout-\(removedSessionA).jsonl")
+let removedSessionBURL = costUsageRoot.appendingPathComponent("rollout-\(removedSessionB).jsonl")
+let removedSessionLines = [
+    costTurnContextLine(timestamp: costEventEpoch, model: "gpt-5.6-sol"),
+    costTokenLine(
+        timestamp: costEventEpoch + 1,
+        input: 100_000,
+        cached: 40_000,
+        output: 10_000,
+        lastInput: 100_000,
+        lastCached: 40_000,
+        lastOutput: 10_000
+    )
+]
+try writeCostFixture(removedSessionLines, to: removedSessionAURL)
+try writeCostFixture(removedSessionLines, to: removedSessionBURL)
+let removedSessionEstimator = CostUsageEstimator(
+    databasePath: costUsageRoot.appendingPathComponent("removed-session-usage-deltas.sqlite").path
+)
+removedSessionEstimator.updateCandidates(
+    [
+        CostUsageSessionCandidate(sessionID: removedSessionA, path: removedSessionAURL.path),
+        CostUsageSessionCandidate(sessionID: removedSessionB, path: removedSessionBURL.path)
+    ],
+    inventoryTruncated: false
+)
+runner.check(
+    removedSessionEstimator.scanSlice(now: costUsageNow, bypassCadence: true).isComplete,
+    "two cost files should publish as one complete inventory"
+)
+runner.check(
+    abs((removedSessionEstimator.loadSummary(now: costUsageNow).today.usd ?? -1) - 1.24) < 0.000_000_1,
+    "the complete inventory should include both session files"
+)
+removedSessionEstimator.updateCandidates(
+    [CostUsageSessionCandidate(sessionID: removedSessionA, path: removedSessionAURL.path)],
+    inventoryTruncated: false
+)
+let removedSessionScan = removedSessionEstimator.scanSlice(
+    now: costUsageNow.addingTimeInterval(1),
+    bypassCadence: true
+)
+runner.check(removedSessionScan.isComplete, "a removed cost file should publish a complete replacement inventory")
+runner.check(
+    abs((removedSessionEstimator.loadSummary(now: costUsageNow).today.usd ?? -1) - 0.62) < 0.000_000_1,
+    "a removed session file must subtract its cached Token and cost contribution"
+)
+
+let budgetSessionID = "77777777-7777-4777-8777-777777777777"
+let budgetSessionURL = costUsageRoot.appendingPathComponent("rollout-\(budgetSessionID).jsonl")
+let budgetLine = #"{"type":"response_item","payload":{"kind":"ignored","value":""#
+    + String(repeating: "z", count: 900)
+    + #""}}"#
+let budgetLineCount = (9 * 1024 * 1024 / (budgetLine.utf8.count + 1)) + 1
+try writeCostFixture(Array(repeating: budgetLine, count: budgetLineCount), to: budgetSessionURL)
+let budgetEstimator = CostUsageEstimator(
+    databasePath: costUsageRoot.appendingPathComponent("budget-usage-deltas.sqlite").path
+)
+budgetEstimator.updateCandidates(
+    [CostUsageSessionCandidate(sessionID: budgetSessionID, path: budgetSessionURL.path)],
+    inventoryTruncated: false
+)
+let budgetCPUStart = SkillProcessResourceSnapshot.processCPUNanoseconds()
+let budgetWallStart = ProcessInfo.processInfo.systemUptime
+let boundedCostScan = budgetEstimator.scanSlice(now: costUsageNow, bypassCadence: true)
+let budgetCPUUsed = SkillProcessResourceSnapshot.processCPUNanoseconds() - budgetCPUStart
+let budgetWallUsed = ProcessInfo.processInfo.systemUptime - budgetWallStart
+runner.check(boundedCostScan.jsonlBytesRead <= 8 * 1024 * 1024, "automatic cost scan must not exceed its 8 MiB read budget")
+runner.check(budgetCPUUsed <= 100_000_000, "automatic cost scan should stop near its 50ms CPU budget")
+runner.check(budgetWallUsed <= 0.75, "automatic cost scan should stop near its 250ms wall budget")
 
 @MainActor
 func dateFromISO8601(_ value: String, message: String) -> Date {
@@ -5084,7 +5972,16 @@ let authoritativeSnapshot = RateLimitSnapshot(
     primaryResetsAt: Int(now.timeIntervalSince1970) + 4 * 60 * 60,
     secondaryResetsAt: Int(now.timeIntervalSince1970) + 6 * 24 * 60 * 60,
     capturedAt: now,
-    isPrimaryCodexLimit: true
+    isPrimaryCodexLimit: true,
+    resetCredits: ResetCreditInventory(
+        reportedAvailableCount: 4,
+        credits: [
+            ResetCredit(status: "available", expiresAt: Int(now.timeIntervalSince1970) + 86_400),
+            ResetCredit(status: "available", expiresAt: Int(now.timeIntervalSince1970) + 172_800),
+            ResetCredit(status: "available", expiresAt: Int(now.timeIntervalSince1970) + 259_200),
+            ResetCredit(status: "available", expiresAt: Int(now.timeIntervalSince1970) + 345_600)
+        ]
+    )
 )
 let recoveredSnapshot = RateLimitSnapshot(
     primaryPercent: 39,
@@ -5258,6 +6155,24 @@ let staleOfficialSnapshot = restoredStore.loadSnapshot(
 runner.check(staleOfficialSnapshot.primaryPercent == 47, "last-known-good 5h quota should survive a transient refresh failure")
 runner.check(staleOfficialSnapshot.secondaryPercent == 75, "last-known-good 7d quota should survive a transient refresh failure")
 runner.check(staleOfficialSnapshot.monitorStats.lastRateLimitSource == "app-server-stale", "stale official quota should expose a distinct source")
+runner.check(staleOfficialSnapshot.resetCreditCount == 4, "reset credits should survive inside the existing stale-cache grace window")
+
+let expiredResetCreditStore = CodexUsageStore(
+    codexDirectory: tempRoot,
+    appServerCacheURL: nil,
+    initialAppServerRateLimits: authoritativeSnapshot
+)
+let expiredResetCreditSnapshot = expiredResetCreditStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .appServerFirst,
+    taskHistoryRange: .day,
+    now: now.addingTimeInterval(16 * 60)
+)
+runner.check(
+    expiredResetCreditSnapshot.resetCreditCount == nil,
+    "reset credits should hide after the existing 15-minute app-server grace window"
+)
 
 let deferredRetryAt = firstFailureAt.addingTimeInterval(10)
 runner.check(

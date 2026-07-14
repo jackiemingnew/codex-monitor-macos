@@ -58,6 +58,57 @@ enum Formatters {
         return "\(label)有 \(missingBaselineSessions) 个会话缺少历史基线，当前数值为已确认最低值。"
     }
 
+    static func apiEquivalentCost(_ window: CostEstimateWindow) -> String {
+        guard let usd = window.usd, usd.isFinite, usd >= 0 else {
+            return window.isPartial ? "回填中" : "--"
+        }
+
+        let amount: String
+        if usd > 0, usd < 0.01 {
+            amount = "<$0.01"
+        } else if usd < 100 {
+            amount = String(format: "$%.2f", usd)
+        } else if usd < 1_000 {
+            amount = String(format: "$%.1f", usd)
+        } else if usd < 1_000_000 {
+            let formatter = NumberFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.numberStyle = .decimal
+            formatter.maximumFractionDigits = 0
+            formatter.minimumFractionDigits = 0
+            amount = "$" + (formatter.string(from: NSNumber(value: usd)) ?? String(format: "%.0f", usd))
+        } else {
+            amount = String(format: "$%.1fM", usd / 1_000_000)
+        }
+        return "≈\(amount)\(window.isPartial ? "*" : "")"
+    }
+
+    static func apiEquivalentCostHelp(
+        label: String,
+        window: CostEstimateWindow,
+        summary: CostUsageSummary
+    ) -> String {
+        var parts = [
+            "\(label)按 OpenAI API 标准单价等值估算，不是 ChatGPT/Codex 订阅账单。",
+            "不含 Priority、区域溢价和工具调用费。"
+        ]
+        if window.usd == nil, window.isPartial {
+            parts.append("正在后台扫描完整本地历史；完成前不发布局部金额。")
+        } else if window.isPartial {
+            parts.append("带 * 表示窗口包含未知模型；当前金额只统计可确认定价的模型。")
+        }
+        if summary.usesSparkProxy {
+            parts.append("Spark 使用 GPT-5.3-Codex 标准单价作为代理。")
+        }
+        if window.tokenCount != nil {
+            parts.append("Token 与费用来自同一份完整历史快照。")
+        }
+        if let lastUpdated = summary.lastUpdated {
+            parts.append("费用缓存于 \(relativeAge(lastUpdated))前更新。")
+        }
+        return parts.joined(separator: " ")
+    }
+
     static func reasoningEffortLabel(_ effort: String?) -> String {
         switch effort {
         case "none":
