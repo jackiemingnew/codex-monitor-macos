@@ -107,6 +107,7 @@ final class CodexUsageStore: @unchecked Sendable {
     private let logsDatabase: String
     private let deltaDatabase: String
     private let legacyDeltaDatabase: String?
+    private let costUsageEstimator: CostUsageEstimator
     private let sessionIndexPath: String
     private let appServerExecutable: String?
     private let appServerRateLimitLoader: AppServerRateLimitLoader?
@@ -129,6 +130,7 @@ final class CodexUsageStore: @unchecked Sendable {
     private let cacheLock = NSLock()
     private let deltaCacheSetupLock = NSLock()
     private let deltaWriteLock = NSLock()
+    private let costUsagePerformanceLock = NSLock()
     private var fastCache: FastSnapshotCache?
     private var deltaCacheReady = false
     private var recentPathsCache: RecentPathsCache?
@@ -141,6 +143,7 @@ final class CodexUsageStore: @unchecked Sendable {
     private var sessionRateLimitCache: [String: SessionRateLimitCache] = [:]
     private var sessionActivityCache: [String: SessionActivityCache] = [:]
     private var sessionFileCacheCounters = SessionFileCacheCounters()
+    private var costUsagePerformanceStats = CostUsagePerformanceStats.zero
 
     init(
         codexDirectory: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex"),
@@ -173,6 +176,7 @@ final class CodexUsageStore: @unchecked Sendable {
                 ?? ProcessInfo.processInfo.environment["CODEX_USAGE_DELTA_DB"]
                 ?? Self.defaultDeltaDatabasePath(for: codexDirectory)
         )
+        self.costUsageEstimator = CostUsageEstimator(databasePath: self.deltaDatabase)
         self.legacyDeltaDatabase = self.deltaDatabase == legacyDeltaPath ? nil : legacyDeltaPath
         self.stateDatabase = stateDatabase.map(Self.expandedPath)
             ?? Self.latestSQLiteDatabase(
@@ -356,13 +360,16 @@ final class CodexUsageStore: @unchecked Sendable {
                 includeContextUsage: includeContextUsage,
                 contextTaskLimit: contextTaskLimit
             )
-            let retainedSessionPaths = Set(
-                recentTaskSessionPaths(limit: max(TaskHistoryRange.month.queryLimit * 3, 80))
-                    + recentSessionPaths(limit: max(TaskHistoryRange.month.queryLimit * 3, 80))
-                    + displayThreads.map(\.rolloutPath)
-                    + usageDeltaThreads.map(\.rolloutPath)
-                    + rateLimitPaths
-            ).filter { !$0.isEmpty && FileManager.default.fileExists(atPath: $0) }
+            let costUsagePathLimit = max(TaskHistoryRange.month.queryLimit * 3, 80)
+            let recentTaskPaths = recentTaskSessionPaths(limit: costUsagePathLimit)
+            let recentAllSessionPaths = recentSessionPaths(limit: costUsagePathLimit)
+            let retainedSessionPathList = recentTaskPaths
+                + recentAllSessionPaths
+                + displayThreads.map(\.rolloutPath)
+                + usageDeltaThreads.map(\.rolloutPath)
+                + rateLimitPaths
+            let retainedSessionPaths = Set(retainedSessionPathList)
+                .filter { !$0.isEmpty && FileManager.default.fileExists(atPath: $0) }
             trimSessionFileCaches(retaining: retainedSessionPaths)
             cacheFastSnapshot(
                 threads: displayThreads,
@@ -409,7 +416,8 @@ final class CodexUsageStore: @unchecked Sendable {
                     watchedPathCount: 0,
                     jsonlContextScans: taskResult.contextScans,
                     monitorModelTokens: 0
-                )
+                ),
+                resetCreditCount: rateLimitResult.snapshot.resetCredits?.availableCount(now: now)
             )
         } catch {
             return errorSnapshot(error, now: now, snapshotDurationMs: elapsedMilliseconds(since: snapshotStartedAt))
@@ -448,6 +456,62 @@ final class CodexUsageStore: @unchecked Sendable {
         )
         let threads = mergeThreadRecords(databaseThreads + sessionThreads + loadActiveSubagentParentThreads(now: now))
         return loadDailyUsage(for: threads, now: now)
+    }
+
+    func refreshCostUsageSlice(
+        now: Date = Date(),
+        bypassCadence: Bool = false,
+        shouldCancel: @escaping @Sendable () -> Bool = { false }
+    ) -> CostUsageScanMetrics {
+        let retentionStart = Calendar.current.date(
+            byAdding: .day,
+            value: -30,
+            to: Calendar.current.startOfDay(for: now)
+        ) ?? now.addingTimeInterval(-30 * 86_400)
+        let paths = CodexSessionFileLocator.recentRolloutPaths(
+            roots: [
+                codexDirectory.appendingPathComponent("sessions", isDirectory: true),
+                codexDirectory.appendingPathComponent("archived_sessions", isDirectory: true)
+            ],
+            modifiedSince: retentionStart,
+            limit: nil
+        )
+        updateCostUsageCandidates(from: paths, inventoryTruncated: false)
+
+        deltaWriteLock.lock()
+        defer { deltaWriteLock.unlock() }
+        let metrics = costUsageEstimator.scanSlice(
+            now: now,
+            bypassCadence: bypassCadence,
+            shouldCancel: shouldCancel
+        )
+        costUsagePerformanceLock.lock()
+        costUsagePerformanceStats = CostUsagePerformanceStats(
+            scanCount: costUsagePerformanceStats.scanCount + 1,
+            jsonlBytesRead: costUsagePerformanceStats.jsonlBytesRead + metrics.jsonlBytesRead,
+            filesAdvanced: costUsagePerformanceStats.filesAdvanced + metrics.filesAdvanced,
+            databaseWrites: costUsagePerformanceStats.databaseWrites + metrics.databaseWrites
+        )
+        costUsagePerformanceLock.unlock()
+        return metrics
+    }
+
+    func costUsagePerformanceStatsSnapshot() -> CostUsagePerformanceStats {
+        costUsagePerformanceLock.lock()
+        defer { costUsagePerformanceLock.unlock() }
+        return costUsagePerformanceStats
+    }
+
+    func resetCostUsagePerformanceStatsForTesting() {
+        costUsagePerformanceLock.lock()
+        costUsagePerformanceStats = .zero
+        costUsagePerformanceLock.unlock()
+    }
+
+    func loadCostUsageSummary(now: Date = Date()) -> CostUsageSummary {
+        deltaWriteLock.lock()
+        defer { deltaWriteLock.unlock() }
+        return costUsageEstimator.loadSummary(now: now)
     }
 
     func rateLimitWatchPaths() -> [String] {
@@ -710,8 +774,25 @@ final class CodexUsageStore: @unchecked Sendable {
                 watchedPathCount: 0,
                 jsonlContextScans: taskResult.contextScans,
                 monitorModelTokens: 0
-            )
+            ),
+            resetCreditCount: cache.rateLimits.resetCredits?.availableCount(now: now)
         )
+    }
+
+    private func updateCostUsageCandidates(
+        from paths: [String],
+        inventoryTruncated: Bool
+    ) {
+        var seen: Set<String> = []
+        let candidates = paths.compactMap { path -> CostUsageSessionCandidate? in
+            guard !path.isEmpty,
+                  let sessionID = sessionID(from: path)?.lowercased(),
+                  seen.insert(sessionID).inserted else {
+                return nil
+            }
+            return CostUsageSessionCandidate(sessionID: sessionID, path: path)
+        }
+        costUsageEstimator.updateCandidates(candidates, inventoryTruncated: inventoryTruncated)
     }
 
     private func cacheFastSnapshot(
@@ -3212,7 +3293,7 @@ final class CodexUsageStore: @unchecked Sendable {
                     let result = RateLimitLoadResult(
                         snapshot: local.withSparkQuotaWindows(
                             mergedSparkQuotaWindows(from: [appServer.snapshot, local], now: now, preferSourceOrder: true)
-                        ),
+                        ).withResetCredits(appServer.snapshot.resetCredits),
                         source: "local-jsonl"
                     )
                     return loggedRateLimitResult(
@@ -3324,7 +3405,8 @@ final class CodexUsageStore: @unchecked Sendable {
                 secondaryWindowMinutes: secondary.windowMinutes,
                 capturedAt: appServer.snapshot.capturedAt ?? localSnapshot.capturedAt,
                 isPrimaryCodexLimit: appServer.snapshot.isPrimaryCodexLimit || localSnapshot.isPrimaryCodexLimit,
-                sparkQuotaWindows: appServer.snapshot.sparkQuotaWindows
+                sparkQuotaWindows: appServer.snapshot.sparkQuotaWindows,
+                resetCredits: appServer.snapshot.resetCredits
             ),
             primaryReason: primary.reason,
             secondaryReason: secondary.reason,
@@ -3429,6 +3511,7 @@ final class CodexUsageStore: @unchecked Sendable {
     private func hasAnyRateLimitData(_ snapshot: RateLimitSnapshot) -> Bool {
         hasMainRateLimitData(snapshot)
             || !snapshot.sparkQuotaWindows.isEmpty
+            || snapshot.resetCredits != nil
     }
 
     private func loggedRateLimitResult(
@@ -3851,11 +3934,31 @@ final class CodexUsageStore: @unchecked Sendable {
                 secondaryWindowMinutes: snapshot.secondary?.durationMinutes,
                 capturedAt: now,
                 isPrimaryCodexLimit: true,
-                sparkQuotaWindows: sparkQuotaWindows(from: result.rateLimitsByLimitId ?? [:])
+                sparkQuotaWindows: sparkQuotaWindows(from: result.rateLimitsByLimitId ?? [:]),
+                resetCredits: resetCreditInventory(from: result.rateLimitResetCredits)
             )
         }
 
         return nil
+    }
+
+    private func resetCreditInventory(
+        from source: AppServerResetCreditInventory?
+    ) -> ResetCreditInventory? {
+        guard let source, let availableCount = source.availableCount else {
+            return nil
+        }
+        let credits = source.credits?.compactMap { credit -> ResetCredit? in
+            guard let status = credit.status?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !status.isEmpty else {
+                return nil
+            }
+            return ResetCredit(status: status, expiresAt: credit.expiresAt)
+        }
+        return ResetCreditInventory(
+            reportedAvailableCount: max(0, availableCount),
+            credits: credits
+        )
     }
 
     private func sparkQuotaWindows(from snapshotsByLimitID: [String: AppServerRateLimitSnapshot]) -> [SparkQuotaWindow] {
@@ -4628,6 +4731,17 @@ private struct AppServerRateLimitResponse: Decodable {
 private struct AppServerRateLimitResult: Decodable {
     let rateLimits: AppServerRateLimitSnapshot
     let rateLimitsByLimitId: [String: AppServerRateLimitSnapshot]?
+    let rateLimitResetCredits: AppServerResetCreditInventory?
+}
+
+private struct AppServerResetCreditInventory: Decodable {
+    let availableCount: Int?
+    let credits: [AppServerResetCredit]?
+}
+
+private struct AppServerResetCredit: Decodable {
+    let status: String?
+    let expiresAt: Int?
 }
 
 private struct AppServerRateLimitSnapshot: Decodable {

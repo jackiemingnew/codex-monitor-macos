@@ -26,8 +26,15 @@ metrics. Any change that adds, removes, renames, or changes a formula in
 | `task.total_tokens` | Single task row token total | state DB + parent session JSONL enrichment | `CodexTask.tokenCount` for that parent row | visible parent task only |
 | `quota.5h` | Main Codex 5 hour remaining quota | app-server or local JSONL rate limits | main `limit_id = codex`, remaining percent | main Codex only |
 | `quota.7d` | Main Codex 7 day remaining quota | app-server or local JSONL rate limits | main `limit_id = codex`, remaining percent | main Codex only |
+| `quota.reset_credits_available` | Available quota-reset credits | existing app-server `account/rateLimits/read` response/cache | `min(reported availableCount, count(credits where status = available and expiresAt > now))`; missing or cache age over 15 minutes is unavailable | current Codex account response; UI only |
 | `quota.spark.5h` | GPT-5.3-Codex-Spark 5 hour remaining quota | app-server Spark limit, local JSONL fallback | Spark `limit_id = codex_bengalfox` or `limit_name` containing Spark, remaining percent | Spark only |
 | `quota.spark.7d` | GPT-5.3-Codex-Spark 7 day remaining quota | app-server Spark limit, local JSONL fallback | Spark `limit_id = codex_bengalfox` or `limit_name` containing Spark, remaining percent | Spark only |
+| `cost.api_equivalent.today` | API standard-price equivalent for Today | budgeted rollout JSONL cost cache | sum of priced input/cache-read/output deltas for the local natural day | UI only |
+| `cost.api_equivalent.7d` | API standard-price equivalent for seven natural days | budgeted rollout JSONL cost cache | sum of priced daily buckets from local today through local day - 6 | UI only |
+| `cost.api_equivalent.30d` | API standard-price equivalent for thirty natural days | budgeted rollout JSONL cost cache | sum of priced daily buckets from local today through local day - 29 | UI only |
+| `cost.report.quality` | Cost history completeness | complete-corpus published snapshot + pricing coverage | `PARTIAL` with no published snapshot while backfilling or when a complete snapshot contains unknown models; `UNAVAILABLE` without usable priced tokens; otherwise `COMPLETE` | current published report |
+| `cost.scan.logical_bytes` | JSONL bytes read by one cost slice | incremental complete-line reader | bytes read after persisted offsets, capped at 8 MiB per slice | latest internal slice |
+| `cost.scan.database_writes` | Derived cost-cache transactions | existing `usage-deltas.sqlite` | checkpoint/bucket transaction count plus metadata transaction count; unchanged warm scans are zero | latest internal slice |
 | `skill.catalog.enabled_count` | Currently enabled Skill count | local Codex app-server `skills/list`; `PARTIAL` frontmatter fallback | `count(distinct stable_path_id) where enabled = true` | current catalog |
 | `skill.catalog.disabled_count` | Currently disabled Skill count | local Codex app-server `skills/list`; `PARTIAL` frontmatter fallback | `count(distinct stable_path_id) where enabled = false` | current catalog |
 | `skill.catalog.context_token_estimate` | Enabled catalog/context cost | enabled Skill `name` + `description` metadata from `skills/list` | `sum(ceil((name.characters + description.characters) / 4))` | current enabled catalog |
@@ -133,6 +140,45 @@ metrics. Any change that adds, removes, renames, or changes a formula in
 - Expired or stale local Spark quota windows must be hidden or exported as
   unavailable. They must never be converted into a precise `100%` remaining
   value.
+- `quota.reset_credits_available` reuses the existing app-server request and
+  persisted quota cache. Only reported quantity plus credit status and expiry
+  are retained. Expired/non-available credits are excluded; a missing field is
+  unavailable rather than zero, and the value disappears with the existing
+  15-minute app-server stale-cache grace.
+- `cost.api_equivalent.*` is an API standard-price equivalent, not a
+  ChatGPT/Codex subscription invoice. Cached input is a subset of total input,
+  so it is subtracted before uncached input is priced. Priority processing,
+  regional premiums, tool-call fees, and subscription economics are excluded.
+- Built-in pricing covers GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 Mini,
+  and GPT-5.3-Codex. Spark uses the effective GPT-5.3-Codex tuple as a
+  disclosed proxy, matching the referenced CodexBar runtime catalog/cache.
+  Unknown models receive no guessed price and make affected windows `PARTIAL`.
+- Cost history uses local natural-day buckets. `回填中` means no complete
+  snapshot has been published yet. `*` means a complete corpus contains unknown
+  model tokens and the displayed amount covers only priced models. `--` means
+  no usable estimate exists.
+- After a complete cost snapshot is published, the three local footer Token
+  values use the same input-plus-output buckets, matching the lineage basis of
+  the adjacent cost. This is a UI-only source refinement; existing CLI, Node,
+  JSON, Delta, and stored Token contracts are unchanged.
+- Exported and forked files can repeat the same cumulative usage rows. They are
+  deduplicated with CodexBar-compatible first-session-metadata and stable row
+  identity semantics before publication. Only a SHA-256 row digest and its
+  numeric contribution are persisted; raw turn identifiers are not stored.
+- Cost scanning shares `usage-deltas.sqlite` and has no independent timer,
+  subprocess, or network pricing service. Each serial utility job enumerates the
+  complete 31-day inventory but processes at most one slice capped at 8 MiB,
+  50ms process CPU, or 250ms wall time, with a 256 KiB row cap and complete-line
+  checkpoints. Later refreshes resume from the checkpoint. Working buckets are
+  atomically copied to the published snapshot only after catch-up. Jobs pause in
+  Low Power Mode or serious/critical thermal state and start at least five
+  minutes apart; presentation never scans JSONL. An unchanged caught-up job
+  performs zero JSONL reads and zero derived writes.
+- Cost-derived tables retain Session IDs, local day keys, normalized model
+  names, aggregate token counts/cost, lineage totals, SHA-256 row identities,
+  file identity metadata, and offsets. They never retain rollout paths, raw
+  turn identifiers, prompts, responses, reasoning, tool parameters, accounts,
+  or credentials.
 
 ### Skill Insights Rules
 
@@ -209,3 +255,6 @@ metrics. Any change that adds, removes, renames, or changes a formula in
 - Skill Insights is not added to the existing snapshot or Node-compatible JSON
   contract. Its detail page exports a separate Markdown weekly report or a
   schema-versioned JSON `SkillInsightsSnapshot`.
+- Reset-credit and API-equivalent cost fields are UI-internal additions. The
+  existing Swift compact, Node-compatible, CLI, Token, Quota, Context, and
+  Delta JSON contracts remain unchanged.

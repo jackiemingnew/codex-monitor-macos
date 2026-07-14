@@ -49,6 +49,7 @@ swiftc \
   "${ROOT_DIR}/Sources/CodexNotch/CodexSkillsAppServerClient.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/SkillCatalogLoader.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/SkillProcessMetrics.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/CostUsageEstimator.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/SkillJSONLReader.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/SkillObservationStore.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/SkillSessionAnalyzer.swift" \

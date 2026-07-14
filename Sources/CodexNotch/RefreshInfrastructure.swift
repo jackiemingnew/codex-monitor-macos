@@ -3,6 +3,7 @@ import Foundation
 enum RefreshLane: String, CaseIterable, Hashable, Sendable {
     case localSnapshot
     case usageTotals
+    case costUsage
     case watchPaths
     case appServerQuota
     case remoteCodex

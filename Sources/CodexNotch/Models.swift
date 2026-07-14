@@ -58,6 +58,8 @@ struct UsageSnapshot: Equatable {
     var rateLimitCapturedAt: Date? = nil
     var errorMessage: String?
     var monitorStats: MonitorPerformanceStats = .empty
+    var resetCreditCount: Int? = nil
+    var costUsage: CostUsageSummary = .unavailable
 
     static let empty = UsageSnapshot(
         primaryPercent: nil,
@@ -144,6 +146,50 @@ struct UsageSnapshot: Equatable {
 
     private var hasSecondaryQuotaWindowData: Bool {
         secondaryPercent != nil || secondaryResetsAt != nil || secondaryWindowMinutes != nil
+    }
+}
+
+enum CostUsageQuality: String, Equatable, Sendable {
+    case complete
+    case partial
+    case unavailable
+}
+
+struct CostEstimateWindow: Equatable, Sendable {
+    let usd: Double?
+    let isPartial: Bool
+    var tokenCount: Int? = nil
+
+    static let unavailable = CostEstimateWindow(usd: nil, isPartial: false, tokenCount: nil)
+    static let backfilling = CostEstimateWindow(usd: nil, isPartial: true, tokenCount: nil)
+}
+
+struct CostUsageSummary: Equatable, Sendable {
+    let today: CostEstimateWindow
+    let sevenDays: CostEstimateWindow
+    let thirtyDays: CostEstimateWindow
+    let quality: CostUsageQuality
+    let lastUpdated: Date?
+    let usesSparkProxy: Bool
+
+    static let unavailable = CostUsageSummary(
+        today: .unavailable,
+        sevenDays: .unavailable,
+        thirtyDays: .unavailable,
+        quality: .unavailable,
+        lastUpdated: nil,
+        usesSparkProxy: false
+    )
+
+    static func backfilling(lastUpdated: Date?) -> CostUsageSummary {
+        CostUsageSummary(
+            today: .backfilling,
+            sevenDays: .backfilling,
+            thirtyDays: .backfilling,
+            quality: .partial,
+            lastUpdated: lastUpdated,
+            usesSparkProxy: false
+        )
     }
 }
 
@@ -885,6 +931,7 @@ struct RateLimitSnapshot: Codable, Equatable {
     let capturedAt: Date?
     let isPrimaryCodexLimit: Bool
     let sparkQuotaWindows: [SparkQuotaWindow]
+    let resetCredits: ResetCreditInventory?
 
     init(
         primaryPercent: Int?,
@@ -895,7 +942,8 @@ struct RateLimitSnapshot: Codable, Equatable {
         secondaryWindowMinutes: Int? = nil,
         capturedAt: Date?,
         isPrimaryCodexLimit: Bool,
-        sparkQuotaWindows: [SparkQuotaWindow] = []
+        sparkQuotaWindows: [SparkQuotaWindow] = [],
+        resetCredits: ResetCreditInventory? = nil
     ) {
         self.primaryPercent = primaryPercent
         self.secondaryPercent = secondaryPercent
@@ -906,6 +954,7 @@ struct RateLimitSnapshot: Codable, Equatable {
         self.capturedAt = capturedAt
         self.isPrimaryCodexLimit = isPrimaryCodexLimit
         self.sparkQuotaWindows = sparkQuotaWindows.sortedForSparkQuotaDisplay
+        self.resetCredits = resetCredits
     }
 
     func primaryDisplayPercent(now: Date = Date()) -> Int? {
@@ -930,10 +979,51 @@ struct RateLimitSnapshot: Codable, Equatable {
             secondaryWindowMinutes: secondaryWindowMinutes,
             capturedAt: capturedAt,
             isPrimaryCodexLimit: isPrimaryCodexLimit,
-            sparkQuotaWindows: windows
+            sparkQuotaWindows: windows,
+            resetCredits: resetCredits
         )
     }
 
+    func withResetCredits(_ inventory: ResetCreditInventory?) -> RateLimitSnapshot {
+        RateLimitSnapshot(
+            primaryPercent: primaryPercent,
+            secondaryPercent: secondaryPercent,
+            primaryResetsAt: primaryResetsAt,
+            secondaryResetsAt: secondaryResetsAt,
+            primaryWindowMinutes: primaryWindowMinutes,
+            secondaryWindowMinutes: secondaryWindowMinutes,
+            capturedAt: capturedAt,
+            isPrimaryCodexLimit: isPrimaryCodexLimit,
+            sparkQuotaWindows: sparkQuotaWindows,
+            resetCredits: inventory
+        )
+    }
+
+}
+
+struct ResetCreditInventory: Codable, Equatable, Sendable {
+    let reportedAvailableCount: Int
+    let credits: [ResetCredit]?
+
+    func availableCount(now: Date = Date()) -> Int {
+        let reported = max(0, reportedAvailableCount)
+        guard let credits else {
+            return reported
+        }
+        let nowEpoch = Int(now.timeIntervalSince1970)
+        let usable = credits.filter { credit in
+            guard credit.status.caseInsensitiveCompare("available") == .orderedSame else {
+                return false
+            }
+            return credit.expiresAt.map { $0 > nowEpoch } ?? true
+        }.count
+        return min(reported, usable)
+    }
+}
+
+struct ResetCredit: Codable, Equatable, Sendable {
+    let status: String
+    let expiresAt: Int?
 }
 
 struct SparkQuotaWindow: Codable, Identifiable, Equatable {

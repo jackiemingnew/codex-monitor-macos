@@ -43,6 +43,7 @@ enum MonitorTheme {
         static let tableStatus = Font.system(size: 9, weight: .semibold, design: .rounded)
         static let periodLabel = Font.system(size: 11, weight: .medium)
         static let periodValue = Font.system(size: 13, weight: .semibold)
+        static let periodCost = Font.system(size: 8.5, weight: .medium, design: .rounded)
         static let settingsTitle = Font.system(size: 18, weight: .bold)
         static let settingsSubtitle = Font.system(size: 12, weight: .medium)
         static let settingsSidebarLabel = Font.system(size: 12, weight: .bold)

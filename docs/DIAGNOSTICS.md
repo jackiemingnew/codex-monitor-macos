@@ -88,8 +88,36 @@ The last successful app-server quota is cached at:
 ~/Library/Application Support/CodexNotch/app-server-rate-limits.json
 ```
 
-The cache contains only quota percentages, reset times, Spark windows, and the
-capture timestamp. Its file mode is `0600` and its directory mode is `0700`.
+The cache contains only quota percentages, reset times, Spark windows, reset
+credit quantity/status/expiry, and the capture timestamp. Its file mode is
+`0600` and its directory mode is `0700`.
+
+## API-equivalent cost cache
+
+Cost estimation adds internal checkpoint, lineage, working Session/day/model
+buckets, hashed usage-row occurrences, and an atomically published bucket snapshot to the existing Swift-owned database:
+
+```text
+~/Library/Application Support/CodexNotch/usage-deltas.sqlite
+```
+
+It does not create a separate database, timer, subprocess, or price-network
+service. The tables store Session IDs, file identity/offset checkpoints, local
+day keys, normalized model names, aggregate input/cache-read/output tokens,
+SHA-256 row identities, and derived cost. They never store rollout paths, raw
+turn identifiers, prompts, responses, reasoning, tool parameters, account data,
+or credentials. The three visible values are standard API-price equivalents,
+not the ChatGPT/Codex subscription bill.
+
+The scanner uses a dedicated serial utility executor coordinated by the existing
+refresh infrastructure. Detail-page presentation does not invoke it. An
+automatic job starts only while the system is unconstrained and at least five
+minutes after the previous job; Codex activity does not starve it. Each job
+stops and checkpoints after one 8 MiB logical input, 50ms process CPU, or 250ms
+wall-time slice. A later refresh resumes from that checkpoint until the complete
+corpus catches up. Incomplete working data is never published as money: first
+run shows `回填中`, while later scans retain the last complete snapshot. Warm,
+caught-up jobs read no JSONL and write no derived rows.
 
 ## Skill Insights Diagnostics
 
