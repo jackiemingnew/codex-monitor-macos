@@ -1553,7 +1553,17 @@ oversizedEstimator.updateCandidates(
     [CostUsageSessionCandidate(sessionID: oversizedSessionID, path: oversizedSessionURL.path)],
     inventoryTruncated: false
 )
-let oversizedScan = oversizedEstimator.scanSlice(now: costUsageNow, bypassCadence: true)
+let oversizedSemanticBudget = CostUsageScanBudget(
+    maxBytes: 2 * 1024 * 1024,
+    maxCPUNanoseconds: 2_000_000_000,
+    maxWallTime: 5,
+    maxRowBytes: 256 * 1024
+)
+let oversizedScan = oversizedEstimator.scanSlice(
+    now: costUsageNow,
+    budget: oversizedSemanticBudget,
+    bypassCadence: true
+)
 runner.check(oversizedScan.skippedOversizedRows == 2, "rows above 256 KiB should be skipped without buffering them fully")
 runner.check(!oversizedScan.isComplete, "a relevant skipped oversized row should keep cost quality partial")
 runner.check(oversizedEstimator.loadSummary(now: costUsageNow).quality == .partial, "relevant oversized-row loss should remain visible as partial")
@@ -1590,7 +1600,11 @@ oversizedContextEstimator.updateCandidates(
     [CostUsageSessionCandidate(sessionID: oversizedContextSessionID, path: oversizedContextSessionURL.path)],
     inventoryTruncated: false
 )
-let oversizedContextScan = oversizedContextEstimator.scanSlice(now: costUsageNow, bypassCadence: true)
+let oversizedContextScan = oversizedContextEstimator.scanSlice(
+    now: costUsageNow,
+    budget: oversizedSemanticBudget,
+    bypassCadence: true
+)
 runner.check(oversizedContextScan.isComplete, "an oversized turn_context should not make token history partial")
 runner.check(
     abs((oversizedContextEstimator.loadSummary(now: costUsageNow).today.usd ?? -1) - 0.124) < 0.000_000_1,
