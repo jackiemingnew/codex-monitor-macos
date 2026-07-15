@@ -417,7 +417,8 @@ final class CodexUsageStore: @unchecked Sendable {
                     jsonlContextScans: taskResult.contextScans,
                     monitorModelTokens: 0
                 ),
-                resetCreditCount: rateLimitResult.snapshot.resetCredits?.availableCount(now: now)
+                resetCreditCount: rateLimitResult.snapshot.resetCredits?.availableCount(now: now),
+                resetCreditExpiryNotice: rateLimitResult.snapshot.resetCredits?.expiryNotice(now: now)
             )
         } catch {
             return errorSnapshot(error, now: now, snapshotDurationMs: elapsedMilliseconds(since: snapshotStartedAt))
@@ -775,7 +776,8 @@ final class CodexUsageStore: @unchecked Sendable {
                 jsonlContextScans: taskResult.contextScans,
                 monitorModelTokens: 0
             ),
-            resetCreditCount: cache.rateLimits.resetCredits?.availableCount(now: now)
+            resetCreditCount: cache.rateLimits.resetCredits?.availableCount(now: now),
+            resetCreditExpiryNotice: cache.rateLimits.resetCredits?.expiryNotice(now: now)
         )
     }
 

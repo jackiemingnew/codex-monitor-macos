@@ -670,6 +670,30 @@ runner.check(
     "quota reset formatter should hide expired reset time"
 )
 runner.check(
+    Formatters.resetCreditExpiryText(
+        1_783_518_400,
+        now: Date(timeIntervalSince1970: 1_783_000_000),
+        timeZone: TimeZone(secondsFromGMT: 0)!
+    ) == "7/8到期",
+    "reset-credit expiry formatter should display a compact same-year date"
+)
+runner.check(
+    Formatters.resetCreditExpiryText(
+        1_798_859_045,
+        now: Date(timeIntervalSince1970: 1_798_675_200),
+        timeZone: TimeZone(secondsFromGMT: 0)!
+    ) == "2027/1/2到期",
+    "reset-credit expiry formatter should include the year across calendar years"
+)
+runner.check(
+    Formatters.resetCreditExpiryText(
+        1_783_000_000,
+        now: Date(timeIntervalSince1970: 1_783_000_000),
+        timeZone: TimeZone(secondsFromGMT: 0)!
+    ) == nil,
+    "reset-credit expiry formatter should hide expired dates"
+)
+runner.check(
     jsonMonitor?["last_snapshot_duration_ms"] as? Int == 42,
     "JSON snapshot output should expose snapshot duration"
 )
@@ -776,6 +800,35 @@ runner.check(appServerSnapshot.sparkQuotaWindows.last?.remainingPercent == 58, "
 runner.check(
     appServerSnapshot.resetCredits?.availableCount(now: appServerFixtureNow) == 2,
     "app-server reset credits should count only available, unexpired entries"
+)
+runner.check(
+    appServerSnapshot.resetCredits?.expiryNotice(now: appServerFixtureNow) == ResetCreditExpiryNotice(
+        earliestExpiresAt: appServerSecondaryReset,
+        expiringCount: 1
+    ),
+    "reset credits expiring exactly at the seven-day boundary should trigger a notice"
+)
+
+let resetCreditBoundaryInventory = ResetCreditInventory(
+    reportedAvailableCount: 3,
+    credits: [
+        ResetCredit(status: "available", expiresAt: Int(appServerFixtureNow.timeIntervalSince1970) + 86_400),
+        ResetCredit(status: "available", expiresAt: Int(appServerFixtureNow.timeIntervalSince1970) + 7 * 86_400 + 1),
+        ResetCredit(status: "used", expiresAt: Int(appServerFixtureNow.timeIntervalSince1970) + 60),
+        ResetCredit(status: "available", expiresAt: 1),
+        ResetCredit(status: "available", expiresAt: nil)
+    ]
+)
+runner.check(
+    resetCreditBoundaryInventory.expiryNotice(now: appServerFixtureNow) == ResetCreditExpiryNotice(
+        earliestExpiresAt: Int(appServerFixtureNow.timeIntervalSince1970) + 86_400,
+        expiringCount: 1
+    ),
+    "reset-credit notices should exclude used, expired, missing-expiry, and beyond-window entries"
+)
+runner.check(
+    ResetCreditInventory(reportedAvailableCount: 2, credits: nil).expiryNotice(now: appServerFixtureNow) == nil,
+    "an aggregate reset-credit count without expiry details should not invent an expiry notice"
 )
 
 let zeroResetCreditOutput = appServerRateLimitOutput
@@ -6222,6 +6275,10 @@ runner.check(staleOfficialSnapshot.primaryPercent == 47, "last-known-good 5h quo
 runner.check(staleOfficialSnapshot.secondaryPercent == 75, "last-known-good 7d quota should survive a transient refresh failure")
 runner.check(staleOfficialSnapshot.monitorStats.lastRateLimitSource == "app-server-stale", "stale official quota should expose a distinct source")
 runner.check(staleOfficialSnapshot.resetCreditCount == 4, "reset credits should survive inside the existing stale-cache grace window")
+runner.check(
+    staleOfficialSnapshot.resetCreditExpiryNotice?.expiringCount == 4,
+    "reset-credit expiry notices should survive inside the existing stale-cache grace window"
+)
 
 let expiredResetCreditStore = CodexUsageStore(
     codexDirectory: tempRoot,
@@ -6238,6 +6295,10 @@ let expiredResetCreditSnapshot = expiredResetCreditStore.loadSnapshot(
 runner.check(
     expiredResetCreditSnapshot.resetCreditCount == nil,
     "reset credits should hide after the existing 15-minute app-server grace window"
+)
+runner.check(
+    expiredResetCreditSnapshot.resetCreditExpiryNotice == nil,
+    "reset-credit expiry notices should hide after the existing 15-minute app-server grace window"
 )
 
 let deferredRetryAt = firstFailureAt.addingTimeInterval(10)

@@ -700,13 +700,21 @@ struct DetailPanelView: View {
                 .lineLimit(1)
             Spacer(minLength: MonitorTheme.Spacing.row)
             if let resetCreditCount = snapshot.resetCreditCount {
-                Text("重置 \(resetCreditCount)次")
+                let expiryText = snapshot.resetCreditExpiryNotice.flatMap {
+                    Formatters.resetCreditExpiryText($0.earliestExpiresAt)
+                }
+                let resetCreditHelp = Formatters.resetCreditHelp(
+                    availableCount: resetCreditCount,
+                    notice: snapshot.resetCreditExpiryNotice,
+                    expiryText: expiryText
+                )
+                Text(expiryText.map { "重置 \(resetCreditCount)次 · \($0)" } ?? "重置 \(resetCreditCount)次")
                     .font(MonitorTheme.Typography.quotaMeta)
-                    .foregroundStyle(MonitorTheme.textSecondary)
+                    .foregroundStyle(expiryText == nil ? MonitorTheme.textSecondary : MonitorTheme.warning)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-                    .help("可用且未过期的额度重置次数，来自现有 Codex app-server 配额响应。")
-                    .accessibilityLabel("可用额度重置 \(resetCreditCount) 次")
+                    .minimumScaleFactor(0.68)
+                    .help(resetCreditHelp)
+                    .accessibilityLabel(resetCreditHelp)
             }
             if let capturedAt = snapshot.rateLimitCapturedAt {
                 Text("\(Formatters.relativeAge(capturedAt))前更新")
