@@ -212,8 +212,7 @@ struct NotchIslandView: View {
     private var collapsedMetrics: [CollapsedMetric] {
         switch effectiveDisplaySource {
         case .automatic, .codex:
-            let todayTokens = snapshot.dailyUsage.usageTodayTokens
-            let todayIsPartial = snapshot.dailyUsage.isPartial
+            let todayUsage = HUDTodayUsageDisplay.resolve(snapshot: snapshot)
             var metrics = snapshot.mainQuotaWindows.map { window in
                 CollapsedMetric(
                     id: "quota-\(window.id)",
@@ -228,16 +227,16 @@ struct NotchIslandView: View {
                 CollapsedMetric(
                     id: "tok",
                     label: "Today",
-                    value: todayTokens > 0 || todayIsPartial
-                        ? Formatters.compactTokensEnglish(todayTokens, isPartial: todayIsPartial)
-                        : "--",
+                    value: todayUsage.tokenCount.map {
+                        Formatters.compactTokensEnglish($0, isPartial: todayUsage.isPartial)
+                    } ?? "--",
                     color: MonitorTheme.textPrimary,
                     labelWidth: 28,
                     valueWidth: 50,
                     helpText: Formatters.partialUsageHelp(
                         label: "Today",
-                        isPartial: todayIsPartial,
-                        missingBaselineSessions: snapshot.dailyUsage.missingBaselineSessions
+                        isPartial: todayUsage.isPartial,
+                        missingBaselineSessions: todayUsage.missingBaselineSessions
                     )
                 )
             )
