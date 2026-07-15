@@ -59,6 +59,7 @@ struct UsageSnapshot: Equatable {
     var errorMessage: String?
     var monitorStats: MonitorPerformanceStats = .empty
     var resetCreditCount: Int? = nil
+    var resetCreditExpiryNotice: ResetCreditExpiryNotice? = nil
     var costUsage: CostUsageSummary = .unavailable
 
     static let empty = UsageSnapshot(
@@ -1002,6 +1003,8 @@ struct RateLimitSnapshot: Codable, Equatable {
 }
 
 struct ResetCreditInventory: Codable, Equatable, Sendable {
+    static let expiryWarningInterval: TimeInterval = 7 * 24 * 60 * 60
+
     let reportedAvailableCount: Int
     let credits: [ResetCredit]?
 
@@ -1019,6 +1022,56 @@ struct ResetCreditInventory: Codable, Equatable, Sendable {
         }.count
         return min(reported, usable)
     }
+
+    func expiryNotice(
+        now: Date = Date(),
+        warningInterval: TimeInterval = Self.expiryWarningInterval
+    ) -> ResetCreditExpiryNotice? {
+        let reported = max(0, reportedAvailableCount)
+        guard reported > 0,
+              warningInterval.isFinite,
+              warningInterval >= 0,
+              let credits else {
+            return nil
+        }
+
+        let nowEpoch = Int(now.timeIntervalSince1970)
+        let warningDeadline = Int(now.addingTimeInterval(warningInterval).timeIntervalSince1970)
+        let usableCredits = credits
+            .filter { credit in
+                guard credit.status.caseInsensitiveCompare("available") == .orderedSame else {
+                    return false
+                }
+                return credit.expiresAt.map { $0 > nowEpoch } ?? true
+            }
+            .sorted { lhs, rhs in
+                switch (lhs.expiresAt, rhs.expiresAt) {
+                case let (lhsExpiry?, rhsExpiry?):
+                    return lhsExpiry < rhsExpiry
+                case (_?, nil):
+                    return true
+                case (nil, _?):
+                    return false
+                case (nil, nil):
+                    return false
+                }
+            }
+            .prefix(reported)
+
+        let expiring = usableCredits.compactMap(\.expiresAt).filter { $0 <= warningDeadline }
+        guard let earliestExpiresAt = expiring.min() else {
+            return nil
+        }
+        return ResetCreditExpiryNotice(
+            earliestExpiresAt: earliestExpiresAt,
+            expiringCount: expiring.count
+        )
+    }
+}
+
+struct ResetCreditExpiryNotice: Equatable, Sendable {
+    let earliestExpiresAt: Int
+    let expiringCount: Int
 }
 
 struct ResetCredit: Codable, Equatable, Sendable {

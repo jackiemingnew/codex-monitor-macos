@@ -187,6 +187,41 @@ enum Formatters {
         return "\(formatter.string(from: resetDate)) 恢复"
     }
 
+    static func resetCreditExpiryText(
+        _ expiresAt: Int,
+        now: Date = Date(),
+        timeZone: TimeZone = .current
+    ) -> String? {
+        guard expiresAt > Int(now.timeIntervalSince1970) else {
+            return nil
+        }
+
+        let expiryDate = Date(timeIntervalSince1970: TimeInterval(expiresAt))
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        let currentYear = calendar.component(.year, from: now)
+        let expiryYear = calendar.component(.year, from: expiryDate)
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = currentYear == expiryYear ? "M/d" : "yyyy/M/d"
+        return "\(formatter.string(from: expiryDate))到期"
+    }
+
+    static func resetCreditHelp(
+        availableCount: Int,
+        notice: ResetCreditExpiryNotice?,
+        expiryText: String?
+    ) -> String {
+        let source = "数据来自现有 Codex app-server 配额响应。"
+        guard let notice,
+              let expiryText else {
+            return "可用且未过期的额度重置次数。\(source)"
+        }
+        return "\(availableCount) 次可用额度重置中，\(notice.expiringCount) 次即将到期，最早 \(expiryText)。请及时使用，避免失效。\(source)"
+    }
+
     static func signedCompactTokens(_ value: Int?) -> String {
         guard let value else {
             return "--"
