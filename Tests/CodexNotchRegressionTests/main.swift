@@ -2999,6 +2999,58 @@ runner.check(
     ) == .codex,
     "a disabled explicit HUD source should fall back to Codex in both display modes"
 )
+var costBackedHUDSnapshot = UsageSnapshot.empty
+costBackedHUDSnapshot.lastUpdated = Date(timeIntervalSince1970: 1_784_044_020)
+costBackedHUDSnapshot.costUsage = CostUsageSummary(
+    today: CostEstimateWindow(usd: 18.27, isPartial: false, tokenCount: 16_755_332),
+    sevenDays: .unavailable,
+    thirtyDays: .unavailable,
+    quality: .complete,
+    lastUpdated: Date(timeIntervalSince1970: 1_784_093_400),
+    usesSparkProxy: false
+)
+let costBackedHUDToday = HUDTodayUsageDisplay.resolve(snapshot: costBackedHUDSnapshot)
+runner.checkEqual(
+    costBackedHUDToday.tokenCount,
+    16_755_332,
+    "collapsed Today should use the published cost snapshot when daily usage is still empty"
+)
+runner.check(
+    !costBackedHUDToday.isPartial,
+    "a published cost snapshot should expose an exact collapsed Today token value"
+)
+var partialDailyHUDSnapshot = UsageSnapshot.empty
+partialDailyHUDSnapshot.dailyUsage = DailyUsage(
+    usageTodayTokens: 12_345,
+    dayStartedAt: Date(),
+    timeZoneIdentifier: "Asia/Shanghai",
+    isPartial: true,
+    missingBaselineSessions: 2
+)
+let partialDailyHUDToday = HUDTodayUsageDisplay.resolve(snapshot: partialDailyHUDSnapshot)
+runner.checkEqual(
+    partialDailyHUDToday.tokenCount,
+    12_345,
+    "collapsed Today should fall back to natural-day usage before a cost snapshot is published"
+)
+runner.check(
+    partialDailyHUDToday.isPartial && partialDailyHUDToday.missingBaselineSessions == 2,
+    "the natural-day fallback should preserve partial-usage help semantics"
+)
+var zeroCostHUDSnapshot = UsageSnapshot.empty
+zeroCostHUDSnapshot.costUsage = CostUsageSummary(
+    today: CostEstimateWindow(usd: 0, isPartial: false, tokenCount: 0),
+    sevenDays: .unavailable,
+    thirtyDays: .unavailable,
+    quality: .complete,
+    lastUpdated: Date(),
+    usesSparkProxy: false
+)
+runner.checkEqual(
+    HUDTodayUsageDisplay.resolve(snapshot: zeroCostHUDSnapshot).tokenCount,
+    0,
+    "a published zero-token day should display zero instead of an unavailable placeholder"
+)
 settings.hudDisplayMode = .menuBar
 let menuBarModeReloadedSettings = CodexNotchSettings(
     defaults: settingsDefaults,

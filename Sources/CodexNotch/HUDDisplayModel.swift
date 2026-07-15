@@ -65,3 +65,28 @@ struct HUDPresentationVisibility: Equatable {
         }
     }
 }
+
+struct HUDTodayUsageDisplay: Equatable {
+    let tokenCount: Int?
+    let isPartial: Bool
+    let missingBaselineSessions: Int
+
+    static func resolve(snapshot: UsageSnapshot) -> HUDTodayUsageDisplay {
+        if let publishedTokenCount = snapshot.costUsage.today.tokenCount {
+            return HUDTodayUsageDisplay(
+                tokenCount: publishedTokenCount,
+                isPartial: false,
+                missingBaselineSessions: 0
+            )
+        }
+
+        let dailyUsage = snapshot.dailyUsage
+        return HUDTodayUsageDisplay(
+            tokenCount: dailyUsage.usageTodayTokens > 0 || dailyUsage.isPartial
+                ? dailyUsage.usageTodayTokens
+                : nil,
+            isPartial: dailyUsage.isPartial,
+            missingBaselineSessions: dailyUsage.missingBaselineSessions
+        )
+    }
+}
