@@ -441,7 +441,7 @@ for metricID in [
 
 let performanceProcessOutput = """
 100 1 10.0 524288 /Applications/ChatGPT.app/Contents/MacOS/ChatGPT
-101 100 20.0 131072 /Users/test/.cache/codex-runtime/node
+101 100 20.0 131072 /opt/codex-runtime/node
 200 1 5.0 262144 /System/Applications/Safari.app/Contents/MacOS/Safari
 300 1 25.0 524288 /System/Library/Frameworks/WebKit.framework/XPCServices/com.apple.WebKit.WebContent
 301 1 90.0 2097152 /System/Library/Frameworks/WebKit.framework/XPCServices/com.apple.WebKit.WebContent
