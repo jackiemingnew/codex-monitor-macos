@@ -3,6 +3,8 @@ import SwiftUI
 
 enum DetailPage: String, CaseIterable, Identifiable {
     case codex
+    case analytics
+    case performance
     case skillInsights
     case codexRadar
     case remoteCodex
@@ -15,6 +17,10 @@ enum DetailPage: String, CaseIterable, Identifiable {
         switch self {
         case .codex:
             "Codex"
+        case .analytics:
+            "Analytics"
+        case .performance:
+            "性能"
         case .skillInsights:
             "Skills"
         case .codexRadar:
@@ -299,6 +305,8 @@ private struct CollapsedMetricRow: View {
 
 struct DetailPanelView: View {
     @ObservedObject var viewModel: UsageViewModel
+    @ObservedObject var analyticsViewModel: CodexWebAnalyticsViewModel
+    @ObservedObject var performanceViewModel: PerformanceMonitorViewModel
     @ObservedObject var skillInsightsCoordinator: SkillInsightsFeatureCoordinator
     @ObservedObject var remoteViewModel: RemoteMonitorViewModel
     @ObservedObject var newAPIViewModel: BalanceMonitorViewModel
@@ -306,6 +314,7 @@ struct DetailPanelView: View {
     @ObservedObject var codexRadarViewModel: CodexRadarViewModel
     @ObservedObject var settings: CodexNotchSettings
     let onSettings: () -> Void
+    let onAnalyticsBrowser: () -> Void
     let onLocalRefresh: () -> Void
     let onRemoteRefresh: () -> Void
     let onNewAPIRefresh: () -> Void
@@ -338,6 +347,10 @@ struct DetailPanelView: View {
                     switch selectedPage {
                     case .codex:
                         localContent
+                    case .analytics:
+                        analyticsContent
+                    case .performance:
+                        performanceContent
                     case .skillInsights:
                         skillInsightsContent
                     case .codexRadar:
@@ -442,6 +455,10 @@ struct DetailPanelView: View {
         switch selectedPage {
         case .codex:
             "Codex Monitor"
+        case .analytics:
+            "官方 Analytics"
+        case .performance:
+            "性能诊断"
         case .skillInsights:
             "Skill Insights"
         case .codexRadar:
@@ -459,6 +476,13 @@ struct DetailPanelView: View {
         switch selectedPage {
         case .codex:
             return snapshot.isRunning ? "Running" : "Idle"
+        case .analytics:
+            return analyticsViewModel.state.label
+        case .performance:
+            if performanceViewModel.backgroundMonitoringEnabled {
+                return "记录中"
+            }
+            return performanceViewModel.currentSample == nil ? "待采样" : "已关闭"
         case .skillInsights:
             return skillInsightsCoordinator.snapshot.quality.rawValue
         case .codexRadar:
@@ -482,6 +506,10 @@ struct DetailPanelView: View {
         switch selectedPage {
         case .codex:
             snapshot.isRunning ? MonitorTheme.running : MonitorTheme.textTertiary
+        case .analytics:
+            analyticsStatusColor
+        case .performance:
+            performanceStatusColor
         case .skillInsights:
             skillInsightsQualityColor
         case .codexRadar:
@@ -528,7 +556,11 @@ struct DetailPanelView: View {
     private var isCurrentPageRefreshing: Bool {
         switch selectedPage {
         case .codex:
-            viewModel.isRefreshing
+            viewModel.isRefreshing || analyticsViewModel.isRefreshing
+        case .analytics:
+            analyticsViewModel.isRefreshing
+        case .performance:
+            performanceViewModel.isRefreshing
         case .skillInsights:
             skillInsightsCoordinator.isAnalyzing
         case .codexRadar:
@@ -546,6 +578,10 @@ struct DetailPanelView: View {
         switch selectedPage {
         case .codex:
             "刷新 Codex"
+        case .analytics:
+            "刷新官方 Analytics"
+        case .performance:
+            "立即采样性能"
         case .skillInsights:
             "增量分析最近 7 天"
         case .codexRadar:
@@ -576,7 +612,7 @@ struct DetailPanelView: View {
     }
 
     private var availablePages: [DetailPage] {
-        var pages: [DetailPage] = [.codex]
+        var pages: [DetailPage] = [.codex, .analytics, .performance]
         if settings.skillInsightsEnabled {
             pages.append(.skillInsights)
         }
@@ -603,6 +639,10 @@ struct DetailPanelView: View {
         switch selectedPage {
         case .codex:
             onLocalRefresh()
+        case .analytics:
+            analyticsViewModel.refresh(force: true)
+        case .performance:
+            performanceViewModel.refreshNow()
         case .skillInsights:
             skillInsightsCoordinator.analyzeRecentWeek()
         case .codexRadar:
@@ -626,11 +666,59 @@ struct DetailPanelView: View {
             localTaskTable
                 .frame(maxHeight: .infinity, alignment: .top)
 
+            CodexWebAnalyticsPanelView(
+                viewModel: analyticsViewModel,
+                onOpenAnalytics: {
+                    detailPage = .analytics
+                },
+                onOpenBrowser: onAnalyticsBrowser
+            )
+
             if settings.showPeriodUsage {
                 periodUsage
             }
         }
         .frame(maxHeight: .infinity, alignment: .bottom)
+    }
+
+    private var performanceContent: some View {
+        PerformancePanelView(viewModel: performanceViewModel)
+    }
+
+    private var analyticsContent: some View {
+        CodexWebAnalyticsChartView(
+            viewModel: analyticsViewModel,
+            onOpenBrowser: onAnalyticsBrowser
+        )
+    }
+
+    private var analyticsStatusColor: Color {
+        switch analyticsViewModel.state {
+        case .ready:
+            MonitorTheme.healthy
+        case .partial, .stale:
+            MonitorTheme.warning
+        case .loading:
+            MonitorTheme.radarBaseline
+        case .loginRequired, .unavailable:
+            MonitorTheme.textTertiary
+        }
+    }
+
+    private var performanceStatusColor: Color {
+        guard performanceViewModel.backgroundMonitoringEnabled else {
+            return MonitorTheme.textTertiary
+        }
+        switch performanceViewModel.severity {
+        case .critical:
+            return MonitorTheme.critical
+        case .warning:
+            return MonitorTheme.warning
+        case .normal:
+            return MonitorTheme.healthy
+        case .unavailable:
+            return MonitorTheme.textTertiary
+        }
     }
 
     private var skillInsightsContent: some View {

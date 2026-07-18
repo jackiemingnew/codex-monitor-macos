@@ -75,12 +75,81 @@ Each `global_hot_key` event contains only the fixed shortcut identifier and a
 `registered`, `registration_failed`, or `triggered` status. It never records
 arbitrary keys or input text.
 
+## Local Snapshot Degradation Boundary
+
+RUN / IDLE is derived from the recent display-thread set plus rollout activity;
+historical Token aggregation is a separate, non-authoritative input. A history
+query failure must not clear active tasks or force the global state to IDLE.
+Instead, Today / 24h / 7d / 30d usage stays on the available fallback and is
+marked partial.
+
+Database titles are bounded to 512 characters at the display-query boundary.
+The month-wide aggregation query does not select titles, models, or reasoning
+effort because those fields are not used for Token deltas. This keeps malformed
+or transcript-sized titles from exhausting the generic command-output bound.
+
+When the month-wide thread query fails for another reason, the safe diagnostic
+event `usage_delta_thread_load` records only `outcome=partial`, a fixed reason,
+and the requested range. It does not include titles, task content, database
+paths, or raw SQLite output.
+
+## Opt-in Performance History
+
+The **Background performance monitoring** setting defaults off. When enabled,
+the app samples every five seconds even while the HUD detail panel is closed and
+writes a separate bounded history to:
+
+```text
+~/Library/Logs/CodexMonitor/performance-samples.jsonl
+```
+
+The file is capped at 4 MiB with one rotated backup, uses `0600`, and lives in a
+`0700` directory. Turning the setting off stops new sampling without deleting
+the existing evidence.
+
+Read a live one-shot snapshot:
+
+```bash
+~/Applications/codex监测.app/Contents/MacOS/CodexNotch \
+  --print-performance-snapshot
+```
+
+Read the latest 200 persisted samples:
+
+```bash
+~/Applications/codex监测.app/Contents/MacOS/CodexNotch \
+  --print-performance-history --limit 200
+```
+
+Each JSONL row contains only a timestamp, CPU percentage, RSS bytes, process
+count, selected PID, and system memory free percentage for these scopes:
+
+- Codex / ChatGPT desktop process tree;
+- Safari host process tree;
+- the hottest cross-application WebKit WebContent candidate;
+- WindowServer compositor pressure.
+
+WebKit XPC processes are commonly reparented to PID 1, so the lightweight
+sampler cannot map them to a specific Safari tab. The hottest WebKit PID is an
+`UNVERIFIED` owner candidate. Use a controlled change such as refreshing or
+closing one suspected tab and compare whether that PID disappears and resource
+use falls.
+
+WindowServer CPU is a compositor-pressure proxy, not measured FPS. macOS does
+not expose lightweight real FPS for arbitrary applications, and this monitor
+does not request Screen Recording or Accessibility permission to manufacture
+one.
+
 ## Privacy Boundary
 
 Diagnostics never include task titles, prompts, rollout paths, account IDs,
 emails, credentials, cookies, or API tokens. Only quota values, timestamps,
 candidate counts, source names, selection reasons, and fixed operational status
 identifiers are allowlisted.
+
+Performance history also excludes executable paths, command arguments, URLs,
+window titles, and page content. Executable paths from `ps` are used only in
+memory to classify process groups and are discarded before persistence.
 
 The last successful app-server quota is cached at:
 
@@ -94,30 +163,37 @@ credit quantity/status/expiry, and the capture timestamp. Its file mode is
 
 ## API-equivalent cost cache
 
-Cost estimation adds internal checkpoint, lineage, working Session/day/model
-buckets, hashed usage-row occurrences, and an atomically published bucket snapshot to the existing Swift-owned database:
+Cost estimation adds internal checkpoint, frozen scan-generation targets,
+lineage, working Session/day/model buckets, hashed usage-row occurrences, and
+an atomically published bucket snapshot to the existing Swift-owned database:
 
 ```text
 ~/Library/Application Support/CodexNotch/usage-deltas.sqlite
 ```
 
-It does not create a separate database, timer, subprocess, or price-network
-service. The tables store Session IDs, file identity/offset checkpoints, local
-day keys, normalized model names, aggregate input/cache-read/output tokens,
-SHA-256 row identities, and derived cost. They never store rollout paths, raw
-turn identifiers, prompts, responses, reasoning, tool parameters, account data,
-or credentials. The three visible values are standard API-price equivalents,
-not the ChatGPT/Codex subscription bill.
+It does not create a separate database, subprocess, periodic scanner, or
+price-network service. The tables store Session IDs, file identity/offset checkpoints, frozen
+target sizes and ordering, local day keys, normalized model names, aggregate
+input/cache-read/output tokens, SHA-256 row identities, and derived cost. They
+never store rollout paths, raw turn identifiers, prompts, responses, reasoning,
+tool parameters, account data, or credentials. The three visible values are
+standard API-price equivalents, not the ChatGPT/Codex subscription bill.
 
 The scanner uses a dedicated serial utility executor coordinated by the existing
-refresh infrastructure. Detail-page presentation does not invoke it. An
-automatic job starts only while the system is unconstrained and at least five
-minutes after the previous job; Codex activity does not starve it. Each job
+refresh infrastructure. Detail-page presentation does not invoke it. A new
+automatic generation starts only while the system is unconstrained and at least
+five minutes after the previous job; Codex activity does not starve it. Each job
 stops and checkpoints after one 8 MiB logical input, 50ms process CPU, or 250ms
-wall-time slice. A later refresh resumes from that checkpoint until the complete
-corpus catches up. Incomplete working data is never published as money: first
-run shows `回填中`, while later scans retain the last complete snapshot. Warm,
-caught-up jobs read no JSONL and write no derived rows.
+wall-time slice. If that finite generation remains budget- or fork-limited, one
+five-second one-shot continuation reuses the current inventory and resumes the
+persisted round-robin cursor. Continuations pause under Low Power Mode or thermal
+pressure and stop scheduling when work is caught up, cancelled, unavailable, or
+non-progressing. Bytes appended beyond the frozen targets wait for the next
+generation. Once all frozen targets complete, their working buckets are
+published and the targets are cleared in one transaction. Incomplete working
+data is never published as money: first run shows `回填中`, while later scans
+retain the last complete snapshot. Warm, caught-up jobs read no JSONL and write
+no derived rows.
 
 ## Skill Insights Diagnostics
 

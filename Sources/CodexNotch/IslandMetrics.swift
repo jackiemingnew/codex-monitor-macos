@@ -18,6 +18,7 @@ enum IslandMetrics {
     static let detailTaskHeaderHeight: CGFloat = 28
     static let detailTaskRowHeight: CGFloat = 34
     static let detailTaskEmptySpace: CGFloat = 50
+    static let detailAnalyticsHeight: CGFloat = 48
     static let detailPeriodFooterHeight: CGFloat = 44
     static let minimumDetailHeight: CGFloat = 390
     static let visibleTaskRows = 5
@@ -138,6 +139,8 @@ enum IslandMetrics {
             + 8
             + sparkHeight
             + taskTableHeight(taskRows: rows)
+            + 8
+            + detailAnalyticsHeight
             + periodHeight
             + detailBottomPadding
         return max(minimumDetailHeight, ceil(contentHeight))

@@ -77,6 +77,26 @@ enum MonitorTheme {
     static let warning = Color(red: 0.92, green: 0.68, blue: 0.42)
     static let critical = Color(red: 0.88, green: 0.45, blue: 0.45)
     static let neutral = Color.white.opacity(0.34)
+    static let analyticsTurnsPalette = [
+        Color(red: 0.76, green: 0.86, blue: 0.98),
+        Color(red: 0.23, green: 0.49, blue: 0.93),
+        Color(red: 0.13, green: 0.32, blue: 0.62),
+        Color(red: 0.72, green: 0.55, blue: 0.91),
+        Color(red: 0.47, green: 0.24, blue: 0.86),
+        Color(red: 0.33, green: 0.20, blue: 0.67),
+        textTertiary
+    ]
+    static let analyticsSkillsPalette = [
+        Color(red: 0.78, green: 0.87, blue: 0.97),
+        Color(red: 0.35, green: 0.63, blue: 0.93),
+        Color(red: 0.18, green: 0.46, blue: 0.93),
+        Color(red: 0.13, green: 0.33, blue: 0.65),
+        Color(red: 0.70, green: 0.56, blue: 0.91),
+        Color(red: 0.49, green: 0.25, blue: 0.88),
+        Color(red: 0.90, green: 0.38, blue: 0.66),
+        Color(red: 0.95, green: 0.57, blue: 0.23),
+        Color(red: 0.94, green: 0.79, blue: 0.36)
+    ]
 
     static let settingsSidebarFill = Color.secondary.opacity(0.055)
     static let settingsSurfaceFill = Color.secondary.opacity(0.045)

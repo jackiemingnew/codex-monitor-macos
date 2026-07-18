@@ -111,6 +111,15 @@ Do not scale font size with viewport width. Do not use negative letter spacing.
 - Keep Skill Insights behind its own setting. When disabled, remove the tab and
   do not instantiate its catalog loader, scanner, database connection, or timer;
   the realtime Codex monitor remains an independent capability.
+- Keep performance diagnostics in a compact operational table with current CPU,
+  resident memory, 30-second CPU peak, and process identity. The first finding
+  may use a restrained warning surface; do not turn the page into a card grid.
+- Label WindowServer as compositor pressure rather than FPS, and label the
+  hottest WebKit process as an unverified owner candidate. Never imply tab-level
+  attribution that the source cannot prove.
+- Background performance monitoring is controlled by an explicit setting that
+  defaults off. The Performance tab remains available for a manual snapshot;
+  the setting governs sampling while the detail panel is closed.
 - Do not nest decorative cards inside cards.
 
 ### Quota And Usage

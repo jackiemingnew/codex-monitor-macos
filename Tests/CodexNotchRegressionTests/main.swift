@@ -154,6 +154,232 @@ final class SkillCancellationProbe: @unchecked Sendable {
 }
 
 let runner = TestRunner()
+
+func sevenDayAnalyticsPoints(_ firstDayValues: [CodexWebAnalyticsRawCount]) -> [CodexWebAnalyticsRawDailyPoint] {
+    (0..<7).map { index in
+        CodexWebAnalyticsRawDailyPoint(
+            dateLabel: "Jul \(11 + index), 2026",
+            values: firstDayValues.map { value in
+                CodexWebAnalyticsRawCount(name: value.name, count: index == 0 ? value.count : 0)
+            }
+        )
+    }
+}
+
+let webAnalyticsRaw = CodexWebAnalyticsRawSnapshot(
+    rangeSelected: true,
+    turns: 100,
+    skillsUsed: 12,
+    pluginCalls: 0,
+    modelPoints: sevenDayAnalyticsPoints([
+        CodexWebAnalyticsRawCount(name: "gpt-main", count: 40),
+        CodexWebAnalyticsRawCount(name: "gpt-fast", count: 25),
+        CodexWebAnalyticsRawCount(name: "unknown-model", count: 15),
+        CodexWebAnalyticsRawCount(name: "gpt-small", count: 10),
+        CodexWebAnalyticsRawCount(name: "gpt-other", count: 10)
+    ]),
+    surfacePoints: sevenDayAnalyticsPoints([
+        CodexWebAnalyticsRawCount(name: "Desktop", count: 79),
+        CodexWebAnalyticsRawCount(name: "CLI", count: 20),
+        CodexWebAnalyticsRawCount(name: "Future surface", count: 1)
+    ]),
+    skillPoints: sevenDayAnalyticsPoints([
+        CodexWebAnalyticsRawCount(name: "Openai Docs", count: 7),
+        CodexWebAnalyticsRawCount(name: "Diagnosing Bugs", count: 5)
+    ]),
+    expectedDays: 7,
+    rangeStartLabel: "Jul 11, 2026",
+    rangeEndLabel: "Jul 17, 2026",
+    timeZone: "Asia/Shanghai"
+)
+let webAnalyticsSnapshot = CodexWebAnalyticsSnapshotBuilder.build(
+    raw: webAnalyticsRaw,
+    capturedAt: Date(timeIntervalSince1970: 100)
+)
+let encodedWebAnalytics = try JSONEncoder().encode(webAnalyticsRaw)
+let decodedWebAnalytics = try CodexWebAnalyticsParser.decode(
+    String(decoding: encodedWebAnalytics, as: UTF8.self)
+)
+runner.checkEqual(decodedWebAnalytics, webAnalyticsRaw, "web Analytics parser should round-trip the allowlisted fixture")
+runner.checkEqual(webAnalyticsSnapshot.quality, .complete, "complete web Analytics fixture should remain complete")
+runner.checkEqual(webAnalyticsSnapshot.pluginCalls, 0, "an explicit web Analytics zero must remain zero")
+runner.check(
+    webAnalyticsSnapshot.models.contains { $0.name == "unknown-model" },
+    "unknown model labels should be retained instead of discarded"
+)
+runner.check(
+    webAnalyticsSnapshot.surfaces.contains { $0.name == "Future surface" && $0.percentLabel == "1%" },
+    "unknown Surface labels should participate in a validated breakdown"
+)
+let compactWebModels = webAnalyticsSnapshot.compactBreakdown(webAnalyticsSnapshot.models)
+runner.checkEqual(compactWebModels.count, 4, "web Analytics should show three leading rows plus other")
+runner.checkEqual(compactWebModels.last?.name, "其他", "web Analytics remainder should be labeled other")
+runner.checkEqual(compactWebModels.last?.count, 20, "web Analytics other count should sum every remaining model")
+let plottedWebModels = webAnalyticsSnapshot.turnsByModel.displaySeries(limit: 3)
+runner.checkEqual(plottedWebModels.count, 4, "native chart should keep three leading series plus other")
+runner.checkEqual(plottedWebModels.last?.members.count, 2, "native chart other should retain its source series")
+
+let subPercentRaw = CodexWebAnalyticsRawSnapshot(
+    rangeSelected: true,
+    turns: 1_000,
+    skillsUsed: 0,
+    pluginCalls: 0,
+    modelPoints: sevenDayAnalyticsPoints([
+        CodexWebAnalyticsRawCount(name: "main", count: 995),
+        CodexWebAnalyticsRawCount(name: "tiny", count: 5)
+    ]),
+    surfacePoints: sevenDayAnalyticsPoints([CodexWebAnalyticsRawCount(name: "Desktop", count: 1_000)]),
+    skillPoints: [],
+    expectedDays: 7,
+    rangeStartLabel: nil,
+    rangeEndLabel: nil,
+    timeZone: nil
+)
+let subPercentSnapshot = CodexWebAnalyticsSnapshotBuilder.build(raw: subPercentRaw)
+runner.checkEqual(
+    subPercentSnapshot.models.first { $0.name == "tiny" }?.percentLabel,
+    "<1%",
+    "positive Analytics shares below one percent should use the less-than label"
+)
+
+let zeroWebAnalytics = CodexWebAnalyticsSnapshotBuilder.build(raw: CodexWebAnalyticsRawSnapshot(
+    rangeSelected: true,
+    turns: 0,
+    skillsUsed: 0,
+    pluginCalls: 0,
+    modelPoints: [],
+    surfacePoints: [],
+    skillPoints: [],
+    expectedDays: 7,
+    rangeStartLabel: nil,
+    rangeEndLabel: nil,
+    timeZone: nil
+))
+runner.checkEqual(zeroWebAnalytics.quality, .complete, "explicit zero Analytics data should be complete")
+runner.checkEqual(zeroWebAnalytics.turns, 0, "explicit zero Turns should not become missing")
+
+let mismatchedWebAnalytics = CodexWebAnalyticsSnapshotBuilder.build(raw: CodexWebAnalyticsRawSnapshot(
+    rangeSelected: true,
+    turns: 100,
+    skillsUsed: nil,
+    pluginCalls: 2,
+    modelPoints: sevenDayAnalyticsPoints([CodexWebAnalyticsRawCount(name: "gpt-main", count: 90)]),
+    surfacePoints: Array(sevenDayAnalyticsPoints([
+        CodexWebAnalyticsRawCount(name: "Desktop", count: 100)
+    ]).prefix(6)),
+    skillPoints: [],
+    expectedDays: 7,
+    rangeStartLabel: nil,
+    rangeEndLabel: nil,
+    timeZone: nil
+))
+runner.checkEqual(mismatchedWebAnalytics.quality, .partial, "missing and mismatched web fields should be partial")
+runner.check(mismatchedWebAnalytics.models.isEmpty, "model shares must not publish when their total mismatches Turns")
+runner.check(mismatchedWebAnalytics.surfaces.isEmpty, "Surface shares must not publish before all 7 days are sampled")
+runner.checkEqual(mismatchedWebAnalytics.turnsBySurface.sampledDays, 6, "partial native charts should retain verified daily coverage")
+
+let skillMismatchSnapshot = CodexWebAnalyticsSnapshotBuilder.build(raw: CodexWebAnalyticsRawSnapshot(
+    rangeSelected: true,
+    turns: webAnalyticsRaw.turns,
+    skillsUsed: 12,
+    pluginCalls: webAnalyticsRaw.pluginCalls,
+    modelPoints: webAnalyticsRaw.modelPoints,
+    surfacePoints: webAnalyticsRaw.surfacePoints,
+    skillPoints: sevenDayAnalyticsPoints([CodexWebAnalyticsRawCount(name: "Openai Docs", count: 11)]),
+    expectedDays: 7,
+    rangeStartLabel: nil,
+    rangeEndLabel: nil,
+    timeZone: nil
+))
+runner.checkEqual(skillMismatchSnapshot.quality, .partial, "Skills daily totals must validate against Skills used")
+runner.check(!skillMismatchSnapshot.models.isEmpty, "a Skills mismatch must not discard an independently valid model breakdown")
+runner.checkEqual(skillMismatchSnapshot.skillsBySkill.points.count, 7, "partial Skills data should remain available to the native chart")
+
+var shiftedSkillPoints = webAnalyticsRaw.skillPoints
+shiftedSkillPoints[6] = CodexWebAnalyticsRawDailyPoint(
+    dateLabel: "Jul 18, 2026",
+    values: shiftedSkillPoints[6].values
+)
+let dateMismatchSnapshot = CodexWebAnalyticsSnapshotBuilder.build(raw: CodexWebAnalyticsRawSnapshot(
+    rangeSelected: true,
+    turns: webAnalyticsRaw.turns,
+    skillsUsed: webAnalyticsRaw.skillsUsed,
+    pluginCalls: webAnalyticsRaw.pluginCalls,
+    modelPoints: webAnalyticsRaw.modelPoints,
+    surfacePoints: webAnalyticsRaw.surfacePoints,
+    skillPoints: shiftedSkillPoints,
+    expectedDays: 7,
+    rangeStartLabel: nil,
+    rangeEndLabel: nil,
+    timeZone: nil
+))
+runner.checkEqual(dateMismatchSnapshot.quality, .partial, "different daily date sets must not report complete")
+runner.check(
+    dateMismatchSnapshot.qualityIssues.contains("图表日期集合不一致"),
+    "date-set mismatches should have an explicit quality issue"
+)
+
+var invalidModelPoints = webAnalyticsRaw.modelPoints
+invalidModelPoints[0] = CodexWebAnalyticsRawDailyPoint(
+    dateLabel: invalidModelPoints[0].dateLabel,
+    values: invalidModelPoints[0].values + [CodexWebAnalyticsRawCount(name: "invalid", count: -1)]
+)
+let invalidSeriesSnapshot = CodexWebAnalyticsSnapshotBuilder.build(raw: CodexWebAnalyticsRawSnapshot(
+    rangeSelected: true,
+    turns: webAnalyticsRaw.turns,
+    skillsUsed: webAnalyticsRaw.skillsUsed,
+    pluginCalls: webAnalyticsRaw.pluginCalls,
+    modelPoints: invalidModelPoints,
+    surfacePoints: webAnalyticsRaw.surfacePoints,
+    skillPoints: webAnalyticsRaw.skillPoints,
+    expectedDays: 7,
+    rangeStartLabel: nil,
+    rangeEndLabel: nil,
+    timeZone: nil
+))
+runner.checkEqual(invalidSeriesSnapshot.quality, .partial, "invalid external chart counts must lower snapshot quality")
+runner.check(
+    invalidSeriesSnapshot.turnsByModel.points.allSatisfy { point in
+        point.values.allSatisfy { $0.count >= 0 && $0.name != "invalid" }
+    },
+    "invalid external chart values must not reach the normalized chart"
+)
+
+let unconfirmedRangeSnapshot = CodexWebAnalyticsSnapshotBuilder.build(raw: CodexWebAnalyticsRawSnapshot(
+    rangeSelected: false,
+    turns: webAnalyticsRaw.turns,
+    skillsUsed: webAnalyticsRaw.skillsUsed,
+    pluginCalls: webAnalyticsRaw.pluginCalls,
+    modelPoints: webAnalyticsRaw.modelPoints,
+    surfacePoints: webAnalyticsRaw.surfacePoints,
+    skillPoints: webAnalyticsRaw.skillPoints,
+    expectedDays: 7,
+    rangeStartLabel: nil,
+    rangeEndLabel: nil,
+    timeZone: nil
+))
+runner.checkEqual(unconfirmedRangeSnapshot.quality, .partial, "an unconfirmed 7-day selector must never report complete")
+
+let cachePolicy = CodexAnalyticsCachePolicy.standard
+let cacheOrigin = Date(timeIntervalSince1970: 10_000)
+runner.check(
+    cachePolicy.isFresh(lastSuccessAt: cacheOrigin, now: cacheOrigin.addingTimeInterval(1_799)),
+    "web Analytics cache should remain fresh before 30 minutes"
+)
+runner.check(
+    !cachePolicy.isFresh(lastSuccessAt: cacheOrigin, now: cacheOrigin.addingTimeInterval(1_800)),
+    "web Analytics cache should expire at 30 minutes"
+)
+
+do {
+    _ = try CodexWebAnalyticsParser.decode(String(repeating: "x", count: CodexWebAnalyticsParser.maximumResultBytes + 1))
+    runner.check(false, "oversized web Analytics results should be rejected")
+} catch let error as CodexWebAnalyticsParseError {
+    runner.checkEqual(error, .oversizedResult, "oversized web Analytics should report its bounded parse error")
+} catch {
+    runner.check(false, "oversized web Analytics should use the expected parse error")
+}
+
 let repositoryRoot = URL(fileURLWithPath: #filePath)
     .deletingLastPathComponent()
     .deletingLastPathComponent()
@@ -178,6 +404,13 @@ for metricID in [
     "quota.5h",
     "quota.7d",
     "quota.reset_credits_available",
+    "web.analytics.turns_7d",
+    "web.analytics.skills_used_7d",
+    "web.analytics.plugin_calls_7d",
+    "web.analytics.turns_by_surface_daily_7d",
+    "web.analytics.turns_by_model_daily_7d",
+    "web.analytics.skills_by_skill_daily_7d",
+    "web.analytics.report_quality",
     "cost.api_equivalent.today",
     "cost.api_equivalent.7d",
     "cost.api_equivalent.30d",
@@ -195,10 +428,80 @@ for metricID in [
     "skill.suspected_misfire_7d",
     "skill.related_session_tokens_7d",
     "skill.per_skill_tokens",
-    "skill.report.quality"
+    "skill.report.quality",
+    "performance.chatgpt.cpu_percent",
+    "performance.chatgpt.rss_bytes",
+    "performance.safari_host.cpu_percent",
+    "performance.webkit_hot.cpu_percent",
+    "performance.windowserver.cpu_percent",
+    "performance.system.memory_free_percent"
 ] {
     runner.check(metricDefinitions.contains(metricID), "metric definitions should document \(metricID)")
 }
+
+let performanceProcessOutput = """
+100 1 10.0 524288 /Applications/ChatGPT.app/Contents/MacOS/ChatGPT
+101 100 20.0 131072 /Users/test/.cache/codex-runtime/node
+200 1 5.0 262144 /System/Applications/Safari.app/Contents/MacOS/Safari
+300 1 25.0 524288 /System/Library/Frameworks/WebKit.framework/XPCServices/com.apple.WebKit.WebContent
+301 1 90.0 2097152 /System/Library/Frameworks/WebKit.framework/XPCServices/com.apple.WebKit.WebContent
+400 1 80.0 512000 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+malformed row
+"""
+let parsedPerformanceProcesses = PerformanceSampler.parseProcessList(performanceProcessOutput)
+runner.checkEqual(parsedPerformanceProcesses.count, 6, "performance process parser should reject malformed rows")
+let parsedPerformanceSample = PerformanceSampler.makeSample(
+    records: parsedPerformanceProcesses,
+    memoryFreePercent: 78,
+    capturedAt: Date(timeIntervalSince1970: 1_700_000_000)
+)
+runner.checkEqual(parsedPerformanceSample.chatGPT.processCount, 2, "ChatGPT aggregation should include descendants outside the app bundle")
+runner.checkEqual(parsedPerformanceSample.chatGPT.cpuPercent, 30, "ChatGPT aggregation should sum process-tree CPU")
+runner.checkEqual(parsedPerformanceSample.webKitContent.pid, 301, "the hottest WebKit content candidate should win by CPU")
+runner.checkEqual(parsedPerformanceSample.windowServer.cpuPercent, 80, "WindowServer CPU should remain an independent frame-pressure proxy")
+runner.checkEqual(PerformanceSampler.parseMemoryFreePercent("System-wide memory free percentage: 77%\n"), 77, "memory-pressure percentage should parse")
+runner.check(PerformanceSampler.parseMemoryFreePercent("free: unknown") == nil, "unknown memory pressure should remain unavailable")
+
+let performanceGiB = UInt64(1_024 * 1_024 * 1_024)
+let performanceMiB = UInt64(1_024 * 1_024)
+func performanceDiagnosticSample(at offset: TimeInterval, webKitBytes: UInt64) -> PerformanceSample {
+    PerformanceSample(
+        capturedAt: Date(timeIntervalSince1970: 1_700_000_000 + offset),
+        chatGPT: PerformanceTargetSample(kind: .chatGPT, cpuPercent: 10, residentBytes: performanceGiB, processCount: 4, pid: 100),
+        safariHost: PerformanceTargetSample(kind: .safariHost, cpuPercent: 2, residentBytes: 300 * performanceMiB, processCount: 2, pid: 200),
+        webKitContent: PerformanceTargetSample(kind: .webKitContent, cpuPercent: 90, residentBytes: webKitBytes, processCount: 1, pid: 301),
+        windowServer: PerformanceTargetSample(kind: .windowServer, cpuPercent: 90, residentBytes: 500 * performanceMiB, processCount: 1, pid: 400),
+        systemMemoryFreePercent: 78
+    )
+}
+let performanceDiagnosticSamples = [
+    performanceDiagnosticSample(at: 0, webKitBytes: 2 * performanceGiB),
+    performanceDiagnosticSample(at: 5, webKitBytes: 2 * performanceGiB + 300 * performanceMiB),
+    performanceDiagnosticSample(at: 10, webKitBytes: 2 * performanceGiB + 800 * performanceMiB)
+]
+let performanceFindings = PerformanceDiagnostics.evaluate(performanceDiagnosticSamples)
+runner.check(performanceFindings.contains { $0.id == "webkit-memory-growth" && $0.severity == .critical }, "rapid WebKit memory growth should become a critical finding")
+runner.check(performanceFindings.contains { $0.id == "webkit-cpu" && $0.severity == .critical }, "sustained WebKit CPU should become a critical finding")
+runner.check(performanceFindings.contains { $0.id == "windowserver-cpu" }, "WindowServer pressure should remain a separate finding")
+
+let performanceHistoryRoot = FileManager.default.temporaryDirectory
+    .appendingPathComponent("CodexNotchPerformanceHistory-\(UUID().uuidString)", isDirectory: true)
+let performanceHistoryURL = performanceHistoryRoot.appendingPathComponent("performance-samples.jsonl")
+let performanceHistoryStore = PerformanceHistoryStore(logURL: performanceHistoryURL, maxBytes: 8 * 1_024)
+let persistedPerformanceSample = performanceDiagnosticSample(at: 0, webKitBytes: 2 * performanceGiB)
+performanceHistoryStore.record(persistedPerformanceSample)
+let persistedPerformanceText = String(data: performanceHistoryStore.recentData(limit: 10), encoding: .utf8) ?? ""
+runner.check(persistedPerformanceText.contains("webkit_hot_content"), "performance history should store the allowlisted WebKit metrics")
+runner.check(!persistedPerformanceText.contains("/Applications/"), "performance history must not store executable paths")
+runner.check(!persistedPerformanceText.localizedCaseInsensitiveContains("url"), "performance history must not store URLs")
+runner.checkEqual(
+    performanceHistoryStore.recentSamples(limit: 10, now: Date(timeIntervalSince1970: 1_700_000_020)).count,
+    1,
+    "performance history should round-trip a validated sample"
+)
+let performanceHistoryPermissions = (try? FileManager.default.attributesOfItem(atPath: performanceHistoryURL.path)[.posixPermissions] as? NSNumber)?.intValue
+runner.checkEqual(performanceHistoryPermissions.map { $0 & 0o777 }, 0o600, "performance history should be current-user-only")
+try? FileManager.default.removeItem(at: performanceHistoryRoot)
 
 runner.check(AppInfo.version == "0.1.2", "app info should expose version 0.1.2")
 runner.check(AppInfo.displayVersion == "0.1.2", "app info should fall back to source version when bundle version is unavailable")
@@ -287,9 +590,10 @@ runner.check(
     IslandMetrics.overlayCenterX(normalizedPosition: 1, in: narrowOverlayScreenFrame) == narrowOverlayScreenFrame.midX,
     "screens narrower than the detail panel should force the overlay to center"
 )
-runner.check(fullCodexDetailHeight == 554, "five-row Codex detail should reserve space for quota provenance")
+runner.check(fullCodexDetailHeight == 610, "five-row Codex detail should preserve five tasks plus the 48 point Analytics entry")
 runner.check(fullCodexDetailHeight - codexDetailWithoutSpark == 40, "Spark strip should add 40 points including its section gap")
 runner.check(fullCodexDetailHeight - codexDetailWithoutPeriod == 56, "period footer should add 56 points including its section gap")
+runner.check(IslandMetrics.detailAnalyticsHeight == 48, "web Analytics should use the fixed compact entry height")
 runner.check(IslandMetrics.visibleTaskRowsHeight == 170, "task viewport should expose exactly five 34 point rows")
 runner.check(IslandMetrics.taskTableHeight(taskRows: IslandMetrics.visibleTaskRows) == 248, "task table should reserve 50 points below the five-row viewport")
 
@@ -970,6 +1274,36 @@ runner.check(CostUsageScanBudget.automatic.maxBytes == 8 * 1024 * 1024, "automat
 runner.check(CostUsageScanBudget.automatic.maxCPUNanoseconds == 50_000_000, "automatic cost scans should cap CPU time at 50ms")
 runner.check(CostUsageScanBudget.automatic.maxWallTime == 0.250, "automatic cost scans should cap wall time at 250ms")
 runner.check(CostUsageScanBudget.automatic.maxRowBytes == 256 * 1024, "cost scans should cap one JSONL row at 256 KiB")
+runner.checkEqual(
+    CostUsageRefreshPolicy.generationContinuationInterval,
+    TimeInterval(5),
+    "cost generation continuations should keep a five-second yield between bounded slices"
+)
+let budgetLimitedCostScan = CostUsageScanMetrics(
+    jsonlBytesRead: 8 * 1024 * 1024,
+    filesAdvanced: 1,
+    databaseWrites: 2,
+    skippedOversizedRows: 0,
+    stopReason: .byteBudget,
+    isComplete: false
+)
+runner.checkEqual(
+    CostUsageRefreshPolicy.continuationDelay(after: budgetLimitedCostScan),
+    Optional(TimeInterval(5)),
+    "an active budget-limited cost generation should request a five-second continuation"
+)
+let nonProgressingCostScan = CostUsageScanMetrics(
+    jsonlBytesRead: 0,
+    filesAdvanced: 0,
+    databaseWrites: 0,
+    skippedOversizedRows: 0,
+    stopReason: .caughtUp,
+    isComplete: false
+)
+runner.check(
+    CostUsageRefreshPolicy.continuationDelay(after: nonProgressingCostScan) == nil,
+    "an incomplete scan without resumable budget work must not create a continuation loop"
+)
 
 func costTurnContextLine(timestamp: Int, model: String) -> String {
     #"{"timestamp":\#(timestamp),"type":"turn_context","payload":{"model":"\#(model)"}}"#
@@ -1736,6 +2070,184 @@ let budgetWallUsed = ProcessInfo.processInfo.systemUptime - budgetWallStart
 runner.check(boundedCostScan.jsonlBytesRead <= 8 * 1024 * 1024, "automatic cost scan must not exceed its 8 MiB read budget")
 runner.check(budgetCPUUsed <= 100_000_000, "automatic cost scan should stop near its 50ms CPU budget")
 runner.check(budgetWallUsed <= 0.75, "automatic cost scan should stop near its 250ms wall budget")
+
+let movingTargetSessionA = "78787878-7878-4878-8878-787878787878"
+let movingTargetSessionB = "79797979-7979-4979-8979-797979797979"
+let movingTargetURLA = costUsageRoot.appendingPathComponent("rollout-\(movingTargetSessionA).jsonl")
+let movingTargetURLB = costUsageRoot.appendingPathComponent("rollout-\(movingTargetSessionB).jsonl")
+let movingTargetFiller = #"{"type":"response_item","payload":{"kind":"ignored","padding":""#
+    + String(repeating: "m", count: 900)
+    + #""}}"#
+let movingTargetInitialLines = [
+    costTurnContextLine(timestamp: costEventEpoch, model: "gpt-5.6-sol"),
+    costTokenLine(
+        timestamp: costEventEpoch + 1,
+        input: 100_000,
+        cached: 40_000,
+        output: 10_000,
+        lastInput: 100_000,
+        lastCached: 40_000,
+        lastOutput: 10_000
+    )
+] + Array(repeating: movingTargetFiller, count: 7)
+try writeCostFixture(movingTargetInitialLines, to: movingTargetURLA)
+try writeCostFixture(movingTargetInitialLines, to: movingTargetURLB)
+try FileManager.default.setAttributes(
+    [.modificationDate: costUsageNow.addingTimeInterval(100)],
+    ofItemAtPath: movingTargetURLA.path
+)
+try FileManager.default.setAttributes(
+    [.modificationDate: costUsageNow],
+    ofItemAtPath: movingTargetURLB.path
+)
+let movingTargetDatabase = costUsageRoot.appendingPathComponent("moving-target-usage-deltas.sqlite").path
+var movingTargetEstimator = CostUsageEstimator(databasePath: movingTargetDatabase)
+movingTargetEstimator.updateCandidates(
+    [
+        CostUsageSessionCandidate(sessionID: movingTargetSessionA, path: movingTargetURLA.path),
+        CostUsageSessionCandidate(sessionID: movingTargetSessionB, path: movingTargetURLB.path)
+    ],
+    inventoryTruncated: false
+)
+let movingTargetBudget = CostUsageScanBudget(
+    maxBytes: 2 * 1024,
+    maxCPUNanoseconds: 2_000_000_000,
+    maxWallTime: 5,
+    maxRowBytes: 256 * 1024
+)
+var movingTargetScan = CostUsageScanMetrics.unavailable
+var movingTargetSecondFileAdvanced = false
+for slice in 0..<12 {
+    movingTargetScan = movingTargetEstimator.scanSlice(
+        now: costUsageNow.addingTimeInterval(TimeInterval(slice) * 6),
+        budget: movingTargetBudget,
+        bypassCadence: false
+    )
+    if slice == 1 {
+        let secondFileOffset = try Shell.run(
+            "/usr/bin/sqlite3",
+            [
+                movingTargetDatabase,
+                "SELECT COALESCE(MAX(processed_offset), 0) FROM cost_usage_checkpoints WHERE session_id = '\(movingTargetSessionB)';"
+            ]
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        movingTargetSecondFileAdvanced = (Int(secondFileOffset) ?? 0) > 0
+    }
+    if movingTargetScan.isComplete {
+        break
+    }
+    try appendCostFixture(Array(repeating: movingTargetFiller, count: 3), to: movingTargetURLA)
+    try FileManager.default.setAttributes(
+        [.modificationDate: costUsageNow.addingTimeInterval(101 + TimeInterval(slice))],
+        ofItemAtPath: movingTargetURLA.path
+    )
+    if slice == 0 {
+        movingTargetEstimator = CostUsageEstimator(databasePath: movingTargetDatabase)
+        movingTargetEstimator.updateCandidates(
+            [
+                CostUsageSessionCandidate(sessionID: movingTargetSessionA, path: movingTargetURLA.path),
+                CostUsageSessionCandidate(sessionID: movingTargetSessionB, path: movingTargetURLB.path)
+            ],
+            inventoryTruncated: false
+        )
+    }
+}
+runner.check(
+    movingTargetScan.isComplete,
+    "a frozen cost generation should publish while an already-observed JSONL keeps growing"
+)
+runner.check(
+    movingTargetSecondFileAdvanced,
+    "a persisted generation cursor should advance a different file on the next bounded slice"
+)
+runner.checkEqual(
+    movingTargetEstimator.loadSummary(now: costUsageNow).today.tokenCount,
+    220_000,
+    "the published generation should contain both files at their captured target sizes"
+)
+let remainingMovingTargets = try Shell.run(
+    "/usr/bin/sqlite3",
+    [movingTargetDatabase, "SELECT COUNT(*) FROM cost_usage_scan_targets;"]
+).trimmingCharacters(in: .whitespacesAndNewlines)
+runner.checkEqual(remainingMovingTargets, "0", "publishing should atomically clear the completed generation targets")
+
+let incompleteBoundarySessionID = "80808080-8080-4080-8080-808080808080"
+let incompleteBoundaryURL = costUsageRoot.appendingPathComponent(
+    "rollout-\(incompleteBoundarySessionID).jsonl"
+)
+let incompleteBoundaryFirstEvent = costTokenLine(
+    timestamp: costEventEpoch + 1,
+    input: 100_000,
+    cached: 40_000,
+    output: 10_000,
+    lastInput: 100_000,
+    lastCached: 40_000,
+    lastOutput: 10_000
+)
+let incompleteBoundarySecondEvent = costTokenLine(
+    timestamp: costEventEpoch + 2,
+    input: 200_000,
+    cached: 80_000,
+    output: 20_000,
+    lastInput: 100_000,
+    lastCached: 40_000,
+    lastOutput: 10_000
+)
+let incompleteBoundarySplit = incompleteBoundarySecondEvent.index(
+    incompleteBoundarySecondEvent.startIndex,
+    offsetBy: incompleteBoundarySecondEvent.count / 2
+)
+let incompleteBoundaryPrefix = String(incompleteBoundarySecondEvent[..<incompleteBoundarySplit])
+let incompleteBoundarySuffix = String(incompleteBoundarySecondEvent[incompleteBoundarySplit...])
+let incompleteBoundaryInitial = [
+    costTurnContextLine(timestamp: costEventEpoch, model: "gpt-5.6-sol"),
+    incompleteBoundaryFirstEvent
+].joined(separator: "\n") + "\n" + incompleteBoundaryPrefix
+try Data(incompleteBoundaryInitial.utf8).write(to: incompleteBoundaryURL, options: .atomic)
+let incompleteBoundaryEstimator = CostUsageEstimator(
+    databasePath: costUsageRoot.appendingPathComponent("incomplete-boundary-usage-deltas.sqlite").path
+)
+incompleteBoundaryEstimator.updateCandidates(
+    [
+        CostUsageSessionCandidate(
+            sessionID: incompleteBoundarySessionID,
+            path: incompleteBoundaryURL.path
+        )
+    ],
+    inventoryTruncated: false
+)
+let incompleteBoundaryFirstScan = incompleteBoundaryEstimator.scanSlice(
+    now: costUsageNow,
+    budget: oversizedSemanticBudget,
+    bypassCadence: true
+)
+runner.check(
+    incompleteBoundaryFirstScan.isComplete,
+    "a generation should stop at the last complete row when its frozen target ends mid-row"
+)
+runner.checkEqual(
+    incompleteBoundaryEstimator.loadSummary(now: costUsageNow).today.tokenCount,
+    110_000,
+    "an incomplete target-boundary row should be deferred rather than partially counted"
+)
+let incompleteBoundaryHandle = try FileHandle(forWritingTo: incompleteBoundaryURL)
+try incompleteBoundaryHandle.seekToEnd()
+try incompleteBoundaryHandle.write(contentsOf: Data((incompleteBoundarySuffix + "\n").utf8))
+try incompleteBoundaryHandle.close()
+let incompleteBoundarySecondScan = incompleteBoundaryEstimator.scanSlice(
+    now: costUsageNow.addingTimeInterval(1),
+    budget: oversizedSemanticBudget,
+    bypassCadence: true
+)
+runner.check(
+    incompleteBoundarySecondScan.isComplete,
+    "the next generation should resume and count a completed deferred boundary row"
+)
+runner.checkEqual(
+    incompleteBoundaryEstimator.loadSummary(now: costUsageNow).today.tokenCount,
+    220_000,
+    "a deferred boundary row should be counted exactly once after completion"
+)
 
 @MainActor
 func dateFromISO8601(_ value: String, message: String) -> Date {
@@ -3018,6 +3530,10 @@ runner.check(
 )
 runner.check(settings.codexRadarEnabled, "Codex Radar should default to enabled")
 runner.check(!settings.codexRadarUsesAuthorizedAPI, "Codex Radar should default to Public without reading Keychain")
+runner.check(!settings.performanceMonitoringEnabled, "background performance monitoring should default to off")
+settings.performanceMonitoringEnabled = true
+runner.check(settingsDefaults.object(forKey: "performanceMonitoringEnabled") as? Bool == true, "performance monitoring opt-in should persist")
+settings.performanceMonitoringEnabled = false
 runner.check(settings.hudDisplayMode == .floatingHUD, "HUD should default to the existing floating presentation")
 runner.check(HUDDisplayMode.allCases == [.floatingHUD, .menuBar], "HUD should expose floating and menu-bar display modes")
 runner.check(
