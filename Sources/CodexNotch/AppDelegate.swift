@@ -11,6 +11,22 @@ struct CodexNotchApp {
             FileHandle.standardOutput.write(MonitorDiagnostics.shared.recentData(limit: snapshotOptions.limit))
             return
         }
+        if arguments.contains("--print-performance-history") {
+            FileHandle.standardOutput.write(PerformanceHistoryStore.shared.recentData(limit: snapshotOptions.limit))
+            return
+        }
+        if arguments.contains("--print-performance-snapshot") {
+            do {
+                let sample = try PerformanceSampler.capture()
+                for line in PerformanceSnapshotFormatter.humanLines(for: sample) {
+                    print(line)
+                }
+            } catch {
+                FileHandle.standardError.write(Data("performance snapshot failed: \(error.localizedDescription)\n".utf8))
+                exit(1)
+            }
+            return
+        }
         if snapshotOptions.shouldRecordDeltaSnapshot {
             let store = CodexUsageStore(
                 codexDirectory: snapshotOptions.codexDirectory,
@@ -423,6 +439,13 @@ final class NotchOverlayController {
     private lazy var subAPIViewModel = BalanceMonitorViewModel(source: .subAPI, settings: settings)
     private lazy var codexRadarViewModel = CodexRadarViewModel(settings: settings)
     private lazy var skillInsightsCoordinator = SkillInsightsFeatureCoordinator(settings: settings)
+    private lazy var performanceViewModel = PerformanceMonitorViewModel(settings: settings)
+    private lazy var analyticsProvider = CodexWebAnalyticsProvider()
+    private lazy var analyticsViewModel = CodexWebAnalyticsViewModel(provider: analyticsProvider)
+    private lazy var analyticsBrowserController = CodexWebAnalyticsBrowserWindowController(
+        provider: analyticsProvider,
+        viewModel: analyticsViewModel
+    )
     private let overlayState = OverlayState()
     private let window: NSPanel
     private var detailWindow: NSPanel?
@@ -432,8 +455,10 @@ final class NotchOverlayController {
         newAPIViewModel: newAPIViewModel,
         subAPIViewModel: subAPIViewModel,
         codexRadarViewModel: codexRadarViewModel,
+        analyticsViewModel: analyticsViewModel,
         onRefresh: { [weak self] in
             self?.viewModel.refreshAll()
+            self?.analyticsViewModel.refresh(force: true)
         }
     )
     private var cancellables: Set<AnyCancellable> = []
@@ -472,6 +497,8 @@ final class NotchOverlayController {
         installGlobalHotKey()
         _ = codexRadarViewModel
         _ = skillInsightsCoordinator
+        _ = performanceViewModel
+        _ = analyticsViewModel
         updateFrames()
     }
 
@@ -689,6 +716,8 @@ final class NotchOverlayController {
 
         let detailView = DetailPanelView(
             viewModel: viewModel,
+            analyticsViewModel: analyticsViewModel,
+            performanceViewModel: performanceViewModel,
             skillInsightsCoordinator: skillInsightsCoordinator,
             remoteViewModel: remoteViewModel,
             newAPIViewModel: newAPIViewModel,
@@ -698,8 +727,12 @@ final class NotchOverlayController {
             onSettings: { [weak self] in
                 self?.showSettings()
             },
+            onAnalyticsBrowser: { [weak self] in
+                self?.analyticsBrowserController.show()
+            },
             onLocalRefresh: { [weak self] in
                 self?.viewModel.refreshAll()
+                self?.analyticsViewModel.refresh(force: true)
             },
             onRemoteRefresh: { [weak self] in
                 self?.remoteViewModel.refreshNow()
@@ -963,6 +996,7 @@ final class NotchOverlayController {
         let codexDetailIsVisible = detailIsVisible && selectedDetailPage == .codex
         viewModel.setDetailVisible(codexDetailIsVisible)
         viewModel.setSourceVisible(codexDetailIsVisible)
+        performanceViewModel.setDetailVisible(detailIsVisible && selectedDetailPage == .performance)
         remoteViewModel.setSourceVisible(detailIsVisible && selectedDetailPage == .remoteCodex)
         newAPIViewModel.setSourceVisible(detailIsVisible && selectedDetailPage == .newAPI)
         subAPIViewModel.setSourceVisible(detailIsVisible && selectedDetailPage == .subAPI)
@@ -972,6 +1006,11 @@ final class NotchOverlayController {
         switch selectedDetailPage {
         case .codex:
             viewModel.refreshWhenPresented()
+            analyticsViewModel.refreshWhenPresented()
+        case .analytics:
+            analyticsViewModel.refreshWhenPresented()
+        case .performance:
+            performanceViewModel.refreshWhenPresented()
         case .skillInsights:
             guard settings.skillInsightsEnabled else { return }
             skillInsightsCoordinator.refreshWhenPresented()
@@ -1227,6 +1266,7 @@ final class SettingsWindowController {
     private let newAPIViewModel: BalanceMonitorViewModel
     private let subAPIViewModel: BalanceMonitorViewModel
     private let codexRadarViewModel: CodexRadarViewModel
+    private let analyticsViewModel: CodexWebAnalyticsViewModel
     private let onRefresh: () -> Void
     private var window: NSWindow?
 
@@ -1236,6 +1276,7 @@ final class SettingsWindowController {
         newAPIViewModel: BalanceMonitorViewModel,
         subAPIViewModel: BalanceMonitorViewModel,
         codexRadarViewModel: CodexRadarViewModel,
+        analyticsViewModel: CodexWebAnalyticsViewModel,
         onRefresh: @escaping () -> Void
     ) {
         self.settings = settings
@@ -1243,6 +1284,7 @@ final class SettingsWindowController {
         self.newAPIViewModel = newAPIViewModel
         self.subAPIViewModel = subAPIViewModel
         self.codexRadarViewModel = codexRadarViewModel
+        self.analyticsViewModel = analyticsViewModel
         self.onRefresh = onRefresh
     }
 
@@ -1261,6 +1303,7 @@ final class SettingsWindowController {
             newAPIViewModel: newAPIViewModel,
             subAPIViewModel: subAPIViewModel,
             codexRadarViewModel: codexRadarViewModel,
+            analyticsViewModel: analyticsViewModel,
             onRefresh: onRefresh
         )
         let hostingView = NSHostingView(rootView: view)

@@ -44,6 +44,18 @@ struct CostUsageScanMetrics: Equatable, Sendable {
         stopReason: .unavailable,
         isComplete: false
     )
+
+    var shouldContinueGeneration: Bool {
+        guard !isComplete else {
+            return false
+        }
+        switch stopReason {
+        case .byteBudget, .cpuBudget, .wallTimeBudget, .deferredFork:
+            return true
+        case .caughtUp, .cancelled, .cadence, .unavailable:
+            return false
+        }
+    }
 }
 
 struct CostUsagePerformanceStats: Equatable, Sendable {
@@ -109,6 +121,11 @@ enum CostUsageScanExecutor {
 
 enum CostUsageRefreshPolicy {
     static let minimumAutomaticInterval: TimeInterval = 5 * 60
+    static let generationContinuationInterval: TimeInterval = 5
+
+    static func continuationDelay(after metrics: CostUsageScanMetrics) -> TimeInterval? {
+        metrics.shouldContinueGeneration ? generationContinuationInterval : nil
+    }
 
     static func shouldRequestRefresh(
         showsPeriodUsage: Bool,
@@ -265,6 +282,9 @@ final class CostUsageEstimator: @unchecked Sendable {
         static let publishedPricingVersion = "cost_published_pricing_version"
         static let publishedTimeZoneFingerprint = "cost_published_timezone_fingerprint"
         static let publishedAtMS = "cost_published_at_ms"
+        static let generationCursor = "cost_generation_cursor"
+        static let generationInventoryTruncated = "cost_generation_inventory_truncated"
+        static let generationStartedMS = "cost_generation_started_ms"
     }
 
     private static let schemaVersion: Int64 = 5
@@ -327,6 +347,9 @@ final class CostUsageEstimator: @unchecked Sendable {
             do {
             let database = try CostUsageSQLiteDatabase(path: databasePath)
             try ensureSchema(in: database)
+            let minimumInterval = try hasActiveGeneration(in: database)
+                ? CostUsageRefreshPolicy.generationContinuationInterval
+                : CostUsageRefreshPolicy.minimumAutomaticInterval
             let latestAttempt = [
                 lastAutomaticAttemptAt,
                 metadataValue(MetadataKey.lastSliceMS, in: database).map {
@@ -336,7 +359,7 @@ final class CostUsageEstimator: @unchecked Sendable {
             if !bypassCadence,
                let latestAttempt,
                now.timeIntervalSince(latestAttempt) >= 0,
-               now.timeIntervalSince(latestAttempt) < CostUsageRefreshPolicy.minimumAutomaticInterval {
+               now.timeIntervalSince(latestAttempt) < minimumInterval {
                 return CostUsageScanMetrics(
                     jsonlBytesRead: 0,
                     filesAdvanced: 0,
@@ -364,42 +387,124 @@ final class CostUsageEstimator: @unchecked Sendable {
             }
 
             var checkpoints = try loadCheckpoints(from: database)
-            let fileCandidates = currentFileCandidates(now: now)
-            let knownSessionIDs = Set(fileCandidates.map(\.sessionID))
+            let liveFileCandidates = currentFileCandidates(now: now)
+            let liveCandidatesByID = Dictionary(
+                uniqueKeysWithValues: liveFileCandidates.map { ($0.sessionID, $0) }
+            )
+            let publishedSemanticsMatch = metadataValue(
+                MetadataKey.publishedSchemaVersion,
+                in: database
+            ) == Self.schemaVersion
+                && metadataValue(
+                    MetadataKey.publishedPricingVersion,
+                    in: database
+                ) == Int64(CostUsagePricing.version)
+                && metadataValue(
+                    MetadataKey.publishedTimeZoneFingerprint,
+                    in: database
+                ) == timeZoneFingerprint
             var databaseWrites = setupWrites
-            if !inventoryTruncated {
-                let currentSessionIDs = Set(fileCandidates.map(\.sessionID))
-                let removedSessionIDs = checkpoints.keys.filter { !currentSessionIDs.contains($0) }
-                for sessionID in removedSessionIDs {
-                    try deleteSession(sessionID, in: database)
-                    checkpoints.removeValue(forKey: sessionID)
+            var generationTargets = try loadGenerationTargets(from: database)
+
+            if !generationTargets.isEmpty {
+                let generationWasTruncated = metadataValue(
+                    MetadataKey.generationInventoryTruncated,
+                    in: database
+                ) == 1
+                let invalidTarget = generationTargets.contains { target in
+                    guard let live = liveCandidatesByID[target.sessionID] else {
+                        return true
+                    }
+                    return !target.canRead(from: live.signature)
+                }
+                if invalidTarget || (generationWasTruncated && !inventoryTruncated) {
+                    try clearGeneration(in: database)
+                    generationTargets = []
                     databaseWrites += 1
                 }
             }
-            guard !fileCandidates.isEmpty else {
-                if databaseWrites > 0 {
-                    try publishCompletedCostData(
-                        in: database,
-                        timeZoneFingerprint: timeZoneFingerprint,
-                        now: now
-                    )
-                    try updateScanMetadata(
-                        complete: true,
-                        timeZoneFingerprint: timeZoneFingerprint,
-                        now: now,
-                        in: database
-                    )
-                    databaseWrites += 2
+
+            if generationTargets.isEmpty {
+                if !inventoryTruncated {
+                    let currentSessionIDs = Set(liveFileCandidates.map(\.sessionID))
+                    let removedSessionIDs = checkpoints.keys.filter { !currentSessionIDs.contains($0) }
+                    for sessionID in removedSessionIDs {
+                        try deleteSession(sessionID, in: database)
+                        checkpoints.removeValue(forKey: sessionID)
+                        databaseWrites += 1
+                    }
                 }
-                return CostUsageScanMetrics(
-                    jsonlBytesRead: 0,
-                    filesAdvanced: 0,
-                    databaseWrites: databaseWrites,
-                    skippedOversizedRows: 0,
-                    stopReason: .caughtUp,
-                    isComplete: true
+
+                let liveSnapshotIsComplete = !inventoryTruncated
+                    && liveFileCandidates.allSatisfy { file in
+                        checkpoints[file.sessionID]?.matchesCompleted(file.signature) == true
+                    }
+                    && checkpoints.values.allSatisfy { !$0.tracker.sawRelevantOversizedRow }
+                if liveSnapshotIsComplete,
+                   databaseWrites == 0,
+                   publishedSemanticsMatch {
+                    inventoryRequiresScan = false
+                    return CostUsageScanMetrics(
+                        jsonlBytesRead: 0,
+                        filesAdvanced: 0,
+                        databaseWrites: 0,
+                        skippedOversizedRows: 0,
+                        stopReason: .caughtUp,
+                        isComplete: true
+                    )
+                }
+
+                guard !liveFileCandidates.isEmpty else {
+                    let complete = !inventoryTruncated
+                    if complete, databaseWrites > 0 || !publishedSemanticsMatch {
+                        try publishCompletedCostData(
+                            in: database,
+                            timeZoneFingerprint: timeZoneFingerprint,
+                            now: now,
+                            clearsGeneration: true
+                        )
+                        databaseWrites += 1
+                    } else if databaseWrites > 0 {
+                        try updateScanMetadata(
+                            complete: false,
+                            timeZoneFingerprint: timeZoneFingerprint,
+                            now: now,
+                            in: database
+                        )
+                        databaseWrites += 1
+                    }
+                    if complete {
+                        inventoryRequiresScan = false
+                    }
+                    return CostUsageScanMetrics(
+                        jsonlBytesRead: 0,
+                        filesAdvanced: 0,
+                        databaseWrites: databaseWrites,
+                        skippedOversizedRows: 0,
+                        stopReason: .caughtUp,
+                        isComplete: complete
+                    )
+                }
+
+                generationTargets = try startGeneration(
+                    candidates: liveFileCandidates,
+                    inventoryTruncated: inventoryTruncated,
+                    now: now,
+                    in: database
                 )
+                databaseWrites += 1
             }
+
+            let generationCursor = Int(metadataValue(
+                MetadataKey.generationCursor,
+                in: database
+            ) ?? -1)
+            let fileCandidates = Self.orderedGenerationCandidates(
+                targets: generationTargets,
+                liveCandidates: liveCandidatesByID,
+                after: generationCursor
+            )
+            let knownSessionIDs = Set(generationTargets.map(\.sessionID))
 
             let startedCPU = SkillProcessResourceSnapshot.processCPUNanoseconds()
             let wallDeadline = ProcessInfo.processInfo.systemUptime + max(0, budget.maxWallTime)
@@ -481,12 +586,23 @@ final class CostUsageEstimator: @unchecked Sendable {
                 if readResult.requiresFullRescan {
                     try deleteSession(file.sessionID, in: database)
                     checkpoints.removeValue(forKey: file.sessionID)
-                    databaseWrites += 1
+                    try setMetadata(
+                        MetadataKey.generationCursor,
+                        value: Int64(file.ordinal),
+                        in: database
+                    )
+                    databaseWrites += 2
                     filesAdvanced += 1
                     stopReason = .deferredFork
                     continue
                 }
                 if readResult.deferredFork {
+                    try setMetadata(
+                        MetadataKey.generationCursor,
+                        value: Int64(file.ordinal),
+                        in: database
+                    )
+                    databaseWrites += 1
                     deferredFork = true
                     stopReason = .deferredFork
                     continue
@@ -501,19 +617,29 @@ final class CostUsageEstimator: @unchecked Sendable {
                 state.discardingOversizedRowIsRelevant = readResult.discardingOversizedRowIsRelevant
                 state.sawRelevantOversizedRow = state.sawRelevantOversizedRow
                     || readResult.skippedRelevantOversizedRows > 0
-                let complete = readResult.processedOffset >= file.signature.size
-                    && !readResult.hasIncompleteRow
+                let reachedFrozenTarget = readResult.bytesRead
+                    >= file.signature.size - min(startOffset, file.signature.size)
+                let trimsTrailingIncompleteRow = reachedFrozenTarget
+                    && readResult.stopReason == .endOfFile
+                    && readResult.hasIncompleteRow
                     && !readResult.discardingOversizedRow
+                let checkpointSignature = trimsTrailingIncompleteRow
+                    ? file.signature.replacingSize(with: readResult.processedOffset)
+                    : file.signature
+                let complete = readResult.processedOffset >= checkpointSignature.size
+                    && (!readResult.hasIncompleteRow
+                        || trimsTrailingIncompleteRow
+                        || readResult.discardingOversizedRow)
                 let nextCheckpoint = CostUsageCheckpoint(
                     sessionID: file.sessionID,
-                    inode: file.signature.inode,
-                    fileSize: file.signature.size,
-                    modifiedAtNanoseconds: file.signature.modifiedAtNanoseconds,
+                    inode: checkpointSignature.inode,
+                    fileSize: checkpointSignature.size,
+                    modifiedAtNanoseconds: checkpointSignature.modifiedAtNanoseconds,
                     processedOffset: readResult.processedOffset,
                     tracker: state,
                     complete: complete,
                     lastEventAtMS: state.lastEventAtMS,
-                    sourceModifiedAtMS: file.signature.modifiedAtMilliseconds
+                    sourceModifiedAtMS: checkpointSignature.modifiedAtMilliseconds
                 )
 
                 let madeProgress = resetRequired
@@ -521,6 +647,7 @@ final class CostUsageEstimator: @unchecked Sendable {
                     || readResult.processedOffset != startOffset
                     || !accumulator.bucketDeltas.isEmpty
                     || !accumulator.lineagePoints.isEmpty
+                    || trimsTrailingIncompleteRow
                 if madeProgress {
                     try persist(
                         checkpoint: nextCheckpoint,
@@ -528,10 +655,29 @@ final class CostUsageEstimator: @unchecked Sendable {
                         buckets: accumulator.bucketDeltas,
                         lineagePoints: accumulator.lineagePoints,
                         usageRows: accumulator.usageRows,
+                        generationCursor: file.ordinal,
+                        generationTargetSize: trimsTrailingIncompleteRow
+                            ? readResult.processedOffset
+                            : nil,
                         in: database
                     )
                     checkpoints[file.sessionID] = nextCheckpoint
+                    if trimsTrailingIncompleteRow,
+                       let index = generationTargets.firstIndex(where: {
+                           $0.sessionID == file.sessionID
+                       }) {
+                        generationTargets[index] = generationTargets[index].replacingTargetSize(
+                            with: readResult.processedOffset
+                        )
+                    }
                     filesAdvanced += 1
+                    databaseWrites += 1
+                } else if readResult.bytesRead > 0 {
+                    try setMetadata(
+                        MetadataKey.generationCursor,
+                        value: Int64(file.ordinal),
+                        in: database
+                    )
                     databaseWrites += 1
                 }
 
@@ -552,37 +698,38 @@ final class CostUsageEstimator: @unchecked Sendable {
                 }
             }
 
-            let complete = !inventoryTruncated
-                && fileCandidates.allSatisfy { file in
-                    checkpoints[file.sessionID]?.matchesCompleted(file.signature) == true
-                }
-                && checkpoints.values.allSatisfy { !$0.tracker.sawRelevantOversizedRow }
-            if complete {
-                inventoryRequiresScan = false
-            }
-            let publishedSemanticsMatch = metadataValue(
-                MetadataKey.publishedSchemaVersion,
+            let generationInventoryTruncated = metadataValue(
+                MetadataKey.generationInventoryTruncated,
                 in: database
-            ) == Self.schemaVersion
-                && metadataValue(
-                    MetadataKey.publishedPricingVersion,
-                    in: database
-                ) == Int64(CostUsagePricing.version)
-                && metadataValue(
-                    MetadataKey.publishedTimeZoneFingerprint,
-                    in: database
-                ) == timeZoneFingerprint
-            if complete, databaseWrites > 0 || !publishedSemanticsMatch {
+            ) == 1
+            let complete = !generationInventoryTruncated
+                && generationTargets.allSatisfy { target in
+                    guard let checkpoint = checkpoints[target.sessionID] else {
+                        return false
+                    }
+                    return checkpoint.matchesCompleted(target.signature)
+                        && !checkpoint.tracker.sawRelevantOversizedRow
+                }
+            if complete {
+                let targetByID = Dictionary(
+                    uniqueKeysWithValues: generationTargets.map { ($0.sessionID, $0) }
+                )
+                let liveStillMatchesGeneration = !inventoryTruncated
+                    && liveFileCandidates.count == generationTargets.count
+                    && liveFileCandidates.allSatisfy { live in
+                        targetByID[live.sessionID]?.signature == live.signature
+                    }
+                inventoryRequiresScan = !liveStillMatchesGeneration
                 try publishCompletedCostData(
                     in: database,
                     timeZoneFingerprint: timeZoneFingerprint,
-                    now: now
+                    now: now,
+                    clearsGeneration: true
                 )
                 databaseWrites += 1
-            }
-            if databaseWrites > 0 {
+            } else if databaseWrites > 0 {
                 try updateScanMetadata(
-                    complete: complete,
+                    complete: false,
                     timeZoneFingerprint: timeZoneFingerprint,
                     now: now,
                     in: database
@@ -737,6 +884,14 @@ final class CostUsageEstimator: @unchecked Sendable {
               output_tokens INTEGER NOT NULL,
               PRIMARY KEY(session_id, event_at_ms, event_index)
             );
+            CREATE TABLE IF NOT EXISTS cost_usage_scan_targets (
+              session_id TEXT PRIMARY KEY,
+              inode INTEGER NOT NULL,
+              target_size INTEGER NOT NULL,
+              modified_at_ns INTEGER NOT NULL,
+              source_modified_at_ms INTEGER NOT NULL,
+              ordinal INTEGER NOT NULL UNIQUE
+            );
             CREATE INDEX IF NOT EXISTS idx_cost_usage_buckets_day
               ON cost_usage_buckets(day_key);
             CREATE INDEX IF NOT EXISTS idx_cost_usage_rows_key
@@ -770,6 +925,149 @@ final class CostUsageEstimator: @unchecked Sendable {
         }
     }
 
+    private func loadGenerationTargets(
+        from database: CostUsageSQLiteDatabase
+    ) throws -> [CostUsageGenerationTarget] {
+        let statement = try database.statement(
+            """
+            SELECT session_id, inode, target_size, modified_at_ns,
+                   source_modified_at_ms, ordinal
+            FROM cost_usage_scan_targets
+            ORDER BY ordinal;
+            """
+        )
+        var targets: [CostUsageGenerationTarget] = []
+        while try statement.step() {
+            guard let sessionID = statement.string(at: 0) else {
+                continue
+            }
+            targets.append(
+                CostUsageGenerationTarget(
+                    sessionID: sessionID,
+                    inode: UInt64(bitPattern: statement.int64(at: 1)),
+                    targetSize: UInt64(max(0, statement.int64(at: 2))),
+                    modifiedAtNanoseconds: statement.int64(at: 3),
+                    sourceModifiedAtMS: statement.int64(at: 4),
+                    ordinal: Int(statement.int64(at: 5))
+                )
+            )
+        }
+        return targets
+    }
+
+    private func hasActiveGeneration(in database: CostUsageSQLiteDatabase) throws -> Bool {
+        let statement = try database.statement(
+            "SELECT 1 FROM cost_usage_scan_targets LIMIT 1;"
+        )
+        return try statement.step()
+    }
+
+    private func startGeneration(
+        candidates: [CostUsageFileCandidate],
+        inventoryTruncated: Bool,
+        now: Date,
+        in database: CostUsageSQLiteDatabase
+    ) throws -> [CostUsageGenerationTarget] {
+        // Persist one finite pass boundary across slices; otherwise active files
+        // move live EOF faster than a complete inventory can be published. See ADR 0003.
+        let targets = candidates.enumerated().map { ordinal, candidate in
+            CostUsageGenerationTarget(
+                sessionID: candidate.sessionID,
+                inode: candidate.signature.inode,
+                targetSize: candidate.signature.size,
+                modifiedAtNanoseconds: candidate.signature.modifiedAtNanoseconds,
+                sourceModifiedAtMS: candidate.signature.modifiedAtMilliseconds,
+                ordinal: ordinal
+            )
+        }
+        try database.execute("BEGIN IMMEDIATE;")
+        do {
+            try database.execute("DELETE FROM cost_usage_scan_targets;")
+            let statement = try database.statement(
+                """
+                INSERT INTO cost_usage_scan_targets(
+                  session_id, inode, target_size, modified_at_ns,
+                  source_modified_at_ms, ordinal
+                ) VALUES(?, ?, ?, ?, ?, ?);
+                """
+            )
+            for target in targets {
+                statement.reset()
+                statement.bind(target.sessionID, at: 1)
+                statement.bind(Int64(bitPattern: target.inode), at: 2)
+                statement.bind(Int64(clamping: target.targetSize), at: 3)
+                statement.bind(target.modifiedAtNanoseconds, at: 4)
+                statement.bind(target.sourceModifiedAtMS, at: 5)
+                statement.bind(target.ordinal, at: 6)
+                try statement.run()
+            }
+            try setMetadata(MetadataKey.generationCursor, value: -1, in: database)
+            try setMetadata(
+                MetadataKey.generationInventoryTruncated,
+                value: inventoryTruncated ? 1 : 0,
+                in: database
+            )
+            try setMetadata(
+                MetadataKey.generationStartedMS,
+                value: Int64((now.timeIntervalSince1970 * 1_000).rounded()),
+                in: database
+            )
+            try database.execute("COMMIT;")
+        } catch {
+            try? database.execute("ROLLBACK;")
+            throw error
+        }
+        return targets
+    }
+
+    private func clearGeneration(
+        in database: CostUsageSQLiteDatabase,
+        insideTransaction: Bool = false
+    ) throws {
+        if !insideTransaction {
+            try database.execute("BEGIN IMMEDIATE;")
+        }
+        do {
+            try database.execute("DELETE FROM cost_usage_scan_targets;")
+            for key in [
+                MetadataKey.generationCursor,
+                MetadataKey.generationInventoryTruncated,
+                MetadataKey.generationStartedMS
+            ] {
+                try deleteMetadata(key, in: database)
+            }
+            if !insideTransaction {
+                try database.execute("COMMIT;")
+            }
+        } catch {
+            if !insideTransaction {
+                try? database.execute("ROLLBACK;")
+            }
+            throw error
+        }
+    }
+
+    private static func orderedGenerationCandidates(
+        targets: [CostUsageGenerationTarget],
+        liveCandidates: [String: CostUsageFileCandidate],
+        after cursor: Int
+    ) -> [CostUsageGenerationFileCandidate] {
+        let sorted = targets.sorted { $0.ordinal < $1.ordinal }
+        let splitIndex = sorted.firstIndex { $0.ordinal > cursor } ?? 0
+        let rotated = Array(sorted[splitIndex...]) + Array(sorted[..<splitIndex])
+        return rotated.compactMap { target in
+            guard let live = liveCandidates[target.sessionID] else {
+                return nil
+            }
+            return CostUsageGenerationFileCandidate(
+                sessionID: target.sessionID,
+                path: live.path,
+                signature: target.signature,
+                ordinal: target.ordinal
+            )
+        }
+    }
+
     private func resetDerivedCostData(
         in database: CostUsageSQLiteDatabase,
         timeZoneFingerprint: Int64,
@@ -782,11 +1080,15 @@ final class CostUsageEstimator: @unchecked Sendable {
             try database.execute("DELETE FROM cost_usage_buckets;")
             try database.execute("DELETE FROM cost_usage_published_buckets;")
             try database.execute("DELETE FROM cost_usage_checkpoints;")
+            try database.execute("DELETE FROM cost_usage_scan_targets;")
             for key in [
                 MetadataKey.publishedSchemaVersion,
                 MetadataKey.publishedPricingVersion,
                 MetadataKey.publishedTimeZoneFingerprint,
-                MetadataKey.publishedAtMS
+                MetadataKey.publishedAtMS,
+                MetadataKey.generationCursor,
+                MetadataKey.generationInventoryTruncated,
+                MetadataKey.generationStartedMS
             ] {
                 let statement = try database.statement(
                     "DELETE FROM delta_cache_metadata WHERE key = ?;"
@@ -816,6 +1118,8 @@ final class CostUsageEstimator: @unchecked Sendable {
         buckets: [CostUsageBucketKey: CostUsageBucketDelta],
         lineagePoints: [CostUsageLineagePoint],
         usageRows: [CostUsageRowOccurrence],
+        generationCursor: Int,
+        generationTargetSize: UInt64?,
         in database: CostUsageSQLiteDatabase
     ) throws {
         let encoder = JSONEncoder()
@@ -930,6 +1234,19 @@ final class CostUsageEstimator: @unchecked Sendable {
             checkpointStatement.bind(checkpoint.lastEventAtMS, at: 8)
             checkpointStatement.bind(checkpoint.sourceModifiedAtMS, at: 9)
             try checkpointStatement.run()
+            if let generationTargetSize {
+                let targetStatement = try database.statement(
+                    "UPDATE cost_usage_scan_targets SET target_size = ? WHERE session_id = ?;"
+                )
+                targetStatement.bind(Int64(clamping: generationTargetSize), at: 1)
+                targetStatement.bind(checkpoint.sessionID, at: 2)
+                try targetStatement.run()
+            }
+            try setMetadata(
+                MetadataKey.generationCursor,
+                value: Int64(generationCursor),
+                in: database
+            )
             try database.execute("COMMIT;")
         } catch {
             try? database.execute("ROLLBACK;")
@@ -990,7 +1307,8 @@ final class CostUsageEstimator: @unchecked Sendable {
     private func publishCompletedCostData(
         in database: CostUsageSQLiteDatabase,
         timeZoneFingerprint: Int64,
-        now: Date
+        now: Date,
+        clearsGeneration: Bool = false
     ) throws {
         let nowMS = Int64((now.timeIntervalSince1970 * 1_000).rounded())
         try database.execute("BEGIN IMMEDIATE;")
@@ -1038,6 +1356,15 @@ final class CostUsageEstimator: @unchecked Sendable {
                 in: database
             )
             try setMetadata(MetadataKey.publishedAtMS, value: nowMS, in: database)
+            if clearsGeneration {
+                try clearGeneration(in: database, insideTransaction: true)
+            }
+            try setMetadata(MetadataKey.schemaVersion, value: Self.schemaVersion, in: database)
+            try setMetadata(MetadataKey.pricingVersion, value: Int64(CostUsagePricing.version), in: database)
+            try setMetadata(MetadataKey.timeZoneFingerprint, value: timeZoneFingerprint, in: database)
+            try setMetadata(MetadataKey.scanStatus, value: 2, in: database)
+            try setMetadata(MetadataKey.lastSliceMS, value: nowMS, in: database)
+            try setMetadata(MetadataKey.lastUpdateMS, value: nowMS, in: database)
             try database.execute("COMMIT;")
         } catch {
             try? database.execute("ROLLBACK;")
@@ -1071,6 +1398,17 @@ final class CostUsageEstimator: @unchecked Sendable {
         )
         statement.bind(key, at: 1)
         statement.bind(value, at: 2)
+        try statement.run()
+    }
+
+    private func deleteMetadata(
+        _ key: String,
+        in database: CostUsageSQLiteDatabase
+    ) throws {
+        let statement = try database.statement(
+            "DELETE FROM delta_cache_metadata WHERE key = ?;"
+        )
+        statement.bind(key, at: 1)
         try statement.run()
     }
 
@@ -1251,6 +1589,19 @@ private struct CostUsageFileSignature: Equatable {
     let modifiedAtMilliseconds: Int64
     let modifiedAtSeconds: TimeInterval
 
+    init(
+        inode: UInt64,
+        size: UInt64,
+        modifiedAtNanoseconds: Int64,
+        modifiedAtMilliseconds: Int64
+    ) {
+        self.inode = inode
+        self.size = size
+        self.modifiedAtNanoseconds = modifiedAtNanoseconds
+        self.modifiedAtMilliseconds = modifiedAtMilliseconds
+        modifiedAtSeconds = TimeInterval(modifiedAtMilliseconds) / 1_000
+    }
+
     init?(path: String) {
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
               let size = (attributes[.size] as? NSNumber)?.uint64Value,
@@ -1264,12 +1615,64 @@ private struct CostUsageFileSignature: Equatable {
         modifiedAtMilliseconds = Int64((modifiedAtSeconds * 1_000).rounded())
         modifiedAtNanoseconds = Int64((modifiedAtSeconds * 1_000_000_000).rounded())
     }
+
+    func replacingSize(with size: UInt64) -> CostUsageFileSignature {
+        CostUsageFileSignature(
+            inode: inode,
+            size: size,
+            modifiedAtNanoseconds: modifiedAtNanoseconds,
+            modifiedAtMilliseconds: modifiedAtMilliseconds
+        )
+    }
 }
 
 private struct CostUsageFileCandidate {
     let sessionID: String
     let path: String
     let signature: CostUsageFileSignature
+}
+
+private struct CostUsageGenerationTarget {
+    let sessionID: String
+    let inode: UInt64
+    let targetSize: UInt64
+    let modifiedAtNanoseconds: Int64
+    let sourceModifiedAtMS: Int64
+    let ordinal: Int
+
+    var signature: CostUsageFileSignature {
+        CostUsageFileSignature(
+            inode: inode,
+            size: targetSize,
+            modifiedAtNanoseconds: modifiedAtNanoseconds,
+            modifiedAtMilliseconds: sourceModifiedAtMS
+        )
+    }
+
+    func canRead(from liveSignature: CostUsageFileSignature) -> Bool {
+        inode == liveSignature.inode
+            && liveSignature.size >= targetSize
+            && (liveSignature.size > targetSize
+                || liveSignature.modifiedAtNanoseconds == modifiedAtNanoseconds)
+    }
+
+    func replacingTargetSize(with targetSize: UInt64) -> CostUsageGenerationTarget {
+        CostUsageGenerationTarget(
+            sessionID: sessionID,
+            inode: inode,
+            targetSize: targetSize,
+            modifiedAtNanoseconds: modifiedAtNanoseconds,
+            sourceModifiedAtMS: sourceModifiedAtMS,
+            ordinal: ordinal
+        )
+    }
+}
+
+private struct CostUsageGenerationFileCandidate {
+    let sessionID: String
+    let path: String
+    let signature: CostUsageFileSignature
+    let ordinal: Int
 }
 
 private struct CostUsageCheckpoint {

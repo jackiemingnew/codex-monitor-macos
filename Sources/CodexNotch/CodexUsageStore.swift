@@ -30,6 +30,7 @@ private enum UsageScanPolicy {
     static let rateLimitResetTolerance = 60
     static let rateLimitConsensusMinimumSupport = 2
     static let deltaHistoryRetentionDays = 31
+    static let databaseTitleCharacterLimit = 512
 }
 
 typealias AppServerRateLimitLoader = @Sendable (Date) throws -> RateLimitSnapshot
@@ -321,7 +322,8 @@ final class CodexUsageStore: @unchecked Sendable {
             let subagentUsage = loadSubagentUsage(range: taskHistoryRange, now: now)
             let baseThreads = mergeThreadRecords(databaseThreads + sessionThreads + activeSubagentParents)
             let displayThreads = withSubagentUsage(baseThreads, usage: subagentUsage)
-            let usageDeltaDatabaseThreads = try loadUsageDeltaThreads(range: .month, now: now)
+            let usageDeltaThreadLoad = loadUsageDeltaThreadsWithQuality(range: .month, now: now)
+            let usageDeltaDatabaseThreads = usageDeltaThreadLoad.threads
             let usageDeltaSessionThreads = loadRecentSessionThreads(
                 range: .month,
                 now: now,
@@ -344,10 +346,14 @@ final class CodexUsageStore: @unchecked Sendable {
             )
             let deltaStartedAt = Date()
             recordDeltaSnapshot(for: usageDeltaThreads, now: now)
-            let usageResult = includePeriodUsage
+            var usageResult = includePeriodUsage
                 ? loadRollingPeriodUsage(for: usageDeltaThreads, now: now)
                 : PeriodUsageResult(usage: fallbackUsage ?? .zero, quality: .empty)
-            let dailyUsage = loadDailyUsage(for: usageDeltaThreads, now: now)
+            var dailyUsage = loadDailyUsage(for: usageDeltaThreads, now: now)
+            if usageDeltaThreadLoad.isPartial {
+                usageResult = markingHistoryPartial(usageResult)
+                dailyUsage = markingHistoryPartial(dailyUsage)
+            }
             let deltas = loadTokenDeltas(for: baseThreads, now: now)
             let aggregateDeltas = loadAggregateTokenDeltas(for: baseThreads, now: now)
             let deltaDurationMs = elapsedMilliseconds(since: deltaStartedAt)
@@ -379,6 +385,7 @@ final class CodexUsageStore: @unchecked Sendable {
                 periodUsage: usageResult.usage,
                 periodUsageQuality: usageResult.quality,
                 dailyUsage: dailyUsage,
+                historyThreadsPartial: usageDeltaThreadLoad.isPartial,
                 signaturePaths: rateLimitPaths,
                 rateLimitSourceName: rateLimitResult.source,
                 rateLimitSource: rateLimitSource,
@@ -427,7 +434,7 @@ final class CodexUsageStore: @unchecked Sendable {
 
     @discardableResult
     func recordDeltaSnapshot(now: Date = Date(), range: TaskHistoryRange = .month) -> Bool {
-        let databaseThreads = (try? loadUsageDeltaThreads(range: range, now: now)) ?? []
+        let databaseThreads = loadUsageDeltaThreadsWithQuality(range: range, now: now).threads
         let sessionThreads = loadRecentSessionThreads(
             range: range,
             now: now,
@@ -438,46 +445,61 @@ final class CodexUsageStore: @unchecked Sendable {
     }
 
     func loadUsageTotals(now: Date = Date()) -> PeriodUsage? {
-        let databaseThreads = (try? loadUsageDeltaThreads(range: .month, now: now)) ?? []
+        loadUsageTotalsWithQuality(now: now)?.usage
+    }
+
+    func loadUsageTotalsWithQuality(
+        now: Date = Date()
+    ) -> (usage: PeriodUsage, quality: PeriodUsageQuality)? {
+        let threadLoad = loadUsageDeltaThreadsWithQuality(range: .month, now: now)
+        let databaseThreads = threadLoad.threads
         let sessionThreads = loadRecentSessionThreads(
             range: .month,
             now: now,
             knownTokens: tokenMap(from: databaseThreads)
         )
         let threads = mergeThreadRecords(databaseThreads + sessionThreads + loadActiveSubagentParentThreads(now: now))
-        return loadRollingPeriodUsage(for: threads, now: now).usage
+        let result = threadLoad.isPartial
+            ? markingHistoryPartial(loadRollingPeriodUsage(for: threads, now: now))
+            : loadRollingPeriodUsage(for: threads, now: now)
+        return (result.usage, result.quality)
     }
 
     func loadDailyUsage(now: Date = Date()) -> DailyUsage {
-        let databaseThreads = (try? loadUsageDeltaThreads(range: .month, now: now)) ?? []
+        let threadLoad = loadUsageDeltaThreadsWithQuality(range: .month, now: now)
+        let databaseThreads = threadLoad.threads
         let sessionThreads = loadRecentSessionThreads(
             range: .month,
             now: now,
             knownTokens: tokenMap(from: databaseThreads)
         )
         let threads = mergeThreadRecords(databaseThreads + sessionThreads + loadActiveSubagentParentThreads(now: now))
-        return loadDailyUsage(for: threads, now: now)
+        let usage = loadDailyUsage(for: threads, now: now)
+        return threadLoad.isPartial ? markingHistoryPartial(usage) : usage
     }
 
     func refreshCostUsageSlice(
         now: Date = Date(),
         bypassCadence: Bool = false,
+        reuseExistingCandidates: Bool = false,
         shouldCancel: @escaping @Sendable () -> Bool = { false }
     ) -> CostUsageScanMetrics {
-        let retentionStart = Calendar.current.date(
-            byAdding: .day,
-            value: -30,
-            to: Calendar.current.startOfDay(for: now)
-        ) ?? now.addingTimeInterval(-30 * 86_400)
-        let paths = CodexSessionFileLocator.recentRolloutPaths(
-            roots: [
-                codexDirectory.appendingPathComponent("sessions", isDirectory: true),
-                codexDirectory.appendingPathComponent("archived_sessions", isDirectory: true)
-            ],
-            modifiedSince: retentionStart,
-            limit: nil
-        )
-        updateCostUsageCandidates(from: paths, inventoryTruncated: false)
+        if !reuseExistingCandidates {
+            let retentionStart = Calendar.current.date(
+                byAdding: .day,
+                value: -30,
+                to: Calendar.current.startOfDay(for: now)
+            ) ?? now.addingTimeInterval(-30 * 86_400)
+            let paths = CodexSessionFileLocator.recentRolloutPaths(
+                roots: [
+                    codexDirectory.appendingPathComponent("sessions", isDirectory: true),
+                    codexDirectory.appendingPathComponent("archived_sessions", isDirectory: true)
+                ],
+                modifiedSince: retentionStart,
+                limit: nil
+            )
+            updateCostUsageCandidates(from: paths, inventoryTruncated: false)
+        }
 
         deltaWriteLock.lock()
         defer { deltaWriteLock.unlock() }
@@ -728,7 +750,10 @@ final class CodexUsageStore: @unchecked Sendable {
         let usage = fallbackUsage ?? cache.periodUsage
         let cumulativeUsage = loadCumulativeUsage()
         let recentUsage = loadRecentUsage(now: now)
-        let dailyUsage = loadDailyUsage(for: cache.usageThreads, now: now)
+        var dailyUsage = loadDailyUsage(for: cache.usageThreads, now: now)
+        if cache.historyThreadsPartial {
+            dailyUsage = markingHistoryPartial(dailyUsage)
+        }
         let activeThreadIDs = ((try? loadActiveThreadIDs(now: now)) ?? [])
             .union(activeSessionThreadIDs(from: cache.threads, now: now))
             .union(loadActiveSubagentParentThreads(now: now).map(\.id))
@@ -805,6 +830,7 @@ final class CodexUsageStore: @unchecked Sendable {
         periodUsage: PeriodUsage,
         periodUsageQuality: PeriodUsageQuality,
         dailyUsage: DailyUsage,
+        historyThreadsPartial: Bool,
         signaturePaths: [String],
         rateLimitSourceName: String,
         rateLimitSource: RateLimitSourcePreference,
@@ -839,6 +865,7 @@ final class CodexUsageStore: @unchecked Sendable {
             periodUsage: periodUsage,
             periodUsageQuality: periodUsageQuality,
             dailyUsage: dailyUsage,
+            historyThreadsPartial: historyThreadsPartial,
             rateLimitSourceName: rateLimitSourceName,
             rateLimitSource: rateLimitSource,
             taskHistoryRange: taskHistoryRange
@@ -889,7 +916,7 @@ final class CodexUsageStore: @unchecked Sendable {
         let query = """
         select
           id,
-          coalesce(title, '未命名任务') as title,
+          substr(coalesce(title, '未命名任务'), 1, \(UsageScanPolicy.databaseTitleCharacterLimit)) as title,
           coalesce(tokens_used, 0) as tokens_used,
           model,
           reasoning_effort,
@@ -921,10 +948,10 @@ final class CodexUsageStore: @unchecked Sendable {
         let query = """
         select
           id,
-          coalesce(title, '未命名任务') as title,
+          '' as title,
           coalesce(tokens_used, 0) as tokens_used,
-          model,
-          reasoning_effort,
+          null as model,
+          null as reasoning_effort,
           coalesce(rollout_path, '') as rollout_path,
           coalesce(updated_at, 0) as updated_at,
           \(createdAtExpression) as created_at
@@ -936,6 +963,29 @@ final class CodexUsageStore: @unchecked Sendable {
             try Shell.sqliteJSON(database: stateDatabase, query: query, as: [ThreadRecord].self, readOnly: true)
         )
         .filter { !isSubagentThread($0) }
+    }
+
+    private func loadUsageDeltaThreadsWithQuality(
+        range: TaskHistoryRange,
+        now: Date
+    ) -> UsageDeltaThreadLoadResult {
+        do {
+            return UsageDeltaThreadLoadResult(
+                threads: try loadUsageDeltaThreads(range: range, now: now),
+                isPartial: false
+            )
+        } catch {
+            diagnostics?.record(
+                event: "usage_delta_thread_load",
+                correlationID: UUID().uuidString,
+                fields: [
+                    "outcome": "partial",
+                    "reason": "database_thread_query_failed",
+                    "range": range.rawValue
+                ]
+            )
+            return UsageDeltaThreadLoadResult(threads: [], isPartial: true)
+        }
     }
 
     func loadCumulativeUsage() -> CumulativeUsage {
@@ -1111,6 +1161,20 @@ final class CodexUsageStore: @unchecked Sendable {
             isPartial: missing > 0,
             missingBaselineSessions: missing
         )
+    }
+
+    private func markingHistoryPartial(_ result: PeriodUsageResult) -> PeriodUsageResult {
+        var quality = result.quality
+        quality.usage24hPartial = true
+        quality.usage7dPartial = true
+        quality.usage30dPartial = true
+        return PeriodUsageResult(usage: result.usage, quality: quality)
+    }
+
+    private func markingHistoryPartial(_ usage: DailyUsage) -> DailyUsage {
+        var partial = usage
+        partial.isPartial = true
+        return partial
     }
 
     private func loadRollingDeltaRows(
@@ -4473,6 +4537,7 @@ private struct FastSnapshotCache {
     let periodUsage: PeriodUsage
     let periodUsageQuality: PeriodUsageQuality
     let dailyUsage: DailyUsage
+    let historyThreadsPartial: Bool
     let rateLimitSourceName: String
     let rateLimitSource: RateLimitSourcePreference
     let taskHistoryRange: TaskHistoryRange
@@ -4533,6 +4598,11 @@ private struct PeriodUsageRecord: Decodable {
 private struct PeriodUsageResult {
     let usage: PeriodUsage
     let quality: PeriodUsageQuality
+}
+
+private struct UsageDeltaThreadLoadResult {
+    let threads: [ThreadRecord]
+    let isPartial: Bool
 }
 
 private struct RollingDeltaRecord: Decodable {

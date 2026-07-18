@@ -116,6 +116,7 @@ private struct SettingsDraft: Equatable {
     var showSparkQuota = false
     var showContextMetrics = false
     var skillInsightsEnabled = true
+    var performanceMonitoringEnabled = false
     var codexRadarEnabled = true
     var codexRadarUsesAuthorizedAPI = false
     var codexRadarAPIToken = ""
@@ -165,6 +166,7 @@ private struct SettingsDraft: Equatable {
         showSparkQuota = settings.showSparkQuota
         showContextMetrics = settings.showContextMetrics
         skillInsightsEnabled = settings.skillInsightsEnabled
+        performanceMonitoringEnabled = settings.performanceMonitoringEnabled
         codexRadarEnabled = settings.codexRadarEnabled
         codexRadarUsesAuthorizedAPI = settings.codexRadarUsesAuthorizedAPI
         codexRadarAPIToken = settings.secretsAreLoaded ? settings.codexRadarAPIToken : ""
@@ -225,6 +227,7 @@ struct SettingsView: View {
     @ObservedObject var newAPIViewModel: BalanceMonitorViewModel
     @ObservedObject var subAPIViewModel: BalanceMonitorViewModel
     @ObservedObject var codexRadarViewModel: CodexRadarViewModel
+    @ObservedObject var analyticsViewModel: CodexWebAnalyticsViewModel
     let onRefresh: () -> Void
 
     @State private var draft = SettingsDraft()
@@ -461,6 +464,21 @@ struct SettingsView: View {
         }
 
         Section("Codex 数据") {
+            HStack {
+                HelpLabel(
+                    title: "官方网页 Analytics",
+                    help: "个人 Pro 数据通过应用内可见网页读取，不调用内部接口。登录会话由本应用 WebKit 保存，不读取 Chrome / Safari Cookie；Analytics 快照和 30 分钟缓存只保留在内存。可在网页窗口中清除登录数据。"
+                )
+                Spacer()
+                Text(analyticsViewModel.sessionStatusLabel)
+                    .font(MonitorTheme.Typography.settingsStatus)
+                    .foregroundStyle(
+                        analyticsViewModel.isWebSessionReady
+                            ? MonitorTheme.settingsSuccess
+                            : MonitorTheme.settingsTextSecondary
+                    )
+            }
+
             Picker(selection: $draft.rateLimitSource) {
                 ForEach(RateLimitSourcePreference.allCases) { source in
                     Text(source.label).tag(source)
@@ -479,6 +497,13 @@ struct SettingsView: View {
             Toggle(isOn: $draft.showContextMetrics) {
                 HelpLabel(title: "显示上下文用量", help: "开启后在详情页显示 Ctx，并读取会话尾部 token_count。默认关闭以减少刷新时的文件扫描。")
             }
+            Toggle(isOn: $draft.performanceMonitoringEnabled) {
+                HelpLabel(
+                    title: "后台性能监控",
+                    help: "默认关闭。开启后每 5 秒采样 Codex / ChatGPT、Safari 主进程组、最热 WebKit 内容进程和 WindowServer 的 CPU / 内存，并写入有界的本机滚动日志；不记录 URL、窗口标题、命令参数或对话内容。"
+                )
+            }
+            .accessibilityHint("开启后即使详情页关闭也会继续采样，关闭开关后停止新增记录")
             Toggle(isOn: $draft.skillInsightsEnabled) {
                 HelpLabel(
                     title: "启用 Skill Insights",
@@ -1737,6 +1762,7 @@ struct SettingsView: View {
         settings.showSparkQuota = next.showSparkQuota
         settings.showContextMetrics = next.showContextMetrics
         settings.skillInsightsEnabled = next.skillInsightsEnabled
+        settings.performanceMonitoringEnabled = next.performanceMonitoringEnabled
         settings.hudDisplayMode = next.hudDisplayMode
         settings.codexRadarEnabled = next.codexRadarEnabled
         let radarModeChanged = next.codexRadarUsesAuthorizedAPI != settings.codexRadarUsesAuthorizedAPI

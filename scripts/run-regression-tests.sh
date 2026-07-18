@@ -24,6 +24,9 @@ swiftc \
 
 swift build -c release --build-path "${BUILD_DIR}/package-build"
 
+PACKAGE_BIN_DIR="$(swift build -c release --build-path "${BUILD_DIR}/package-build" --show-bin-path)"
+bash "$ROOT_DIR/scripts/test-oversized-title-status.sh" "$PACKAGE_BIN_DIR/CodexNotch"
+
 swiftc \
   -swift-version 6 \
   "${ROOT_DIR}/Sources/CodexNotch/RefreshInfrastructure.swift" \
@@ -40,6 +43,11 @@ swiftc \
   "${ROOT_DIR}/Sources/CodexNotch/KeychainStore.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/SecretStore.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/MonitorDiagnostics.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/PerformanceModels.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/PerformanceSampler.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/PerformanceHistoryStore.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/CodexWebAnalyticsModels.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/CodexWebAnalyticsViewModel.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/CodexRadarModels.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/CodexRadarClient.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/CodexRadarViewModel.swift" \
@@ -64,3 +72,14 @@ swiftc \
   -o "${BUILD_DIR}/CodexNotchRegressionTests"
 
 "${BUILD_DIR}/CodexNotchRegressionTests"
+
+swiftc \
+  -swift-version 6 \
+  -parse-as-library \
+  "${ROOT_DIR}/Sources/CodexNotch/CodexWebAnalyticsModels.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/CodexWebAnalyticsProvider.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/CodexWebAnalyticsViewModel.swift" \
+  "${ROOT_DIR}/Tests/CodexWebAnalyticsViewModelTests/main.swift" \
+  -o "${BUILD_DIR}/CodexWebAnalyticsViewModelTests"
+
+"${BUILD_DIR}/CodexWebAnalyticsViewModelTests"

@@ -1,6 +1,6 @@
 # ADR 0002: CodexBar-aligned API-equivalent cost snapshots
 
-- Status: Accepted (supersedes the initial partial-publication design)
+- Status: Accepted (supersedes the initial partial-publication design; budgeted generation completion is refined by [ADR 0003](0003-frozen-cost-scan-generations.md))
 - Date: 2026-07-14
 
 ## Context
@@ -17,10 +17,10 @@ Codex Monitor independently implements CodexBar's accounting and publication sem
 - Track model changes, cumulative counter rollback, fork inheritance, and interleaved lineages with numeric-only checkpoint state. Like CodexBar, the first `session_meta` identity is authoritative even when exported fork files embed later ancestor metadata.
 - Deduplicate repeated usage rows across exported/fork files with CodexBar-equivalent row identity fields (`session`, `turn`, event index, day, model, and token delta). Persist only a SHA-256 digest plus the derived numeric contribution; raw turn identifiers are not retained.
 - Run one cancellable cost job at a time on a dedicated serial utility queue. A job enumerates the complete 31-day session inventory but processes exactly one budgeted slice; it is not blocked merely because Codex is running.
-- Bound that checkpoint slice to 8 MiB logical input, 50 ms process CPU, or 250 ms wall time, then stop. A later coordinated refresh resumes from the checkpoint, and automatic jobs remain at least five minutes apart. Checkpoints advance only through complete JSONL rows. For rows above 256 KiB, retain only the bounded prefix long enough to recover a `turn_context` model; oversized token or session-metadata rows keep the report unpublished rather than silently undercounting.
+- Bound that checkpoint slice to 8 MiB logical input, 50 ms process CPU, or 250 ms wall time, then stop. A later coordinated refresh resumes from the checkpoint. New automatic generations remain at least five minutes apart; [ADR 0003](0003-frozen-cost-scan-generations.md) permits one five-second yielded continuation at a time only while a finite generation remains budget-limited. Checkpoints advance only through complete JSONL rows. For rows above 256 KiB, retain only the bounded prefix long enough to recover a `turn_context` model; oversized token or session-metadata rows keep the report unpublished rather than silently undercounting.
 - Keep working checkpoints/buckets separate from the published bucket snapshot. Only a complete scan replaces the published snapshot, in one SQLite transaction. A first incomplete scan displays `回填中`; a later incomplete incremental scan leaves the previous complete amount visible.
 - Store both working and published derived data in the existing `usage-deltas.sqlite`. No path, prompt, response, reasoning, tool payload, account identifier, or credential is persisted.
-- Automatic jobs remain at least five minutes apart and pause in Low Power Mode or serious/critical thermal pressure. Detail presentation never starts a scan. File events and manual refreshes use the same coordinator; manual replacement cancels the older generation.
+- New automatic generations remain at least five minutes apart. Active-generation continuations pause in Low Power Mode or serious/critical thermal pressure and keep using the same coordinator. Detail presentation never starts a scan. File events and manual refreshes use that coordinator; manual replacement cancels the older work.
 - A caught-up, unchanged refresh performs zero JSONL reads and zero derived-data writes.
 - The UI shows deterministic local-calendar totals for Today, 7 days, and 30 days. `*` is reserved for a complete corpus containing unknown-model tokens; unknown models are never assigned a guessed price.
 - After publication, the three footer Token values use the same input-plus-output buckets as the adjacent costs. This aligns visible Token lineage with CodexBar without changing existing CLI, Node, JSON, Delta, or stored Token contracts.
@@ -56,9 +56,9 @@ Rejected because first-run work scales with multi-gigabyte history and would rem
 
 Rejected because it adds network work, failure modes, and mutable pricing semantics to a secondary local estimate.
 
-### Separate history database and timer
+### Separate history database and periodic scanner
 
-Rejected because the app already owns an appropriate derived SQLite store and coordinated usage-refresh path.
+Rejected because the app already owns an appropriate derived SQLite store and coordinated usage-refresh path. ADR 0003's one-shot continuation timer is merely a yielded continuation of one active finite generation, not an independent periodic scanner.
 
 ### Cost charts, project rankings, and model breakdowns
 

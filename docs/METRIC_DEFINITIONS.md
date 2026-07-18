@@ -1,7 +1,7 @@
 # Codex Monitor Metric Definitions
 
-This file is the source of truth for local Codex usage and Skill Insights
-metrics. Any change that adds, removes, renames, or changes a formula in
+This file is the source of truth for local Codex usage, personal web Analytics,
+Skill Insights, and opt-in performance diagnostics metrics. Any change that adds, removes, renames, or changes a formula in
 `CodexUsageStore`, `SnapshotOutputFormatter`, the Codex UI, or local
 `codex-usage*` surfaces must update this document in the same change.
 
@@ -32,9 +32,16 @@ metrics. Any change that adds, removes, renames, or changes a formula in
 | `cost.api_equivalent.today` | API standard-price equivalent for Today | budgeted rollout JSONL cost cache | sum of priced input/cache-read/output deltas for the local natural day | UI only |
 | `cost.api_equivalent.7d` | API standard-price equivalent for seven natural days | budgeted rollout JSONL cost cache | sum of priced daily buckets from local today through local day - 6 | UI only |
 | `cost.api_equivalent.30d` | API standard-price equivalent for thirty natural days | budgeted rollout JSONL cost cache | sum of priced daily buckets from local today through local day - 29 | UI only |
-| `cost.report.quality` | Cost history completeness | complete-corpus published snapshot + pricing coverage | `PARTIAL` with no published snapshot while backfilling or when a complete snapshot contains unknown models; `UNAVAILABLE` without usable priced tokens; otherwise `COMPLETE` | current published report |
+| `cost.report.quality` | Cost history completeness | complete frozen-generation published snapshot + pricing coverage | `PARTIAL` with no published snapshot while backfilling or when a complete snapshot contains unknown models; `UNAVAILABLE` without usable priced tokens; otherwise `COMPLETE` | current published report |
 | `cost.scan.logical_bytes` | JSONL bytes read by one cost slice | incremental complete-line reader | bytes read after persisted offsets, capped at 8 MiB per slice | latest internal slice |
 | `cost.scan.database_writes` | Derived cost-cache transactions | existing `usage-deltas.sqlite` | checkpoint/bucket transaction count plus metadata transaction count; unchanged warm scans are zero | latest internal slice |
+| `web.analytics.turns_7d` | Official personal Codex Turns | visible ChatGPT Pro Codex Analytics page | explicit `Turns` / `轮次` KPI after selecting seven days | personal account; rolling 7-day web view |
+| `web.analytics.skills_used_7d` | Official personal Skills usage count | visible ChatGPT Pro Codex Analytics page | explicit `Skills used` KPI; missing stays unavailable and only an explicit zero is zero | personal account; rolling 7-day web view |
+| `web.analytics.plugin_calls_7d` | Official personal Plugin call count | visible ChatGPT Pro Codex Analytics page | explicit `Plugin calls` KPI; missing stays unavailable and only an explicit zero is zero | personal account; rolling 7-day web view |
+| `web.analytics.turns_by_surface_daily_7d` | Daily Turns by Desktop / CLI / Extension / Cloud / Mobile / Code review or future labels | visible `By surface` Turns chart Tooltip rows | retain seven unique labeled days; complete aggregate must equal `web.analytics.turns_7d` | personal account; rolling 7-day web view |
+| `web.analytics.turns_by_model_daily_7d` | Daily Turns by model | visible `By model` Turns chart Tooltip rows | retain seven unique labeled days; complete aggregate must equal `web.analytics.turns_7d` | personal account; rolling 7-day web view |
+| `web.analytics.skills_by_skill_daily_7d` | Daily calls by Skill | visible `Skills used` chart Tooltip rows | retain seven unique labeled days; complete aggregate must equal `web.analytics.skills_used_7d` | personal account; rolling 7-day web view |
+| `web.analytics.report_quality` | Completeness of the visible web snapshot | KPI presence + Tooltip day/date coverage + independent sum checks | `COMPLETE` only when all three KPIs exist, the three charts cover the same seven dates, model/Surface totals equal Turns, and Skill totals equal Skills used; verified incomplete points remain visible as `PARTIAL` without synthetic zeroes; otherwise `UNAVAILABLE` | latest in-memory web snapshot |
 | `skill.catalog.enabled_count` | Currently enabled Skill count | local Codex app-server `skills/list`; `PARTIAL` frontmatter fallback | `count(distinct stable_path_id) where enabled = true` | current catalog |
 | `skill.catalog.disabled_count` | Currently disabled Skill count | local Codex app-server `skills/list`; `PARTIAL` frontmatter fallback | `count(distinct stable_path_id) where enabled = false` | current catalog |
 | `skill.catalog.context_token_estimate` | Enabled catalog/context cost | enabled Skill `name` + `description` metadata from `skills/list` | `sum(ceil((name.characters + description.characters) / 4))` | current enabled catalog |
@@ -53,6 +60,14 @@ metrics. Any change that adds, removes, renames, or changes a formula in
 | `skill.scan.cpu_ms` | Process CPU used during analyzer execution | process CPU clock delta | end minus start; conservative when other app work overlaps | latest run |
 | `skill.scan.disk_read_bytes` | Physical/process read-I/O reference | macOS process resource counters | process counter delta; may be lower than logical reads due to page cache | latest run |
 | `skill.scan.database_ms` | Derived-store time | persistent Skill SQLite connection | elapsed time in per-file observation/checkpoint transactions | latest run |
+| `performance.chatgpt.cpu_percent` | Codex / ChatGPT desktop process-group CPU | `ps` PID/PPID/%CPU/comm snapshot | sum `%CPU` for ChatGPT.app or Codex.app bundle processes plus recursive descendants | current Mac; opt-in background monitor |
+| `performance.chatgpt.rss_bytes` | Codex / ChatGPT desktop process-group resident memory | `ps` RSS snapshot | sum RSS for the same process tree | current Mac; opt-in background monitor |
+| `performance.safari_host.cpu_percent` | Safari host-process CPU, excluding orphaned WebKit XPC attribution | `ps` PID/PPID/%CPU/comm snapshot | sum `%CPU` for Safari.app bundle processes plus recursive descendants | current Mac; opt-in background monitor |
+| `performance.safari_host.rss_bytes` | Safari host-process resident memory, excluding orphaned WebKit XPC attribution | `ps` RSS snapshot | sum RSS for the same process tree | current Mac; opt-in background monitor |
+| `performance.webkit_hot.cpu_percent` | Hottest visible WebKit WebContent candidate CPU | system WebKit WebContent rows in `ps` | `%CPU` of the WebContent row with highest CPU, then highest RSS | cross-application candidate; owner `UNVERIFIED` |
+| `performance.webkit_hot.rss_bytes` | Hottest visible WebKit WebContent candidate resident memory | system WebKit WebContent rows in `ps` | RSS of the selected hottest candidate | cross-application candidate; owner `UNVERIFIED` |
+| `performance.windowserver.cpu_percent` | Window compositor pressure proxy | WindowServer row in `ps` | current WindowServer `%CPU` | system compositor; not FPS |
+| `performance.system.memory_free_percent` | macOS memory-pressure available percentage | `memory_pressure -Q` | reported system-wide free percentage | current Mac |
 
 ## Rules
 
@@ -165,19 +180,100 @@ metrics. Any change that adds, removes, renames, or changes a formula in
   deduplicated with CodexBar-compatible first-session-metadata and stable row
   identity semantics before publication. Only a SHA-256 row digest and its
   numeric contribution are persisted; raw turn identifiers are not stored.
-- Cost scanning shares `usage-deltas.sqlite` and has no independent timer,
-  subprocess, or network pricing service. Each serial utility job enumerates the
-  complete 31-day inventory but processes at most one slice capped at 8 MiB,
-  50ms process CPU, or 250ms wall time, with a 256 KiB row cap and complete-line
-  checkpoints. Later refreshes resume from the checkpoint. Working buckets are
-  atomically copied to the published snapshot only after catch-up. Jobs pause in
-  Low Power Mode or serious/critical thermal state and start at least five
-  minutes apart; presentation never scans JSONL. An unchanged caught-up job
-  performs zero JSONL reads and zero derived writes.
+- Cost scanning shares `usage-deltas.sqlite` and has no independent periodic
+  scanner, subprocess, or network pricing service. Each generation freezes the complete
+  selected 31-day inventory at observed file sizes. A serial utility job then
+  processes at most one slice capped at 8 MiB, 50ms process CPU, or 250ms wall
+  time, with a 256 KiB row cap and complete-line checkpoints. Later refreshes
+  resume from a persisted round-robin cursor; new suffixes wait for the next
+  generation instead of moving the current completion target. Working buckets
+  are atomically copied to the published snapshot, and the frozen targets are
+  cleared, only after generation catch-up. New automatic generations start at
+  least five minutes apart. While one finite generation remains budget- or
+  fork-limited, a one-shot timer yields five seconds and resumes with the same
+  in-memory inventory; it stops when the result is caught up, cancelled,
+  unavailable, or non-progressing. All cost work pauses in Low Power Mode or
+  serious/critical thermal state, and presentation never scans JSONL. An
+  unchanged caught-up job performs zero JSONL reads and zero derived writes.
 - Cost-derived tables retain Session IDs, local day keys, normalized model
   names, aggregate token counts/cost, lineage totals, SHA-256 row identities,
-  file identity metadata, and offsets. They never retain rollout paths, raw
+  file identity metadata, frozen target sizes/order, and offsets. They never retain rollout paths, raw
   turn identifiers, prompts, responses, reasoning, tool parameters, accounts,
+  or credentials.
+
+### Web Analytics Rules
+
+- The web Analytics source is the user-visible
+  `https://chatgpt.com/codex/cloud/settings/analytics` page for the signed-in
+  personal account. It is not the Enterprise Analytics API and no internal
+  page request, undocumented endpoint, bearer token, or Chrome cookie is read.
+- Login occurs in a visible, app-owned `WKWebView`. Its dedicated persistent
+  website data store retains the ChatGPT session across app restarts without
+  reading Chrome or Safari cookies. The user can clear this app-owned website
+  data from the visible browser window. Parsed values and the 30-minute cache
+  remain memory-only. Raw HTML, chart Tooltips, account data, credentials, and
+  cookies are never written to application logs or diagnostic files.
+- The seven-day selector defines this feature's rolling 7-day window. The
+  actual first and last Tooltip labels plus the browser time zone are retained
+  only in the in-memory snapshot and exposed in help/accessibility text.
+- KPI extraction is whitelist-only: total Turns, Skills used, and Plugin calls.
+  Missing fields remain `nil` / `--`; only a numeric zero visibly returned by
+  the page may be displayed as `0`.
+- Model, Surface, and Skill daily series are retained from visible Tooltips.
+  `COMPLETE` requires the same seven dates in all three charts; model and Surface
+  totals must equal Turns, while Skill totals must equal Skills used. Unknown
+  labels remain named series. Valid points remain visible under `PARTIAL`, but
+  missing dates and invalid values are never synthesized.
+- Tooltip sampling stays inside the chart clip bounds and oversamples up to two
+  positions per expected day, deduplicating by the visible date label and
+  stopping as soon as all seven unique days are covered. This avoids treating the
+  right SVG clip edge as an interactive data point.
+- The compact Codex-page entry is 48 points tall and shows the three KPIs. The
+  native Analytics page draws Turns and Skills as vertically scrollable stacked
+  area charts without creating a second WebKit. Turns keeps the six largest
+  series and Skills the eight largest; remaining positive series are combined
+  into `其他`, while complete ungrouped values remain in help/accessibility text.
+- Opening the Codex detail page reuses a successful snapshot for 30 minutes.
+  An expired snapshot refreshes only when the WebKit session is ready. Manual
+  refresh coalesces with any in-flight read. There is no Analytics timer or
+  background browser automation.
+- Web login, page parsing, and `COMPLETE` / `PARTIAL` / `UNAVAILABLE` state are
+  isolated from local task discovery, quota, Token history, and RUN/IDLE. A web
+  failure may leave the prior snapshot visible as `STALE` but must never change
+  the local header state.
+
+### Performance Monitoring Rules
+
+- Background performance monitoring is an explicit opt-in and defaults off.
+  When enabled, it samples every five seconds even while the detail panel is
+  closed. Turning it off stops scheduling new samples but preserves existing
+  diagnostic history.
+- Each sampling pass has at most one in-flight job and runs `/bin/ps` with a
+  two-second timeout. `memory_pressure -Q` has the same timeout but runs at most
+  once per minute; intervening samples reuse its last value. The UI keeps up to
+  120 recent samples in memory and labels the displayed peak as a rolling
+  30-second peak.
+- `performance.chatgpt.*` includes processes whose executable belongs to
+  ChatGPT.app or Codex.app plus recursive descendants. This intentionally
+  includes spawned runtime helpers outside the bundle when their PPID lineage
+  is still available.
+- `performance.safari_host.*` is not total Safari resource use. macOS reparents
+  WebKit XPC processes to PID 1, so those processes cannot be reliably joined
+  to a Safari tab using this lightweight source.
+- `performance.webkit_hot.*` is therefore a cross-application candidate. A PID
+  disappearing after a specific tab is refreshed or closed is strong
+  differential evidence, but the monitor must still label ownership
+  `UNVERIFIED` rather than claiming a tab mapping.
+- macOS does not expose lightweight real FPS for arbitrary applications.
+  `performance.windowserver.cpu_percent` is a compositor-pressure and jank-risk
+  proxy only; it must never be displayed as measured FPS.
+- Samples are written only while the opt-in is enabled to
+  `~/Library/Logs/CodexMonitor/performance-samples.jsonl`, capped at 4 MiB with
+  one rotated backup. The directory is `0700` and files are `0600`.
+- The sampler uses executable paths transiently only to classify process
+  groups. Persisted samples contain timestamps, numeric CPU/RSS values, process
+  counts, and selected PIDs. They never contain executable paths, command
+  arguments, URLs, window titles, task content, prompts, responses, accounts,
   or credentials.
 
 ### Skill Insights Rules
@@ -258,3 +354,7 @@ metrics. Any change that adds, removes, renames, or changes a formula in
 - Reset-credit and API-equivalent cost fields are UI-internal additions. The
   existing Swift compact, Node-compatible, CLI, Token, Quota, Context, and
   Delta JSON contracts remain unchanged.
+- Performance metrics do not enter the existing snapshot or Node-compatible
+  JSON contracts. `--print-performance-snapshot` prints a one-shot human
+  snapshot, while `--print-performance-history --limit N` returns the bounded
+  allowlisted JSONL history.

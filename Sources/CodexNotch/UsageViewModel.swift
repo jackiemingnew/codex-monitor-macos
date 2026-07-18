@@ -21,6 +21,7 @@ final class UsageViewModel: ObservableObject {
     private var appServerRateLimitTimer: Timer?
     private var pendingSnapshotTimer: Timer?
     private var pendingUsageTimer: Timer?
+    private var costUsageContinuationTimer: Timer?
     private var watcherRefreshTimer: Timer?
     private var settingsChangeTimer: Timer?
     private var cancellables: Set<AnyCancellable> = []
@@ -208,7 +209,7 @@ final class UsageViewModel: ObservableObject {
         let showsPeriodUsage = settings.showPeriodUsage
         let task = Task.detached(priority: .utility) { [store, showsPeriodUsage] in
             let startedAt = Date()
-            let usage = store.loadUsageTotals()
+            let usage = store.loadUsageTotalsWithQuality()
             let dailyUsage = store.loadDailyUsage()
             let costUsage = showsPeriodUsage
                 ? store.loadCostUsageSummary()
@@ -221,9 +222,10 @@ final class UsageViewModel: ObservableObject {
                     return
                 }
                 if let usage {
-                    self.snapshot.usage24h = usage.day
-                    self.snapshot.usage7d = usage.week
-                    self.snapshot.usage30d = usage.month
+                    self.snapshot.usage24h = usage.usage.day
+                    self.snapshot.usage7d = usage.usage.week
+                    self.snapshot.usage30d = usage.usage.month
+                    self.snapshot.periodUsageQuality = usage.quality
                     self.snapshot.dailyUsage = dailyUsage
                     self.snapshot.tasks = self.snapshot.tasks.map {
                         $0.withTodaySharePercent(totalTokens: dailyUsage.usageTodayTokens)
@@ -245,8 +247,11 @@ final class UsageViewModel: ObservableObject {
 
     private func refreshCostUsage(
         reason: RefreshReason,
-        mode: RefreshRequestMode = .coalesce
+        mode: RefreshRequestMode = .coalesce,
+        isContinuation: Bool = false
     ) {
+        costUsageContinuationTimer?.invalidate()
+        costUsageContinuationTimer = nil
         let environment = RefreshEnvironment.current
         guard CostUsageRefreshPolicy.shouldRequestRefresh(
             showsPeriodUsage: settings.showPeriodUsage,
@@ -266,25 +271,45 @@ final class UsageViewModel: ObservableObject {
         guard case let .started(token) = start else {
             return
         }
-        let bypassCadence = reason == .manual
+        let bypassCadence = reason == .manual || isContinuation
         let task = Task { [store] in
-            let costUsage = await CostUsageScanExecutor.run { shouldCancel in
-                _ = store.refreshCostUsageSlice(
+            let result = await CostUsageScanExecutor.run { shouldCancel in
+                let metrics = store.refreshCostUsageSlice(
                     bypassCadence: bypassCadence,
+                    reuseExistingCandidates: isContinuation,
                     shouldCancel: shouldCancel
                 )
-                return store.loadCostUsageSummary()
+                return (metrics: metrics, summary: store.loadCostUsageSummary())
             }
             let completion = refreshCoordinator.complete(token)
             guard completion.isCurrent else {
                 return
             }
-            snapshot.costUsage = costUsage
+            snapshot.costUsage = result.summary
             if completion.shouldRunPending {
                 refreshCostUsage(reason: reason)
+            } else if let delay = CostUsageRefreshPolicy.continuationDelay(after: result.metrics) {
+                scheduleCostUsageContinuation(after: delay)
             }
         }
         refreshCoordinator.attach(task, to: token)
+    }
+
+    private func scheduleCostUsageContinuation(after delay: TimeInterval) {
+        costUsageContinuationTimer?.invalidate()
+        guard settings.showPeriodUsage,
+              !RefreshEnvironment.current.isConstrained else {
+            costUsageContinuationTimer = nil
+            return
+        }
+        let timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                self?.costUsageContinuationTimer = nil
+                self?.refreshCostUsage(reason: .timer, isContinuation: true)
+            }
+        }
+        timer.tolerance = min(0.5, delay * 0.1)
+        costUsageContinuationTimer = timer
     }
 
     private func scheduleFastRefresh() {
@@ -615,6 +640,8 @@ final class UsageViewModel: ObservableObject {
         pendingSnapshotTimer = nil
         pendingUsageTimer?.invalidate()
         pendingUsageTimer = nil
+        costUsageContinuationTimer?.invalidate()
+        costUsageContinuationTimer = nil
         watcherRefreshTimer?.invalidate()
         watcherRefreshTimer = nil
         refreshCoordinator.invalidateAll([
@@ -637,6 +664,8 @@ final class UsageViewModel: ObservableObject {
 
     private func refreshEnvironmentDidChange() {
         if RefreshEnvironment.current.isConstrained {
+            costUsageContinuationTimer?.invalidate()
+            costUsageContinuationTimer = nil
             refreshCoordinator.invalidate(.costUsage)
         }
         guard settings.adaptiveRefreshEnabled else {

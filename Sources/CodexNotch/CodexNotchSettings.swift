@@ -72,6 +72,7 @@ final class CodexNotchSettings: ObservableObject {
         static let showSparkQuota = "showSparkQuota"
         static let showContextMetrics = "showContextMetrics"
         static let skillInsightsEnabled = "skillInsightsEnabled"
+        static let performanceMonitoringEnabled = "performanceMonitoringEnabled"
         static let codexRadarEnabled = "codexRadarEnabled"
         static let codexRadarUsesAuthorizedAPI = "codexRadarUsesAuthorizedAPI"
         static let enablePulse = "enablePulse"
@@ -188,6 +189,12 @@ final class CodexNotchSettings: ObservableObject {
     @Published var skillInsightsEnabled: Bool {
         didSet {
             defaults.set(skillInsightsEnabled, forKey: Keys.skillInsightsEnabled)
+        }
+    }
+
+    @Published var performanceMonitoringEnabled: Bool {
+        didSet {
+            defaults.set(performanceMonitoringEnabled, forKey: Keys.performanceMonitoringEnabled)
         }
     }
 
@@ -510,6 +517,7 @@ final class CodexNotchSettings: ObservableObject {
         self.showSparkQuota = defaults.object(forKey: Keys.showSparkQuota) as? Bool ?? false
         self.showContextMetrics = defaults.object(forKey: Keys.showContextMetrics) as? Bool ?? false
         self.skillInsightsEnabled = defaults.object(forKey: Keys.skillInsightsEnabled) as? Bool ?? true
+        self.performanceMonitoringEnabled = defaults.object(forKey: Keys.performanceMonitoringEnabled) as? Bool ?? false
         self.codexRadarEnabled = defaults.object(forKey: Keys.codexRadarEnabled) as? Bool ?? true
         self.codexRadarUsesAuthorizedAPI = defaults.object(forKey: Keys.codexRadarUsesAuthorizedAPI) as? Bool ?? false
         self.enablePulse = defaults.object(forKey: Keys.enablePulse) as? Bool ?? true
