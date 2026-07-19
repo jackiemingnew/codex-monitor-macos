@@ -32,7 +32,15 @@ Skill Insights, and opt-in performance diagnostics metrics. Any change that adds
 | `cost.api_equivalent.today` | API standard-price equivalent for Today | budgeted rollout JSONL cost cache | sum of priced input/cache-read/output deltas for the local natural day | UI only |
 | `cost.api_equivalent.7d` | API standard-price equivalent for seven natural days | budgeted rollout JSONL cost cache | sum of priced daily buckets from local today through local day - 6 | UI only |
 | `cost.api_equivalent.30d` | API standard-price equivalent for thirty natural days | budgeted rollout JSONL cost cache | sum of priced daily buckets from local today through local day - 29 | UI only |
-| `cost.report.quality` | Cost history completeness | complete frozen-generation published snapshot + pricing coverage | `PARTIAL` with no published snapshot while backfilling or when a complete snapshot contains unknown models; `UNAVAILABLE` without usable priced tokens; otherwise `COMPLETE` | current published report |
+| `local.model_tokens.daily` | Local natural-day Token by normalized model | `cost_usage_published_buckets` | `group by day_key, model; sum(input_tokens + output_tokens)`; cached input is not added separately | current + archived local parent and subagent JSONL, UI only |
+| `local.model_tokens.today` | Today local Token by model | published daily model buckets | `sum(local.model_tokens.daily) where day_key = local today` | one local natural day, UI only |
+| `local.model_tokens.7d` | Seven-day local Token by model | published daily model buckets | `sum(local.model_tokens.daily) from local today through local day - 6` | seven local natural days, UI only |
+| `local.model_tokens.30d` | Thirty-day local Token by model | published daily model buckets | `sum(local.model_tokens.daily) from local today through local day - 29` | thirty local natural days, UI only |
+| `local.model_tokens.share` | One model's share of local period Token | selected-period model aggregate | `model input-plus-output Token / all-model input-plus-output Token` | selected local period, UI only |
+| `local.model_tokens.components` | Detailed local Token composition by model | published model bucket inputs | `uncached input = input_tokens - cached_input_tokens`; cached input = `cached_input_tokens`; output = `output_tokens` | selected local period, UI Help/Tooltip/accessibility |
+| `local.model_tokens.report_quality` | Local model Token publication completeness | frozen-generation published model buckets | `COMPLETE` for a valid complete published snapshot, including snapshots with unpriced models; `PARTIAL` while the first complete snapshot is backfilling; otherwise `UNAVAILABLE` | current published report, UI only |
+| `cost.api_equivalent.by_model` | Optional API standard-price equivalent by local model | published model bucket `cost_nanos` and pricing status | sum cost only when that model's buckets are priced; an unpriced model is `未定价`, never `$0` | selected local period, UI only |
+| `cost.report.quality` | Cost pricing completeness | complete frozen-generation published snapshot + pricing coverage | `PARTIAL` with no published snapshot while backfilling or when a complete snapshot contains unknown models; `UNAVAILABLE` without usable priced tokens; otherwise `COMPLETE` | current published report |
 | `cost.scan.logical_bytes` | JSONL bytes read by one cost slice | incremental complete-line reader | bytes read after persisted offsets, capped at 8 MiB per slice | latest internal slice |
 | `cost.scan.database_writes` | Derived cost-cache transactions | existing `usage-deltas.sqlite` | checkpoint/bucket transaction count plus metadata transaction count; unchanged warm scans are zero | latest internal slice |
 | `web.analytics.turns_7d` | Official personal Codex Turns | visible ChatGPT Pro Codex Analytics page | explicit `Turns` / `轮次` KPI after selecting seven days | personal account; rolling 7-day web view |
@@ -109,6 +117,28 @@ Skill Insights, and opt-in performance diagnostics metrics. Any change that adds
   must use a future independent metric if they become visible.
 - `period.*`, `daily.*`, `delta.*`, and `task.total_tokens` are parent-only.
   Subagent tokens must not be folded into a parent task or period delta.
+- `local.model_tokens.*` is a separate complete-corpus metric. It aggregates the
+  current and archived local JSONL inventory, including parent tasks and
+  subagents, after fork and repeated-export deduplication. It must not be
+  presented as a parent-only task delta, and it does not expose a parent / child
+  split or task drilldown.
+- `local.model_tokens.*` reads only the frozen published cost buckets. Selecting
+  the local Analytics mode performs a read-only load; only an explicit refresh
+  may reuse the existing cost scanner. Disabling `showPeriodUsage` disables this
+  view and must not silently start a scan.
+- Local model total Token is always input plus output. Cached input is a subset
+  of input: the detailed input composition is uncached input plus cached input,
+  and cached input must never be added to total Token a second time.
+- Today, 7-day, and 30-day local model periods use local natural-day boundaries,
+  not rolling-hour windows. Missing dates render as explicit zero days. Today is
+  a composition view and must not synthesize hourly points.
+- The local trend retains at most six series. Sol, Terra, Luna, and Auto-review
+  are retained when present; overflow models merge into `其他`. The model ranking
+  and Token-share denominator retain every model.
+- `local.model_tokens.report_quality` is independent of `cost.report.quality`.
+  Unknown or newly introduced models remain in Token totals and shares and can
+  coexist with Token `COMPLETE`; they affect only cost pricing completeness and
+  display `未定价`, never `$0`. Spark proxy pricing remains explicitly labelled.
 - `delta.1h` remains available for compatibility exports and internal
   calculations, but is not shown in the folded top pill by default.
   `delta.10m` remains available only for compatibility exports and internal
@@ -195,6 +225,10 @@ Skill Insights, and opt-in performance diagnostics metrics. Any change that adds
   unavailable, or non-progressing. All cost work pauses in Low Power Mode or
   serious/critical thermal state, and presentation never scans JSONL. An
   unchanged caught-up job performs zero JSONL reads and zero derived writes.
+- The five-minute cost cadence is checked before enumerating `sessions` and
+  `archived_sessions`. A cadence hit performs zero inventory enumerations,
+  JSONL reads, and derived writes. A yielded frozen generation reuses its
+  process-local candidates; a new process safely rebuilds an absent inventory.
 - Cost-derived tables retain Session IDs, local day keys, normalized model
   names, aggregate token counts/cost, lineage totals, SHA-256 row identities,
   file identity metadata, frozen target sizes/order, and offsets. They never retain rollout paths, raw
@@ -213,6 +247,11 @@ Skill Insights, and opt-in performance diagnostics metrics. Any change that adds
   data from the visible browser window. Parsed values and the 30-minute cache
   remain memory-only. Raw HTML, chart Tooltips, account data, credentials, and
   cookies are never written to application logs or diagnostic files.
+- Constructing the provider does not construct a `WKWebView`. Only explicit
+  Official Analytics or Web Sign-in use materializes it. Leaving both official
+  surfaces schedules a 30-minute idle release; releasing the view never clears
+  the retained website data store, and a still-mounted browser view is never
+  released.
 - The seven-day selector defines this feature's rolling 7-day window. The
   actual first and last Tooltip labels plus the browser time zone are retained
   only in the in-memory snapshot and exposed in help/accessibility text.
@@ -230,13 +269,16 @@ Skill Insights, and opt-in performance diagnostics metrics. Any change that adds
   right SVG clip edge as an interactive data point.
 - The compact Codex-page entry is 48 points tall and shows the three KPIs. The
   native Analytics page draws Turns and Skills as vertically scrollable stacked
-  area charts without creating a second WebKit. Turns keeps the six largest
-  series and Skills the eight largest; remaining positive series are combined
-  into `其他`, while complete ungrouped values remain in help/accessibility text.
-- Opening the Codex detail page reuses a successful snapshot for 30 minutes.
-  An expired snapshot refreshes only when the WebKit session is ready. Manual
-  refresh coalesces with any in-flight read. There is no Analytics timer or
-  background browser automation.
+  area charts without creating a second WebKit. Turns keeps Sol, Terra, Luna,
+  and Auto-review when present, fills the remaining slots in its six-series
+  budget by total usage, and combines the rest into `其他`. Skills keeps the
+  eight largest series. Complete ungrouped values remain in help/accessibility
+  text.
+- Opening the Codex detail page displays a successful in-memory snapshot but
+  never materializes WebKit. Official Analytics presentation starts the web
+  session explicitly; an expired snapshot refreshes only when that session is
+  ready. Manual refresh coalesces with any in-flight read. There is no Analytics
+  timer or background browser automation.
 - Web login, page parsing, and `COMPLETE` / `PARTIAL` / `UNAVAILABLE` state are
   isolated from local task discovery, quota, Token history, and RUN/IDLE. A web
   failure may leave the prior snapshot visible as `STALE` but must never change
@@ -245,9 +287,14 @@ Skill Insights, and opt-in performance diagnostics metrics. Any change that adds
 ### Performance Monitoring Rules
 
 - Background performance monitoring is an explicit opt-in and defaults off.
-  When enabled, it samples every five seconds even while the detail panel is
-  closed. Turning it off stops scheduling new samples but preserves existing
-  diagnostic history.
+  The visible Performance detail samples every five seconds. A hidden detail
+  samples every 60 seconds only while the opt-in is enabled. Low Power Mode or
+  serious/critical thermal pressure changes any allowed cadence to 300 seconds;
+  it never enables hidden sampling by itself. Turning the opt-in off stops
+  hidden scheduling but preserves existing diagnostic history.
+- Performance timers use a tolerance of `min(max(interval * 0.1, 1), 30)`
+  seconds so background wakeups can coalesce. Manual refresh and first visible
+  presentation remain immediate, and at most one capture is in flight.
 - Each sampling pass has at most one in-flight job and runs `/bin/ps` with a
   two-second timeout. `memory_pressure -Q` has the same timeout but runs at most
   once per minute; intervening samples reuse its last value. The UI keeps up to

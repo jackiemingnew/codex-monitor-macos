@@ -39,6 +39,7 @@ swiftc \
   -parse-as-library \
   -swift-version 6 \
   "$ROOT_DIR/Sources/CodexNotch/RefreshInfrastructure.swift" \
+  "$ROOT_DIR/Sources/CodexNotch/LocalTokenAnalyticsModels.swift" \
   "$ROOT_DIR/Sources/CodexNotch/Models.swift" \
   "$ROOT_DIR/Sources/CodexNotch/AppInfo.swift" \
   "$ROOT_DIR/Sources/CodexNotch/Formatters.swift" \

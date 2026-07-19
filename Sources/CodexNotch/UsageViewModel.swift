@@ -12,6 +12,7 @@ final class UsageViewModel: ObservableObject {
 
     @Published private(set) var snapshot: UsageSnapshot = .empty
     @Published private(set) var isRefreshing = false
+    @Published private(set) var isCostUsageRefreshing = false
 
     private let store: CodexUsageStore
     private let settings: CodexNotchSettings
@@ -36,6 +37,7 @@ final class UsageViewModel: ObservableObject {
     private var isSourceVisible = false
     private var lastSnapshotSuccessfulAt: Date?
     private var lastUsageSuccessfulAt: Date?
+    private var publishedCostLoadGeneration = 0
 
     init(store: CodexUsageStore = CodexUsageStore(), settings: CodexNotchSettings = CodexNotchSettings()) {
         self.store = store
@@ -191,11 +193,44 @@ final class UsageViewModel: ObservableObject {
         }
     }
 
+    func loadPublishedCostUsageWhenPresented() {
+        publishedCostLoadGeneration += 1
+        let generation = publishedCostLoadGeneration
+        guard settings.showPeriodUsage else {
+            snapshot.costUsage = .unavailable
+            return
+        }
+        let store = store
+        Task { [weak self] in
+            let summary = await Task.detached(priority: .utility) {
+                store.loadCostUsageSummary()
+            }.value
+            guard let self,
+                  self.settings.showPeriodUsage,
+                  generation == self.publishedCostLoadGeneration else {
+                return
+            }
+            self.snapshot.costUsage = summary
+        }
+    }
+
+    func refreshLocalTokenAnalytics() {
+        publishedCostLoadGeneration += 1
+        guard settings.showPeriodUsage else {
+            snapshot.costUsage = .unavailable
+            return
+        }
+        refreshCostUsage(reason: .manual, mode: .replace, invalidatePublishedCostLoad: false)
+    }
+
     private func refreshUsageTotals(
         reason: RefreshReason,
         mode: RefreshRequestMode = .coalesce
     ) {
-        refreshCostUsage(reason: reason, mode: mode)
+        // Both this lane and the cost lane can publish a newer cost snapshot.
+        // Invalidate any presentation load before either async operation starts.
+        publishedCostLoadGeneration += 1
+        refreshCostUsage(reason: reason, mode: mode, invalidatePublishedCostLoad: false)
         let start = refreshCoordinator.begin(.usageTotals, reason: reason, mode: mode)
         guard case let .started(token) = start else {
             return
@@ -209,8 +244,7 @@ final class UsageViewModel: ObservableObject {
         let showsPeriodUsage = settings.showPeriodUsage
         let task = Task.detached(priority: .utility) { [store, showsPeriodUsage] in
             let startedAt = Date()
-            let usage = store.loadUsageTotalsWithQuality()
-            let dailyUsage = store.loadDailyUsage()
+            let usageHistory = store.loadUsageTotalsAndDailyWithQuality()
             let costUsage = showsPeriodUsage
                 ? store.loadCostUsageSummary()
                 : CostUsageSummary.unavailable
@@ -221,17 +255,15 @@ final class UsageViewModel: ObservableObject {
                     self.updateRefreshingState()
                     return
                 }
-                if let usage {
-                    self.snapshot.usage24h = usage.usage.day
-                    self.snapshot.usage7d = usage.usage.week
-                    self.snapshot.usage30d = usage.usage.month
-                    self.snapshot.periodUsageQuality = usage.quality
-                    self.snapshot.dailyUsage = dailyUsage
-                    self.snapshot.tasks = self.snapshot.tasks.map {
-                        $0.withTodaySharePercent(totalTokens: dailyUsage.usageTodayTokens)
-                    }
-                    self.lastUsageSuccessfulAt = Date()
+                self.snapshot.usage24h = usageHistory.usage.day
+                self.snapshot.usage7d = usageHistory.usage.week
+                self.snapshot.usage30d = usageHistory.usage.month
+                self.snapshot.periodUsageQuality = usageHistory.quality
+                self.snapshot.dailyUsage = usageHistory.daily
+                self.snapshot.tasks = self.snapshot.tasks.map {
+                    $0.withTodaySharePercent(totalTokens: usageHistory.daily.usageTodayTokens)
                 }
+                self.lastUsageSuccessfulAt = Date()
                 self.snapshot.costUsage = costUsage
                 self.snapshot.monitorStats.lastUsageDurationMs = durationMs
                 self.updateRefreshingState()
@@ -248,8 +280,12 @@ final class UsageViewModel: ObservableObject {
     private func refreshCostUsage(
         reason: RefreshReason,
         mode: RefreshRequestMode = .coalesce,
-        isContinuation: Bool = false
+        isContinuation: Bool = false,
+        invalidatePublishedCostLoad: Bool = true
     ) {
+        if invalidatePublishedCostLoad {
+            publishedCostLoadGeneration += 1
+        }
         costUsageContinuationTimer?.invalidate()
         costUsageContinuationTimer = nil
         let environment = RefreshEnvironment.current
@@ -260,6 +296,7 @@ final class UsageViewModel: ObservableObject {
         ) else {
             if !settings.showPeriodUsage || environment.isConstrained {
                 refreshCoordinator.invalidate(.costUsage)
+                isCostUsageRefreshing = false
             }
             if !settings.showPeriodUsage {
                 snapshot.costUsage = .unavailable
@@ -271,6 +308,7 @@ final class UsageViewModel: ObservableObject {
         guard case let .started(token) = start else {
             return
         }
+        isCostUsageRefreshing = true
         let bypassCadence = reason == .manual || isContinuation
         let task = Task { [store] in
             let result = await CostUsageScanExecutor.run { shouldCancel in
@@ -285,6 +323,7 @@ final class UsageViewModel: ObservableObject {
             guard completion.isCurrent else {
                 return
             }
+            isCostUsageRefreshing = false
             snapshot.costUsage = result.summary
             if completion.shouldRunPending {
                 refreshCostUsage(reason: reason)
@@ -651,6 +690,7 @@ final class UsageViewModel: ObservableObject {
             .watchPaths,
             .appServerQuota
         ])
+        isCostUsageRefreshing = false
         updateRefreshingState()
 
         refreshUsageTotals(reason: .settings, mode: .replace)
@@ -667,6 +707,7 @@ final class UsageViewModel: ObservableObject {
             costUsageContinuationTimer?.invalidate()
             costUsageContinuationTimer = nil
             refreshCoordinator.invalidate(.costUsage)
+            isCostUsageRefreshing = false
         }
         guard settings.adaptiveRefreshEnabled else {
             return

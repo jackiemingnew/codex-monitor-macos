@@ -500,10 +500,10 @@ struct SettingsView: View {
             Toggle(isOn: $draft.performanceMonitoringEnabled) {
                 HelpLabel(
                     title: "后台性能监控",
-                    help: "默认关闭。开启后每 5 秒采样 Codex / ChatGPT、Safari 主进程组、最热 WebKit 内容进程和 WindowServer 的 CPU / 内存，并写入有界的本机滚动日志；不记录 URL、窗口标题、命令参数或对话内容。"
+                    help: "默认关闭。性能页可见时每 5 秒采样；收起后仅在开启本选项时每 60 秒采样，低电量或严重温度压力下放慢到 5 分钟。后台样本写入有界本机滚动日志；不记录 URL、窗口标题、命令参数或对话内容。"
                 )
             }
-            .accessibilityHint("开启后即使详情页关闭也会继续采样，关闭开关后停止新增记录")
+            .accessibilityHint("开启后详情页关闭时每分钟继续采样；关闭开关后停止后台新增记录")
             Toggle(isOn: $draft.skillInsightsEnabled) {
                 HelpLabel(
                     title: "启用 Skill Insights",

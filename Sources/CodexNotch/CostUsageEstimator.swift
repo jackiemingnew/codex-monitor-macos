@@ -63,13 +63,21 @@ struct CostUsagePerformanceStats: Equatable, Sendable {
     let jsonlBytesRead: UInt64
     let filesAdvanced: Int
     let databaseWrites: Int
+    var inventoryEnumerations: Int
 
     static let zero = CostUsagePerformanceStats(
         scanCount: 0,
         jsonlBytesRead: 0,
         filesAdvanced: 0,
-        databaseWrites: 0
+        databaseWrites: 0,
+        inventoryEnumerations: 0
     )
+}
+
+enum CostUsageInventoryDecision: Equatable, Sendable {
+    case skipCadence(isComplete: Bool)
+    case reuseCandidates
+    case enumerate
 }
 
 struct CostUsageSessionCandidate: Equatable, Sendable {
@@ -300,6 +308,56 @@ final class CostUsageEstimator: @unchecked Sendable {
 
     init(databasePath: String) {
         self.databasePath = databasePath
+    }
+
+    /// Decides whether the caller needs to enumerate rollout files. This is
+    /// deliberately separate from `scanSlice` so the store can avoid the
+    /// expensive inventory walk on ordinary cadence hits.
+    func preflightInventoryDecision(
+        now: Date = Date(),
+        bypassCadence: Bool,
+        reuseExistingCandidates: Bool
+    ) -> CostUsageInventoryDecision {
+        lock.lock()
+        defer { lock.unlock() }
+
+        if reuseExistingCandidates, !candidates.isEmpty {
+            return .reuseCandidates
+        }
+        if bypassCadence {
+            return .enumerate
+        }
+
+        do {
+            let database = try CostUsageSQLiteDatabase(path: databasePath)
+            try ensureSchema(in: database)
+            let activeGeneration = try hasActiveGeneration(in: database)
+            let minimumInterval = activeGeneration
+                ? CostUsageRefreshPolicy.generationContinuationInterval
+                : CostUsageRefreshPolicy.minimumAutomaticInterval
+            let latestAttempt = [
+                lastAutomaticAttemptAt,
+                metadataValue(MetadataKey.lastSliceMS, in: database).map {
+                    Date(timeIntervalSince1970: TimeInterval($0) / 1_000)
+                }
+            ].compactMap { $0 }.max()
+            if let latestAttempt,
+               now.timeIntervalSince(latestAttempt) >= 0,
+               now.timeIntervalSince(latestAttempt) < minimumInterval {
+                return .skipCadence(
+                    isComplete: metadataValue(MetadataKey.scanStatus, in: database) == 2
+                )
+            }
+
+            if activeGeneration, !candidates.isEmpty {
+                return .reuseCandidates
+            }
+            return .enumerate
+        } catch {
+            // If the database cannot be opened/read, let scanSlice perform its
+            // normal error handling after a fresh inventory attempt.
+            return .enumerate
+        }
     }
 
     func updateCandidates(
@@ -759,8 +817,13 @@ final class CostUsageEstimator: @unchecked Sendable {
         defer { lock.unlock() }
 
         do {
-            let database = try CostUsageSQLiteDatabase(path: databasePath)
-            try ensureSchema(in: database)
+            // Presentation consumes only a previously published snapshot. Do
+            // not create or migrate the cache from a view appearance; the
+            // explicit scanner is the sole schema-writing path.
+            guard FileManager.default.fileExists(atPath: databasePath) else {
+                return .unavailable
+            }
+            let database = try CostUsageSQLiteDatabase(path: databasePath, readOnly: true)
             let timeZoneFingerprint = Self.timeZoneFingerprint(TimeZone.current.identifier)
             let lastWorkingUpdate = metadataValue(MetadataKey.lastUpdateMS, in: database).map {
                 Date(timeIntervalSince1970: TimeInterval($0) / 1_000)
@@ -778,6 +841,11 @@ final class CostUsageEstimator: @unchecked Sendable {
             let sevenDayStart = Self.dayKey(for: Self.calendarDate(daysBefore: 6, now: now))
             let thirtyDayStart = Self.dayKey(for: Self.calendarDate(daysBefore: 29, now: now))
             let rows = try loadBucketSummary(
+                sinceDay: thirtyDayStart,
+                untilDay: today,
+                from: database
+            )
+            let modelBuckets = try loadPublishedModelBuckets(
                 sinceDay: thirtyDayStart,
                 untilDay: today,
                 from: database
@@ -810,7 +878,9 @@ final class CostUsageEstimator: @unchecked Sendable {
                 thirtyDays: thirtyDayWindow,
                 quality: quality,
                 lastUpdated: lastUpdated,
-                usesSparkProxy: rows.contains(where: \.usesSparkProxy)
+                usesSparkProxy: rows.contains(where: \.usesSparkProxy),
+                tokenQuality: .complete,
+                modelBuckets: modelBuckets
             )
         } catch {
             return .unavailable
@@ -1482,6 +1552,51 @@ final class CostUsageEstimator: @unchecked Sendable {
             )
         }
         return rows
+    }
+
+    private func loadPublishedModelBuckets(
+        sinceDay: String,
+        untilDay: String,
+        from database: CostUsageSQLiteDatabase
+    ) throws -> [CostUsageModelDayBucket] {
+        let statement = try database.statement(
+            """
+            SELECT day_key,
+                   model,
+                   SUM(input_tokens),
+                   SUM(cached_input_tokens),
+                   SUM(output_tokens),
+                   SUM(cost_nanos),
+                   MIN(is_priced),
+                   MAX(uses_spark_proxy)
+            FROM cost_usage_published_buckets
+            WHERE day_key >= ? AND day_key <= ?
+            GROUP BY day_key, model
+            ORDER BY day_key, model;
+            """
+        )
+        statement.bind(sinceDay, at: 1)
+        statement.bind(untilDay, at: 2)
+        var buckets: [CostUsageModelDayBucket] = []
+        while try statement.step() {
+            guard let dayKey = statement.string(at: 0),
+                  let model = statement.string(at: 1) else {
+                continue
+            }
+            buckets.append(
+                CostUsageModelDayBucket(
+                    dayKey: dayKey,
+                    model: model,
+                    inputTokens: Int(statement.int64(at: 2)),
+                    cachedInputTokens: Int(statement.int64(at: 3)),
+                    outputTokens: Int(statement.int64(at: 4)),
+                    costNanos: statement.int64(at: 5),
+                    isPriced: statement.int64(at: 6) != 0,
+                    usesSparkProxy: statement.int64(at: 7) != 0
+                )
+            )
+        }
+        return buckets
     }
 
     private static func resolveForkBaseline(
@@ -2889,10 +3004,14 @@ private enum CostUsageSQLiteError: Error {
 private final class CostUsageSQLiteDatabase {
     private var handle: OpaquePointer?
 
-    init(path: String) throws {
-        let directory = URL(fileURLWithPath: path).deletingLastPathComponent()
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
+    init(path: String, readOnly: Bool = false) throws {
+        if !readOnly {
+            let directory = URL(fileURLWithPath: path).deletingLastPathComponent()
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        let flags = readOnly
+            ? SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+            : SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
         guard sqlite3_open_v2(path, &handle, flags, nil) == SQLITE_OK,
               let handle else {
             let message = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "open failed"

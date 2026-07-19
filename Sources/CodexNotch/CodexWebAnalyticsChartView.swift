@@ -19,6 +19,9 @@ struct CodexWebAnalyticsChartView: View {
                     total: snapshot.turns,
                     chart: turnsChart,
                     seriesLimit: 6,
+                    preferredSeriesNames: turnsMode == .model
+                        ? CodexAnalyticsChart.codexModelDisplayPriority
+                        : [],
                     palette: MonitorTheme.analyticsTurnsPalette,
                     emptyMessage: chartEmptyMessage(total: snapshot.turns)
                 ) {
@@ -175,6 +178,7 @@ private struct AnalyticsChartCard<Controls: View>: View {
     let total: Int?
     let chart: CodexAnalyticsChart
     let seriesLimit: Int
+    let preferredSeriesNames: [String]
     let palette: [Color]
     let emptyMessage: String
     let controls: Controls
@@ -184,6 +188,7 @@ private struct AnalyticsChartCard<Controls: View>: View {
         total: Int?,
         chart: CodexAnalyticsChart,
         seriesLimit: Int,
+        preferredSeriesNames: [String] = [],
         palette: [Color],
         emptyMessage: String,
         @ViewBuilder controls: () -> Controls
@@ -192,6 +197,7 @@ private struct AnalyticsChartCard<Controls: View>: View {
         self.total = total
         self.chart = chart
         self.seriesLimit = seriesLimit
+        self.preferredSeriesNames = preferredSeriesNames
         self.palette = palette
         self.emptyMessage = emptyMessage
         self.controls = controls()
@@ -220,12 +226,16 @@ private struct AnalyticsChartCard<Controls: View>: View {
                 }
             }
 
-            if chart.points.isEmpty || chart.displaySeries(limit: seriesLimit).isEmpty {
+            if chart.points.isEmpty || chart.displaySeries(
+                limit: seriesLimit,
+                preferredSeriesNames: preferredSeriesNames
+            ).isEmpty {
                 AnalyticsChartEmptyState(message: emptyMessage)
             } else {
                 AnalyticsStackedAreaChart(
                     chart: chart,
                     seriesLimit: seriesLimit,
+                    preferredSeriesNames: preferredSeriesNames,
                     palette: palette
                 )
             }
@@ -277,12 +287,16 @@ private struct AnalyticsChartEmptyState: View {
 private struct AnalyticsStackedAreaChart: View {
     let chart: CodexAnalyticsChart
     let seriesLimit: Int
+    let preferredSeriesNames: [String]
     let palette: [Color]
 
     @State private var hoveredIndex: Int?
 
     private var series: [CodexAnalyticsDisplaySeries] {
-        chart.displaySeries(limit: seriesLimit)
+        chart.displaySeries(
+            limit: seriesLimit,
+            preferredSeriesNames: preferredSeriesNames
+        )
     }
 
     private var paletteForSeries: [Color] {

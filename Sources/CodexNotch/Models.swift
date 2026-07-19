@@ -172,6 +172,28 @@ struct CostUsageSummary: Equatable, Sendable {
     let quality: CostUsageQuality
     let lastUpdated: Date?
     let usesSparkProxy: Bool
+    let tokenQuality: CostUsageQuality
+    let modelBuckets: [CostUsageModelDayBucket]
+
+    init(
+        today: CostEstimateWindow,
+        sevenDays: CostEstimateWindow,
+        thirtyDays: CostEstimateWindow,
+        quality: CostUsageQuality,
+        lastUpdated: Date?,
+        usesSparkProxy: Bool,
+        tokenQuality: CostUsageQuality? = nil,
+        modelBuckets: [CostUsageModelDayBucket] = []
+    ) {
+        self.today = today
+        self.sevenDays = sevenDays
+        self.thirtyDays = thirtyDays
+        self.quality = quality
+        self.lastUpdated = lastUpdated
+        self.usesSparkProxy = usesSparkProxy
+        self.tokenQuality = tokenQuality ?? quality
+        self.modelBuckets = modelBuckets
+    }
 
     static let unavailable = CostUsageSummary(
         today: .unavailable,
@@ -179,7 +201,8 @@ struct CostUsageSummary: Equatable, Sendable {
         thirtyDays: .unavailable,
         quality: .unavailable,
         lastUpdated: nil,
-        usesSparkProxy: false
+        usesSparkProxy: false,
+        tokenQuality: .unavailable
     )
 
     static func backfilling(lastUpdated: Date?) -> CostUsageSummary {
@@ -189,7 +212,8 @@ struct CostUsageSummary: Equatable, Sendable {
             thirtyDays: .backfilling,
             quality: .partial,
             lastUpdated: lastUpdated,
-            usesSparkProxy: false
+            usesSparkProxy: false,
+            tokenQuality: .partial
         )
     }
 }

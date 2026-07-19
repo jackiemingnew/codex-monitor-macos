@@ -154,6 +154,76 @@ final class SkillCancellationProbe: @unchecked Sendable {
 }
 
 let runner = TestRunner()
+let performanceUnconstrainedEnvironment = RefreshEnvironment(
+    isLowPowerModeEnabled: false,
+    isThermallyConstrained: false
+)
+let performanceConstrainedEnvironment = RefreshEnvironment(
+    isLowPowerModeEnabled: true,
+    isThermallyConstrained: false
+)
+runner.checkEqual(
+    PerformanceCadencePolicy.interval(
+        isVisible: true,
+        samplingEnabled: false,
+        environment: performanceUnconstrainedEnvironment
+    ),
+    5,
+    "visible performance detail should use a five second cadence"
+)
+runner.checkEqual(
+    PerformanceCadencePolicy.interval(
+        isVisible: false,
+        samplingEnabled: true,
+        environment: performanceUnconstrainedEnvironment
+    ),
+    60,
+    "hidden opted-in performance monitoring should use a sixty second cadence"
+)
+runner.checkEqual(
+    PerformanceCadencePolicy.interval(
+        isVisible: false,
+        samplingEnabled: true,
+        environment: performanceConstrainedEnvironment
+    ),
+    300,
+    "constrained opted-in performance monitoring should use a five minute cadence"
+)
+runner.checkEqual(
+    PerformanceCadencePolicy.interval(
+        isVisible: true,
+        samplingEnabled: false,
+        environment: performanceConstrainedEnvironment
+    ),
+    300,
+    "a visible performance detail should slow to five minutes while power or thermal constrained"
+)
+runner.check(
+    PerformanceCadencePolicy.interval(
+        isVisible: false,
+        samplingEnabled: false,
+        environment: performanceUnconstrainedEnvironment
+    ) == nil,
+    "hidden opted-out performance monitoring should stop scheduling"
+)
+runner.check(
+    PerformanceCadencePolicy.interval(
+        isVisible: false,
+        samplingEnabled: false,
+        environment: performanceConstrainedEnvironment
+    ) == nil,
+    "constraints must not enable hidden performance monitoring when the user opted out"
+)
+runner.checkEqual(
+    PerformanceCadencePolicy.timerTolerance(for: 5),
+    1,
+    "short cadence tolerance should have a one second floor"
+)
+runner.checkEqual(
+    PerformanceCadencePolicy.timerTolerance(for: 600),
+    30,
+    "long cadence tolerance should have a thirty second ceiling"
+)
 
 func sevenDayAnalyticsPoints(_ firstDayValues: [CodexWebAnalyticsRawCount]) -> [CodexWebAnalyticsRawDailyPoint] {
     (0..<7).map { index in
@@ -216,8 +286,50 @@ runner.checkEqual(compactWebModels.count, 4, "web Analytics should show three le
 runner.checkEqual(compactWebModels.last?.name, "其他", "web Analytics remainder should be labeled other")
 runner.checkEqual(compactWebModels.last?.count, 20, "web Analytics other count should sum every remaining model")
 let plottedWebModels = webAnalyticsSnapshot.turnsByModel.displaySeries(limit: 3)
-runner.checkEqual(plottedWebModels.count, 4, "native chart should keep three leading series plus other")
-runner.checkEqual(plottedWebModels.last?.members.count, 2, "native chart other should retain its source series")
+runner.checkEqual(plottedWebModels.count, 3, "native chart limit should include the other series")
+runner.checkEqual(plottedWebModels.last?.members.count, 3, "native chart other should retain every series outside the explicit budget")
+let singleWebModelSeries = webAnalyticsSnapshot.turnsByModel.displaySeries(limit: 1)
+runner.checkEqual(singleWebModelSeries.count, 1, "a one-series chart should remain one visible aggregate")
+runner.check(singleWebModelSeries.first?.isOther == true, "a one-series overflow chart should use Other for all models")
+runner.checkEqual(singleWebModelSeries.first?.members.count, 5, "a one-series Other should aggregate every source model")
+
+let routedModelChart = CodexAnalyticsChart(
+    points: [
+        CodexAnalyticsDailyPoint(
+            index: 0,
+            dateLabel: "Jul 17, 2026",
+            values: [
+                CodexAnalyticsSeriesValue(name: "gpt-5.6-sol", count: 100),
+                CodexAnalyticsSeriesValue(name: "codex-auto-review", count: 90),
+                CodexAnalyticsSeriesValue(name: "gpt-5.4-mini", count: 80),
+                CodexAnalyticsSeriesValue(name: "gpt-5.4", count: 70),
+                CodexAnalyticsSeriesValue(name: "gpt-5.5", count: 60),
+                CodexAnalyticsSeriesValue(name: "gpt-5.6-luna", count: 50),
+                CodexAnalyticsSeriesValue(name: "gpt-5.6-terra", count: 40)
+            ]
+        )
+    ],
+    sampledDays: 1,
+    expectedDays: 1
+)
+let prioritizedRoutedModels = routedModelChart.displaySeries(
+    limit: 6,
+    preferredSeriesNames: CodexAnalyticsChart.codexModelDisplayPriority
+)
+runner.checkEqual(prioritizedRoutedModels.count, 6, "a six-series chart should include Other in its visible-series limit")
+runner.check(
+    prioritizedRoutedModels.contains { $0.name == "gpt-5.6-terra" },
+    "native model chart should retain Terra even when it ranks below the six-series limit"
+)
+runner.check(
+    prioritizedRoutedModels.contains { $0.name == "gpt-5.6-luna" },
+    "native model chart should retain Luna alongside the other routed model families"
+)
+runner.check(
+    prioritizedRoutedModels.last?.isOther == true
+        && prioritizedRoutedModels.last?.members == ["gpt-5.4", "gpt-5.5"],
+    "native model chart should move every unpinned legacy model into other"
+)
 
 let subPercentRaw = CodexWebAnalyticsRawSnapshot(
     rangeSelected: true,
@@ -1247,6 +1359,14 @@ runner.check(
     "opening the detail panel must not request a cost scan"
 )
 runner.check(
+    !CostUsageRefreshPolicy.shouldRequestRefresh(
+        showsPeriodUsage: false,
+        reason: .manual,
+        environment: RefreshEnvironment(isLowPowerModeEnabled: false, isThermallyConstrained: false)
+    ),
+    "a local Analytics manual refresh must not scan while period usage is disabled"
+)
+runner.check(
     CostUsageRefreshPolicy.shouldRequestRefresh(
         showsPeriodUsage: true,
         reason: .timer,
@@ -1343,6 +1463,20 @@ func appendCostFixture(_ lines: [String], to url: URL) throws {
     try handle.write(contentsOf: Data((lines.joined(separator: "\n") + "\n").utf8))
 }
 
+let missingPublishedRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("CodexNotchMissingPublishedCost-\(UUID().uuidString)")
+let missingPublishedDatabase = missingPublishedRoot.appendingPathComponent("usage-deltas.sqlite").path
+let missingPublishedSummary = CostUsageEstimator(databasePath: missingPublishedDatabase).loadSummary()
+runner.check(
+    missingPublishedSummary.quality == .unavailable,
+    "a missing published cost snapshot should remain unavailable"
+)
+runner.check(
+    !FileManager.default.fileExists(atPath: missingPublishedDatabase)
+        && !FileManager.default.fileExists(atPath: missingPublishedRoot.path),
+    "loading a published Local Token snapshot must not create a database or schema"
+)
+
 let costUsageRoot = URL(fileURLWithPath: NSTemporaryDirectory())
     .appendingPathComponent("CodexNotchCostUsage-\(UUID().uuidString)")
 try FileManager.default.createDirectory(at: costUsageRoot, withIntermediateDirectories: true)
@@ -1389,6 +1523,7 @@ runner.check(firstCostScan.isComplete, "a small cost fixture should finish in on
 runner.check(firstCostScan.jsonlBytesRead > 0, "a cold cost scan should read the fixture")
 let firstCostSummary = costEstimator.loadSummary(now: costUsageNow)
 runner.check(firstCostSummary.quality == .complete, "known-model cost history should be complete after catch-up")
+runner.check(firstCostSummary.tokenQuality == .complete, "a complete published model snapshot should expose complete Token quality")
 runner.check(
     firstCostSummary.today.tokenCount == 170_000,
     "published footer tokens should use the same complete-corpus deltas as CodexBar costs"
@@ -1396,6 +1531,60 @@ runner.check(
 runner.check(
     abs((firstCostSummary.today.usd ?? -1) - 0.721) < 0.000_000_1,
     "model switches should price each confirmed delta with the active model"
+)
+let firstModelBuckets = Dictionary(uniqueKeysWithValues: firstCostSummary.modelBuckets.map { ($0.model, $0) })
+let firstSolBucket = runner.require(firstModelBuckets["gpt-5.6-sol"], "published summary should retain the Sol daily model bucket")
+runner.checkEqual(firstSolBucket.inputTokens, 100_000, "Sol model attribution should retain total input")
+runner.checkEqual(firstSolBucket.cachedInputTokens, 40_000, "cached input should remain a subset in the Sol model bucket")
+runner.checkEqual(firstSolBucket.outputTokens, 10_000, "Sol model attribution should retain output")
+let firstLunaBucket = runner.require(firstModelBuckets["gpt-5.6-luna"], "a model switch should publish an independent Luna bucket")
+runner.checkEqual(firstLunaBucket.totalTokens, 60_000, "model-switch deltas should be attributed to Luna without duplicating cached input")
+
+let inventoryStoreRoot = costUsageRoot.appendingPathComponent("inventory-preflight", isDirectory: true)
+let inventorySessionDirectory = inventoryStoreRoot.appendingPathComponent("sessions/2026/07/18", isDirectory: true)
+try FileManager.default.createDirectory(at: inventorySessionDirectory, withIntermediateDirectories: true)
+let inventorySessionID = "12121212-1212-4212-8212-121212121212"
+let inventorySessionURL = inventorySessionDirectory.appendingPathComponent("rollout-\(inventorySessionID).jsonl")
+try writeCostFixture(
+    [
+        costSessionMetaLine(timestamp: costEventEpoch, sessionID: inventorySessionID),
+        costTurnContextLine(timestamp: costEventEpoch, model: "gpt-5.6-sol"),
+        costTokenLine(
+            timestamp: costEventEpoch + 1,
+            input: 10_000,
+            cached: 4_000,
+            output: 1_000,
+            lastInput: 10_000,
+            lastCached: 4_000,
+            lastOutput: 1_000
+        )
+    ],
+    to: inventorySessionURL
+)
+try FileManager.default.setAttributes([.modificationDate: costUsageNow], ofItemAtPath: inventorySessionURL.path)
+let inventoryStore = CodexUsageStore(
+    codexDirectory: inventoryStoreRoot,
+    deltaDatabase: inventoryStoreRoot.appendingPathComponent("usage-deltas.sqlite").path,
+    ripgrepCandidates: []
+)
+let firstInventoryScan = inventoryStore.refreshCostUsageSlice(now: costUsageNow, bypassCadence: true)
+runner.check(firstInventoryScan.isComplete, "a small store-owned cost inventory should publish in one scan")
+runner.checkEqual(
+    inventoryStore.costUsagePerformanceStatsSnapshot().inventoryEnumerations,
+    1,
+    "the cold cost scan should enumerate its rollout inventory exactly once"
+)
+let cadenceInventoryScan = inventoryStore.refreshCostUsageSlice(
+    now: costUsageNow.addingTimeInterval(1),
+    bypassCadence: false
+)
+runner.checkEqual(cadenceInventoryScan.stopReason, .cadence, "a warm automatic cost scan should stop at the preflight cadence gate")
+runner.checkEqual(cadenceInventoryScan.jsonlBytesRead, 0, "a cadence hit should read zero JSONL bytes")
+runner.checkEqual(cadenceInventoryScan.databaseWrites, 0, "a cadence hit should write zero derived rows")
+runner.checkEqual(
+    inventoryStore.costUsagePerformanceStatsSnapshot().inventoryEnumerations,
+    1,
+    "the cadence warm path must return before recursively enumerating rollout files"
 )
 let warmCostScan = costEstimator.scanSlice(now: costUsageNow.addingTimeInterval(1), bypassCadence: true)
 runner.check(warmCostScan.jsonlBytesRead == 0, "a warm unchanged cost scan should read zero JSONL bytes")
@@ -1440,11 +1629,133 @@ try appendCostFixture(
 _ = costEstimator.scanSlice(now: costUsageNow.addingTimeInterval(3), bypassCadence: true)
 let unknownModelSummary = costEstimator.loadSummary(now: costUsageNow)
 runner.check(unknownModelSummary.quality == .partial, "unknown-model tokens should make the relevant windows partial")
+runner.check(unknownModelSummary.tokenQuality == .complete, "unknown-model pricing must not downgrade published Token completeness")
 runner.check(unknownModelSummary.today.isPartial, "unknown-model cost should display with a partial marker")
 runner.check(
     abs((unknownModelSummary.today.usd ?? -1) - 0.7485) < 0.000_000_1,
     "unknown-model tokens should not be assigned a guessed dollar value"
 )
+let unknownModelBucket = runner.require(
+    unknownModelSummary.modelBuckets.first { $0.model == "future-unknown-model" },
+    "unpriced models should remain present in published model buckets"
+)
+runner.checkEqual(unknownModelBucket.totalTokens, 13_000, "unpriced models should still contribute input plus output Token")
+runner.check(unknownModelBucket.apiEquivalentUSD == nil, "unpriced model cost must remain nil instead of displaying zero dollars")
+
+var localTokenCalendar = Calendar(identifier: .gregorian)
+localTokenCalendar.timeZone = TimeZone(identifier: "Asia/Shanghai")!
+let localTokenNow = DateComponents(
+    calendar: localTokenCalendar,
+    timeZone: localTokenCalendar.timeZone,
+    year: 2026,
+    month: 7,
+    day: 18,
+    hour: 12
+).date!
+func localTokenBucket(
+    day: String,
+    model: String,
+    input: Int,
+    cached: Int,
+    output: Int,
+    costNanos: Int64 = 1,
+    priced: Bool = true,
+    sparkProxy: Bool = false
+) -> CostUsageModelDayBucket {
+    CostUsageModelDayBucket(
+        dayKey: day,
+        model: model,
+        inputTokens: input,
+        cachedInputTokens: cached,
+        outputTokens: output,
+        costNanos: costNanos,
+        isPriced: priced,
+        usesSparkProxy: sparkProxy
+    )
+}
+let syntheticLocalTokenSummary = CostUsageSummary(
+    today: .unavailable,
+    sevenDays: .unavailable,
+    thirtyDays: .unavailable,
+    quality: .partial,
+    lastUpdated: localTokenNow,
+    usesSparkProxy: true,
+    tokenQuality: .complete,
+    modelBuckets: [
+        localTokenBucket(day: "2026-07-18", model: "gpt-5.6-sol", input: 1_000, cached: 400, output: 200),
+        localTokenBucket(day: "2026-07-17", model: "gpt-5.6-terra", input: 100, cached: 50, output: 20),
+        localTokenBucket(day: "2026-07-16", model: "gpt-5.6-luna", input: 80, cached: 20, output: 10),
+        localTokenBucket(day: "2026-07-15", model: "codex-auto-review", input: 70, cached: 30, output: 5, priced: false),
+        localTokenBucket(day: "2026-07-14", model: "gpt-5.5", input: 60, cached: 0, output: 15),
+        localTokenBucket(day: "2026-07-13", model: "gpt-5.4-mini", input: 50, cached: 10, output: 10),
+        localTokenBucket(day: "2026-07-12", model: "gpt-5.3-codex-spark", input: 40, cached: 10, output: 8, sparkProxy: true),
+        localTokenBucket(day: "2026-07-12", model: "future-unknown-model", input: 30, cached: 5, output: 6, priced: false),
+        localTokenBucket(day: "2026-07-11", model: "outside-seven-days", input: 25, cached: 0, output: 5),
+        localTokenBucket(day: "2026-06-19", model: "thirty-day-boundary", input: 20, cached: 0, output: 4),
+        localTokenBucket(day: "2026-06-18", model: "outside-thirty-days", input: 999, cached: 0, output: 1)
+    ]
+)
+runner.checkEqual(
+    AnalyticsDataMode.official.refreshSource,
+    .officialWebPage,
+    "official Analytics refreshes should retain the existing visible webpage route"
+)
+runner.checkEqual(
+    AnalyticsDataMode.localTokens.refreshSource,
+    .publishedLocalCostSnapshot,
+    "local Token refreshes should route only to the published cost snapshot coordinator"
+)
+runner.check(CostUsageSummary.unavailable.modelBuckets.isEmpty, "an unavailable legacy snapshot should not synthesize model buckets")
+runner.check(CostUsageSummary.backfilling(lastUpdated: nil).tokenQuality == .partial, "backfilling Token state should remain distinct from complete published buckets")
+let todayLocalTokenReport = LocalTokenAnalyticsReport.make(
+    summary: syntheticLocalTokenSummary,
+    period: .today,
+    now: localTokenNow,
+    calendar: localTokenCalendar
+)
+runner.checkEqual(todayLocalTokenReport.days.count, 1, "Today local Analytics should expose one natural-day composition point")
+runner.checkEqual(todayLocalTokenReport.totalTokens, 1_200, "Today Token should be input plus output without adding cached input twice")
+let sevenDayLocalTokenReport = LocalTokenAnalyticsReport.make(
+    summary: syntheticLocalTokenSummary,
+    period: .sevenDays,
+    now: localTokenNow,
+    calendar: localTokenCalendar
+)
+runner.checkEqual(sevenDayLocalTokenReport.days.count, 7, "the seven-day report should zero-fill all local natural days")
+runner.checkEqual(sevenDayLocalTokenReport.days.filter { $0.totalTokens == 0 }.count, 0, "the dense seven-day fixture should retain every populated date")
+runner.checkEqual(sevenDayLocalTokenReport.models.count, 8, "local model ranking should retain all models instead of the chart series limit")
+runner.check(!sevenDayLocalTokenReport.models.contains { $0.model == "outside-seven-days" }, "the seven-day boundary should exclude the previous natural day")
+let sevenDayShares = sevenDayLocalTokenReport.models.reduce(0.0) { $0 + $1.share(of: sevenDayLocalTokenReport.totalTokens) }
+runner.check(abs(sevenDayShares - 1) < 0.000_000_1, "all-model Token shares should sum to 100 percent")
+let localDisplaySeries = sevenDayLocalTokenReport.displaySeries(limit: 6)
+runner.checkEqual(localDisplaySeries.count, 6, "the local trend should cap display at six series including Other")
+for preferredModel in LocalTokenAnalyticsReport.preferredModelOrder {
+    runner.check(localDisplaySeries.contains { $0.members == [preferredModel] }, "the local trend should pin \(preferredModel) even when it is small")
+}
+runner.check(localDisplaySeries.last?.isOther == true, "models beyond the explicit series budget should merge into Other")
+let syntheticUnknownUsage = runner.require(
+    sevenDayLocalTokenReport.models.first { $0.model == "future-unknown-model" },
+    "the all-model ranking should retain an unknown model"
+)
+runner.check(syntheticUnknownUsage.apiEquivalentUSD == nil, "unknown model ranking cost should be unpriced, never zero")
+runner.check(
+    sevenDayLocalTokenReport.models.first { $0.model == "gpt-5.3-codex-spark" }?.usesSparkProxy == true,
+    "Spark model ranking should preserve its disclosed proxy-pricing marker"
+)
+let thirtyDayLocalTokenReport = LocalTokenAnalyticsReport.make(
+    summary: syntheticLocalTokenSummary,
+    period: .thirtyDays,
+    now: localTokenNow,
+    calendar: localTokenCalendar
+)
+runner.checkEqual(thirtyDayLocalTokenReport.days.count, 30, "the thirty-day report should include all natural days, including zero dates")
+runner.check(thirtyDayLocalTokenReport.days.contains { $0.totalTokens == 0 }, "missing published dates should be represented as zero days")
+runner.check(thirtyDayLocalTokenReport.models.contains { $0.model == "thirty-day-boundary" }, "the oldest included thirty-day boundary should remain visible")
+runner.check(!thirtyDayLocalTokenReport.models.contains { $0.model == "outside-thirty-days" }, "the thirty-day report should exclude day minus thirty")
+let thirtyDayAxisKeys = thirtyDayLocalTokenReport.axisDayKeys(maximumLabels: 6)
+runner.check(thirtyDayAxisKeys.count <= 6, "the thirty-day x-axis should use sparse labels")
+runner.checkEqual(thirtyDayAxisKeys.first, Optional("2026-06-19"), "the sparse thirty-day axis should retain its first boundary")
+runner.checkEqual(thirtyDayAxisKeys.last, Optional("2026-07-18"), "the sparse thirty-day axis should retain today")
 
 let resumeSessionID = "22222222-2222-4222-8222-222222222222"
 let resumeSessionURL = costUsageRoot.appendingPathComponent("rollout-\(resumeSessionID).jsonl")
@@ -1488,6 +1799,24 @@ let interruptedCostScan = resumeEstimator.scanSlice(
 )
 runner.check(interruptedCostScan.stopReason == .byteBudget, "a short slice should stop at its byte budget")
 runner.check(!interruptedCostScan.isComplete, "a short slice should leave history partial")
+runner.checkEqual(
+    resumeEstimator.preflightInventoryDecision(
+        now: costUsageNow.addingTimeInterval(1),
+        bypassCadence: true,
+        reuseExistingCandidates: true
+    ),
+    .reuseCandidates,
+    "a yielded continuation should reuse its frozen in-memory inventory even though it bypasses cadence"
+)
+runner.checkEqual(
+    resumeEstimator.preflightInventoryDecision(
+        now: costUsageNow.addingTimeInterval(6),
+        bypassCadence: false,
+        reuseExistingCandidates: false
+    ),
+    .reuseCandidates,
+    "an ordinary event during an active generation should reuse candidates after the five-second gate"
+)
 let interruptedCostSummary = resumeEstimator.loadSummary(now: costUsageNow)
 runner.check(
     interruptedCostSummary.today.usd == nil,
@@ -1608,6 +1937,72 @@ runner.check(
     abs((forkEstimator.loadSummary(now: costUsageNow).today.usd ?? -1) - 1.55) < 0.000_000_1,
     "forked sessions should subtract inherited parent totals before pricing"
 )
+
+let terraParentID = "41414141-4141-4141-8141-414141414141"
+let terraChildID = "42424242-4242-4242-8242-424242424242"
+let autoReviewSessionID = "43434343-4343-4343-8343-434343434343"
+let terraParentURL = costUsageRoot.appendingPathComponent("rollout-\(terraParentID).jsonl")
+let terraChildURL = costUsageRoot.appendingPathComponent("rollout-\(terraChildID).jsonl")
+let autoReviewSessionURL = costUsageRoot.appendingPathComponent("rollout-\(autoReviewSessionID).jsonl")
+try writeCostFixture(
+    [
+        costSessionMetaLine(timestamp: costEventEpoch, sessionID: terraParentID),
+        costTurnContextLine(timestamp: costEventEpoch, model: "gpt-5.6-sol"),
+        costTokenLine(timestamp: costEventEpoch + 1, input: 100_000, cached: 40_000, output: 10_000, lastInput: 100_000, lastCached: 40_000, lastOutput: 10_000)
+    ],
+    to: terraParentURL
+)
+try writeCostFixture(
+    [
+        costSessionMetaLine(timestamp: costEventEpoch + 1, sessionID: terraChildID, parentID: terraParentID),
+        costTokenLine(timestamp: costEventEpoch + 1, input: 100_000, cached: 40_000, output: 10_000, lastInput: 100_000, lastCached: 40_000, lastOutput: 10_000),
+        costTurnContextLine(timestamp: costEventEpoch + 2, model: "gpt-5.6-terra"),
+        costTokenLine(timestamp: costEventEpoch + 3, input: 120_000, cached: 45_000, output: 12_000, lastInput: 20_000, lastCached: 5_000, lastOutput: 2_000)
+    ],
+    to: terraChildURL
+)
+try writeCostFixture(
+    [
+        costSessionMetaLine(timestamp: costEventEpoch, sessionID: autoReviewSessionID),
+        costTurnContextLine(timestamp: costEventEpoch, model: "codex-auto-review"),
+        costTokenLine(timestamp: costEventEpoch + 1, input: 30_000, cached: 10_000, output: 3_000, lastInput: 30_000, lastCached: 10_000, lastOutput: 3_000)
+    ],
+    to: autoReviewSessionURL
+)
+try FileManager.default.setAttributes([.modificationDate: costUsageNow.addingTimeInterval(-20)], ofItemAtPath: terraParentURL.path)
+try FileManager.default.setAttributes([.modificationDate: costUsageNow], ofItemAtPath: terraChildURL.path)
+try FileManager.default.setAttributes([.modificationDate: costUsageNow.addingTimeInterval(-10)], ofItemAtPath: autoReviewSessionURL.path)
+let terraForkEstimator = CostUsageEstimator(
+    databasePath: costUsageRoot.appendingPathComponent("terra-fork-usage-deltas.sqlite").path
+)
+terraForkEstimator.updateCandidates(
+    [
+        CostUsageSessionCandidate(sessionID: terraParentID, path: terraParentURL.path),
+        CostUsageSessionCandidate(sessionID: terraChildID, path: terraChildURL.path),
+        CostUsageSessionCandidate(sessionID: autoReviewSessionID, path: autoReviewSessionURL.path)
+    ],
+    inventoryTruncated: false
+)
+var terraForkScan = CostUsageScanMetrics.unavailable
+for offset in 0..<6 {
+    terraForkScan = terraForkEstimator.scanSlice(
+        now: costUsageNow.addingTimeInterval(TimeInterval(offset)),
+        bypassCadence: true
+    )
+    if terraForkScan.isComplete {
+        break
+    }
+}
+runner.check(terraForkScan.isComplete, "a Terra subagent fork and Auto-review session should publish one complete local inventory")
+let terraForkSummary = terraForkEstimator.loadSummary(now: costUsageNow)
+runner.checkEqual(terraForkSummary.today.tokenCount, 165_000, "parent, Terra child, and Auto-review Token should aggregate without fork duplication")
+runner.check(terraForkSummary.tokenQuality == .complete, "unpriced Auto-review should not make the aggregated Token snapshot partial")
+runner.check(terraForkSummary.quality == .partial, "unpriced Auto-review should affect only pricing completeness")
+let terraForkBuckets = Dictionary(uniqueKeysWithValues: terraForkSummary.modelBuckets.map { ($0.model, $0) })
+runner.checkEqual(terraForkBuckets["gpt-5.6-sol"]?.totalTokens, 110_000, "the parent contribution should remain attributed to Sol")
+runner.checkEqual(terraForkBuckets["gpt-5.6-terra"]?.totalTokens, 22_000, "the child-only fork delta should remain attributed to Terra")
+runner.checkEqual(terraForkBuckets["codex-auto-review"]?.totalTokens, 33_000, "Auto-review should remain an independent model bucket")
+runner.check(terraForkBuckets["codex-auto-review"]?.apiEquivalentUSD == nil, "Auto-review should remain explicitly unpriced")
 
 let grandchildSessionID = "45454545-4545-4545-8545-454545454545"
 let grandchildSessionURL = costUsageRoot.appendingPathComponent("rollout-\(grandchildSessionID).jsonl")
@@ -5834,12 +6229,28 @@ let localStore = CodexUsageStore(
     deltaDatabase: deltaDatabase,
     ripgrepCandidates: []
 )
+let fastHistoryRowsBeforeSnapshot = try Shell.sqliteJSON(
+    database: deltaDatabase,
+    query: "select count(*) as count from token_snapshot_history;",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? -1
 let localSnapshot = localStore.loadSnapshot(
     includePeriodUsage: false,
     bypassFastCache: true,
     rateLimitSource: .localFilesOnly,
     taskHistoryRange: .day,
     now: now
+)
+let fastHistoryRowsAfterSnapshot = try Shell.sqliteJSON(
+    database: deltaDatabase,
+    query: "select count(*) as count from token_snapshot_history;",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? -1
+runner.check(
+    fastHistoryRowsAfterSnapshot == fastHistoryRowsBeforeSnapshot,
+    "fast local snapshots should not write token snapshot history"
 )
 runner.check(localSnapshot.isRunning, "recent session rollout should mark local Codex as running")
 runner.check(localSnapshot.monitorStats.jsonlContextScans == 0, "context metrics disabled should skip rollout context scans")
@@ -5849,8 +6260,17 @@ runner.check(
 )
 runner.check(localSnapshot.usage1h == 2912, "aggregate 1 hour usage should sum parent-only recent delta snapshots")
 runner.check(localSnapshot.tasks.first?.delta1hTokens != localSnapshot.usage1h, "aggregate 1 hour usage should not reuse the first visible task delta")
-runner.check(localSnapshot.tasks.first { $0.id == sessionID }?.todayTokens == 12345, "session Today usage should use the parent-only 24 hour delta baseline")
-runner.check(localSnapshot.tasks.first { $0.id == parentOnlySessionID }?.todayTokens == 20567, "parent-only session Today usage should use the parent-only 24 hour delta baseline")
+let localDayStartMs = Int64((Calendar.current.startOfDay(for: now).timeIntervalSince1970 * 1_000).rounded())
+let expectedSessionTodayTokens = oneHourBaselineMs <= localDayStartMs ? 2_345 : 12_345
+let expectedParentOnlyTodayTokens = oneHourBaselineMs <= localDayStartMs ? 567 : 20_567
+runner.check(
+    localSnapshot.tasks.first { $0.id == sessionID }?.todayTokens == expectedSessionTodayTokens,
+    "session Today usage should use the latest parent-only baseline at or before local midnight"
+)
+runner.check(
+    localSnapshot.tasks.first { $0.id == parentOnlySessionID }?.todayTokens == expectedParentOnlyTodayTokens,
+    "parent-only session Today usage should remain correct during the first hour after local midnight"
+)
 runner.check(localSnapshot.tasks.first { $0.id == todayCreatedDeltaSessionID }?.todayTokens == 600, "today-created session without baseline should count from zero for Today usage")
 runner.check(localSnapshot.tasks.first { $0.id == missingBaselineDeltaSessionID }?.todayTokens == nil, "missing natural-day baseline without created_at should hide session Today usage")
 let pollutedDeltaTask = runner.require(
@@ -7219,6 +7639,32 @@ runner.check(
     "default user delta cache should live in CodexNotch Application Support"
 )
 
+let existingAutoVacuumMode = try Shell.run(
+    "/usr/bin/sqlite3",
+    [deltaDatabase, "PRAGMA auto_vacuum;"]
+).trimmingCharacters(in: .whitespacesAndNewlines)
+runner.checkEqual(existingAutoVacuumMode, "0", "an existing delta database must not be switched through an implicit VACUUM")
+let incrementalDeltaDatabase = deltaDirectory.appendingPathComponent("incremental-new.sqlite").path
+let incrementalDeltaStore = CodexUsageStore(
+    codexDirectory: tempRoot,
+    stateDatabase: stateDatabase,
+    logsDatabase: logsDatabase,
+    deltaDatabase: incrementalDeltaDatabase,
+    ripgrepCandidates: []
+)
+_ = incrementalDeltaStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now
+)
+let newAutoVacuumMode = try Shell.run(
+    "/usr/bin/sqlite3",
+    [incrementalDeltaDatabase, "PRAGMA auto_vacuum;"]
+).trimmingCharacters(in: .whitespacesAndNewlines)
+runner.checkEqual(newAutoVacuumMode, "2", "a new delta database should enable incremental auto-vacuum before creating tables")
+
 let stateMtimeBeforeDeltaRecord = try FileManager.default.attributesOfItem(atPath: stateDatabase)[.modificationDate] as? Date
 let logsMtimeBeforeDeltaRecord = try FileManager.default.attributesOfItem(atPath: logsDatabase)[.modificationDate] as? Date
 runner.check(localStore.recordDeltaSnapshot(now: now.addingTimeInterval(2), range: .day), "Swift should record delta snapshots into its own cache")
@@ -7254,6 +7700,12 @@ let historyRowsBeforeUnchangedRecord = try Shell.sqliteJSON(
     as: [CountRecord].self,
     readOnly: true
 ).first?.count ?? -1
+let observedAtBeforeUnchangedRecord = try Shell.sqliteJSON(
+    database: deltaDatabase,
+    query: "select observed_at_ms as count from token_snapshots where thread_id = '\(sessionID)' limit 1;",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? -1
 runner.check(localStore.recordDeltaSnapshot(now: now.addingTimeInterval(3), range: .day), "unchanged Swift delta recording should succeed")
 let historyRowsAfterUnchangedRecord = try Shell.sqliteJSON(
     database: deltaDatabase,
@@ -7261,9 +7713,20 @@ let historyRowsAfterUnchangedRecord = try Shell.sqliteJSON(
     as: [CountRecord].self,
     readOnly: true
 ).first?.count ?? -1
+let observedAtAfterUnchangedRecord = try Shell.sqliteJSON(
+    database: deltaDatabase,
+    query: "select observed_at_ms as count from token_snapshots where thread_id = '\(sessionID)' limit 1;",
+    as: [CountRecord].self,
+    readOnly: true
+).first?.count ?? -1
 runner.check(
     historyRowsAfterUnchangedRecord == historyRowsBeforeUnchangedRecord,
     "unchanged Swift delta recording should not append duplicate history rows"
+)
+runner.checkEqual(
+    observedAtAfterUnchangedRecord,
+    observedAtBeforeUnchangedRecord,
+    "unchanged Swift delta recording should not rewrite the current snapshot observation time"
 )
 let observedAtIndexCount = try Shell.sqliteJSON(
     database: deltaDatabase,
@@ -7761,10 +8224,32 @@ let tokenCacheSessionDirectory = tokenCacheRoot.appendingPathComponent("sessions
 try FileManager.default.createDirectory(at: tokenCacheSessionDirectory, withIntermediateDirectories: true)
 let tokenCacheSessionID = "019e073a-c032-74e2-966e-b85ede0c9cd3"
 let tokenCachePath = tokenCacheSessionDirectory.appendingPathComponent("rollout-2026-06-14T02-20-13-\(tokenCacheSessionID).jsonl")
-let firstTokenLine = #"{"timestamp":"\#(timestamp)","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"无尾换行 token"}]}}"# + "\n" +
-    #"{"timestamp":"\#(timestamp)","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":100}}}}"#
+let firstTokenLine = #"{"timestamp":"\#(timestamp)","type":"session_meta","payload":{"id":"\#(tokenCacheSessionID)"}}"# + "\n" +
+    #"{"timestamp":"\#(timestamp)","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high"}}"# + "\n" +
+    #"{"timestamp":"\#(timestamp)","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":100}}}}"# + "\n" +
+    #"{"timestamp":"\#(timestamp)","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"无尾换行 token"}]}}"#
 try firstTokenLine.write(to: tokenCachePath, atomically: true, encoding: .utf8)
 try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: tokenCachePath.path)
+let partialPrefixSessionID = "019e073a-c032-74e2-966e-b85ede0c9cd4"
+let partialPrefixPath = tokenCacheSessionDirectory
+    .appendingPathComponent("rollout-2026-06-14T02-20-14-\(partialPrefixSessionID).jsonl")
+let partialPrefixComplete = #"{"timestamp":"\#(timestamp)","type":"session_meta","payload":{"id":"\#(partialPrefixSessionID)"}}"# + "\n" +
+    #"{"timestamp":"\#(timestamp)","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"部分写入完成"}]}}"#
+let partialPrefixData = Data(partialPrefixComplete.utf8)
+let splitScalarRange = runner.require(
+    partialPrefixData.range(of: Data("写".utf8)),
+    "the partial-write fixture should contain the target multibyte scalar"
+)
+let partialPrefixSplitOffset = splitScalarRange.lowerBound + 1
+try Data(partialPrefixData.prefix(partialPrefixSplitOffset)).write(to: partialPrefixPath, options: .atomic)
+try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: partialPrefixPath.path)
+_ = try Shell.run("/usr/bin/sqlite3", [
+    tokenCacheStateDatabase,
+    """
+    insert into threads(id, title, tokens_used, model, reasoning_effort, rollout_path, updated_at, archived)
+    values('\(partialPrefixSessionID)', '', 0, null, null, '\(partialPrefixPath.path)', \(Int(now.timeIntervalSince1970)), 0);
+    """
+])
 let tokenCacheStore = CodexUsageStore(codexDirectory: tokenCacheRoot)
 let firstTokenSnapshot = tokenCacheStore.loadSnapshot(
     includePeriodUsage: false,
@@ -7774,6 +8259,49 @@ let firstTokenSnapshot = tokenCacheStore.loadSnapshot(
     now: now
 )
 runner.check(firstTokenSnapshot.tasks.first { $0.id == tokenCacheSessionID }?.tokenCount == 100, "initial no-newline token event should be counted once")
+runner.check(
+    firstTokenSnapshot.tasks.first { $0.id == tokenCacheSessionID }?.title.contains("无尾换行 token") == true,
+    "the prefix parser should treat a final unterminated JSONL line at EOF as a complete title record"
+)
+runner.checkEqual(
+    firstTokenSnapshot.tasks.first { $0.id == partialPrefixSessionID }?.title,
+    "未命名任务",
+    "a syntactically incomplete live JSONL tail should not be consumed as a complete title record"
+)
+if let handle = try? FileHandle(forWritingTo: partialPrefixPath) {
+    try handle.seekToEnd()
+    try handle.write(contentsOf: Data(partialPrefixData.suffix(from: partialPrefixSplitOffset)))
+    try handle.close()
+}
+try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(0.25)], ofItemAtPath: partialPrefixPath.path)
+let completedPartialPrefixSnapshot = tokenCacheStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now.addingTimeInterval(0.25)
+)
+runner.checkEqual(
+    completedPartialPrefixSnapshot.tasks.first { $0.id == partialPrefixSessionID }?.title,
+    "部分写入完成",
+    "an appended suffix should repair a JSONL record observed inside a multibyte UTF-8 scalar"
+)
+let tokenCacheSessionIndex = tokenCacheRoot.appendingPathComponent("session_index.jsonl")
+try #"{"id":"\#(tokenCacheSessionID)","thread_name":"索引标题 A"}"#
+    .write(to: tokenCacheSessionIndex, atomically: true, encoding: .utf8)
+try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(0.5)], ofItemAtPath: tokenCacheSessionIndex.path)
+let indexedTokenSnapshot = tokenCacheStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now.addingTimeInterval(0.5)
+)
+runner.checkEqual(
+    indexedTokenSnapshot.tasks.first { $0.id == tokenCacheSessionID }?.title,
+    "索引标题 A",
+    "creating session_index after a cached missing signature should invalidate the negative name cache"
+)
 let secondTokenLine = "\n" + #"{"timestamp":"\#(timestamp)","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":50}}}}"# + "\n"
 if let handle = try? FileHandle(forWritingTo: tokenCachePath) {
     try handle.seekToEnd()
@@ -7829,8 +8357,8 @@ let appendedRateLimitSnapshot = tokenCacheStore.loadSnapshot(
 runner.check(appendedRateLimitSnapshot.primaryPercent == 75, "appending rate-limit data should invalidate the changed rollout cache")
 let cacheStatsAfterAppendedFile = tokenCacheStore.sessionFileCacheStats()
 runner.check(
-    cacheStatsAfterAppendedFile.prefixScans == cacheStatsAfterUnchangedFile.prefixScans + 1,
-    "one appended rollout should trigger one metadata prefix rescan"
+    cacheStatsAfterAppendedFile.prefixScans == cacheStatsAfterUnchangedFile.prefixScans,
+    "a rollout with complete prefix facts should reuse metadata on append"
 )
 runner.check(
     cacheStatsAfterAppendedFile.rateLimitScans == cacheStatsAfterUnchangedFile.rateLimitScans + 1,
@@ -7870,6 +8398,33 @@ runner.check(
     replacedTokenSnapshot.tasks.first { $0.id == tokenCacheSessionID }?.tokenCount == 300,
     "same-size same-mtime rollout replacement should invalidate token caches by inode"
 )
+let prefixScansBeforeSameSizeRewrite = tokenCacheStore.sessionFileCacheStats().prefixScans
+let sameSizeRewriteLine = #"{"timestamp":"\#(timestamp)","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":400}}}}"# + "\n"
+var sameSizeRewriteData = Data(sameSizeRewriteLine.utf8)
+runner.check(sameSizeRewriteData.count <= tokenCacheSize, "same-size rewrite fixture should fit the original byte size")
+if sameSizeRewriteData.count < tokenCacheSize {
+    sameSizeRewriteData.append(Data(repeating: UInt8(ascii: " "), count: tokenCacheSize - sameSizeRewriteData.count))
+}
+let sameSizeRewriteHandle = try FileHandle(forWritingTo: tokenCachePath)
+try sameSizeRewriteHandle.truncate(atOffset: 0)
+try sameSizeRewriteHandle.write(contentsOf: sameSizeRewriteData)
+try sameSizeRewriteHandle.close()
+try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(5)], ofItemAtPath: tokenCachePath.path)
+let sameSizeRewriteSnapshot = tokenCacheStore.loadSnapshot(
+    includePeriodUsage: false,
+    bypassFastCache: true,
+    rateLimitSource: .localFilesOnly,
+    taskHistoryRange: .day,
+    now: now.addingTimeInterval(5)
+)
+runner.check(
+    sameSizeRewriteSnapshot.tasks.first { $0.id == tokenCacheSessionID }?.tokenCount == 400,
+    "same-inode same-size rollout rewrite should invalidate the prefix and token caches"
+)
+runner.check(
+    tokenCacheStore.sessionFileCacheStats().prefixScans == prefixScansBeforeSameSizeRewrite + 1,
+    "same-inode same-size rollout rewrite should rescan the prefix from byte zero"
+)
 let cacheStatsBeforeFastHit = tokenCacheStore.sessionFileCacheStats()
 let withinFastCacheWindow = tokenCacheStore.loadSnapshot(
     includePeriodUsage: false,
@@ -7878,7 +8433,7 @@ let withinFastCacheWindow = tokenCacheStore.loadSnapshot(
     taskHistoryRange: .day,
     now: now.addingTimeInterval(33)
 )
-runner.check(withinFastCacheWindow.tasks.first { $0.id == tokenCacheSessionID }?.tokenCount == 300, "29 second fast-cache hit should preserve snapshot output")
+runner.check(withinFastCacheWindow.tasks.first { $0.id == tokenCacheSessionID }?.tokenCount == 400, "29 second fast-cache hit should preserve snapshot output")
 let cacheStatsAfterFastHit = tokenCacheStore.sessionFileCacheStats()
 runner.check(
     cacheStatsAfterFastHit.fastSnapshotHits == cacheStatsBeforeFastHit.fastSnapshotHits + 1,
@@ -7909,6 +8464,7 @@ runner.check(
     "forced refresh should bypass the 30 second fast snapshot cache"
 )
 try FileManager.default.removeItem(at: tokenCachePath)
+try FileManager.default.removeItem(at: partialPrefixPath)
 _ = tokenCacheStore.loadSnapshot(
     includePeriodUsage: false,
     bypassFastCache: true,

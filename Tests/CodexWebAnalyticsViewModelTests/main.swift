@@ -84,14 +84,25 @@ struct CodexWebAnalyticsViewModelTests {
     static func main() async {
         let runner = TestRunner()
         let productionProvider = CodexWebAnalyticsProvider()
+        runner.check(!productionProvider.hasMaterialized, "provider construction must not materialize WebKit")
+        let productionWebView = productionProvider.webView
+        runner.check(productionProvider.hasMaterialized, "explicit webView access should materialize WebKit")
         runner.check(
-            productionProvider.webView.configuration.websiteDataStore === WKWebsiteDataStore.default(),
+            productionWebView.configuration.websiteDataStore === WKWebsiteDataStore.default(),
             "production web Analytics should use the app-owned persistent WebKit store"
         )
         runner.check(
-            productionProvider.webView.bounds.width >= 900
-                && productionProvider.webView.bounds.height >= 620,
+            productionWebView.bounds.width >= 900
+                && productionWebView.bounds.height >= 620,
             "web Analytics should have a chart layout before its visible window is first attached"
+        )
+        productionProvider.releaseIfIdle()
+        runner.check(!productionProvider.hasMaterialized, "idle release should drop the WebKit object")
+        let recreatedWebView = productionProvider.webView
+        runner.check(productionProvider.hasMaterialized, "a released provider should recreate WebKit on demand")
+        runner.check(
+            recreatedWebView.configuration.websiteDataStore === productionWebView.configuration.websiteDataStore,
+            "recreated WebKit should retain the injected WebsiteDataStore identity"
         )
         let isolatedStore = WKWebsiteDataStore.nonPersistent()
         let isolatedProvider = CodexWebAnalyticsProvider(websiteDataStore: isolatedStore)

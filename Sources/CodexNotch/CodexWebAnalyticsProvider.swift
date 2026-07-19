@@ -38,35 +38,32 @@ final class CodexWebAnalyticsProvider: NSObject, CodexAnalyticsProviding, WKNavi
         "login.live.com"
     ]
 
-    let webView: WKWebView
+    /// Accessing the web view is an explicit opt-in to the WebKit-backed path.
+    /// Construction of this provider (including app launch) stays WebKit-free.
+    var webView: WKWebView { materialize() }
     private let websiteDataStore: WKWebsiteDataStore
+    private var storage: WKWebView?
     private(set) var isReady = false
     var onReadinessChange: ((Bool) -> Void)?
     private var started = false
     private var blockedNavigation = false
     private var authenticatedRedirectAttempted = false
     private var readinessGeneration = 0
+    private var readinessTask: Task<Void, Never>?
+    private var idleReleaseTask: Task<Void, Never>?
+
+    var hasMaterialized: Bool { storage != nil }
 
     init(websiteDataStore: WKWebsiteDataStore = .default()) {
-        let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = websiteDataStore
-        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
-        configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         self.websiteDataStore = websiteDataStore
-        // The detail page may request a refresh before the retained browser window
-        // has ever been shown in this process. Give Recharts a deterministic layout
-        // size so visible Tooltip data can still be sampled after a persisted login.
-        webView = WKWebView(
-            frame: CGRect(origin: .zero, size: Self.extractionLayoutSize),
-            configuration: configuration
-        )
         super.init()
-        webView.navigationDelegate = self
-        webView.allowsBackForwardNavigationGestures = true
-        webView.allowsMagnification = true
+        // Keep only the injected store. WKWebView is materialized lazily by
+        // materialize(), never as a side effect of provider initialization.
     }
 
     func start() {
+        let webView = materialize()
+        cancelIdleRelease()
         if started {
             // A retained WKWebView can finish its first load before SwiftUI attaches it
             // to the visible browser window. Re-arm the bounded readiness probe whenever
@@ -79,6 +76,8 @@ final class CodexWebAnalyticsProvider: NSObject, CodexAnalyticsProviding, WKNavi
     }
 
     func reload() {
+        let webView = materialize()
+        cancelIdleRelease()
         blockedNavigation = false
         authenticatedRedirectAttempted = false
         if Self.isAnalyticsPage(webView.url) {
@@ -89,6 +88,10 @@ final class CodexWebAnalyticsProvider: NSObject, CodexAnalyticsProviding, WKNavi
     }
 
     func clearSession() async {
+        let webView = materialize()
+        cancelIdleRelease()
+        readinessTask?.cancel()
+        readinessTask = nil
         webView.stopLoading()
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             websiteDataStore.removeData(
@@ -113,6 +116,9 @@ final class CodexWebAnalyticsProvider: NSObject, CodexAnalyticsProviding, WKNavi
             throw CodexWebAnalyticsProviderError.loginRequired
         }
 
+        guard let webView = storage else {
+            throw CodexWebAnalyticsProviderError.pageNotReady
+        }
         let value = try await webView.callAsyncJavaScript(
             Self.extractionJavaScript,
             arguments: [:],
@@ -164,6 +170,7 @@ final class CodexWebAnalyticsProvider: NSObject, CodexAnalyticsProviding, WKNavi
     }
 
     private func refreshReadiness() async {
+        guard let webView = storage else { return }
         guard Self.isAnalyticsPage(webView.url) else {
             setReady(false)
             await returnToAnalyticsAfterLoginIfNeeded()
@@ -184,13 +191,19 @@ final class CodexWebAnalyticsProvider: NSObject, CodexAnalyticsProviding, WKNavi
     }
 
     private func scheduleReadinessChecks() {
+        readinessTask?.cancel()
         readinessGeneration &+= 1
         let generation = readinessGeneration
-        Task { @MainActor [weak self] in
+        readinessTask = Task { @MainActor [weak self] in
+            defer {
+                if self?.readinessGeneration == generation {
+                    self?.readinessTask = nil
+                }
+            }
             for attempt in 0..<120 {
-                guard let self, self.readinessGeneration == generation else { return }
+                guard let self, self.readinessGeneration == generation, !Task.isCancelled else { return }
                 await self.refreshReadiness()
-                guard self.readinessGeneration == generation, !self.isReady else { return }
+                guard self.readinessGeneration == generation, !self.isReady, !Task.isCancelled else { return }
                 if attempt < 119 {
                     try? await Task.sleep(nanoseconds: 500_000_000)
                 }
@@ -232,6 +245,66 @@ final class CodexWebAnalyticsProvider: NSObject, CodexAnalyticsProviding, WKNavi
         guard isReady != ready else { return }
         isReady = ready
         onReadinessChange?(ready)
+    }
+
+    /// Schedule a safe, non-destructive release of the WebKit object. Website
+    /// data is intentionally retained; clearSession() is the only data-removal
+    /// path.
+    func scheduleIdleRelease(after delay: TimeInterval = 30 * 60) {
+        idleReleaseTask?.cancel()
+        guard hasMaterialized else { return }
+        let boundedDelay = max(0, delay)
+        idleReleaseTask = Task { @MainActor [weak self] in
+            let nanoseconds = UInt64(min(boundedDelay, TimeInterval(UInt64.max) / 1_000_000_000) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            guard !Task.isCancelled else { return }
+            self?.releaseIfIdle()
+        }
+    }
+
+    func cancelIdleRelease() {
+        idleReleaseTask?.cancel()
+        idleReleaseTask = nil
+    }
+
+    /// Drop all strong references held by this provider without touching the
+    /// injected WebsiteDataStore. The next explicit webView/start/reload access
+    /// creates a fresh WKWebView backed by the same store.
+    func releaseIfIdle() {
+        idleReleaseTask?.cancel()
+        idleReleaseTask = nil
+        // An independently opened browser window may still retain and display
+        // this view even while the HUD is hidden. Never tear down a mounted
+        // WebKit view; windowWillClose removes the hosting hierarchy first.
+        guard storage?.window == nil else { return }
+        readinessTask?.cancel()
+        readinessTask = nil
+        readinessGeneration &+= 1
+        storage?.stopLoading()
+        storage?.navigationDelegate = nil
+        storage = nil
+        setReady(false)
+        started = false
+        blockedNavigation = false
+        authenticatedRedirectAttempted = false
+    }
+
+    private func materialize() -> WKWebView {
+        cancelIdleRelease()
+        if let storage { return storage }
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = websiteDataStore
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
+        let webView = WKWebView(
+            frame: CGRect(origin: .zero, size: Self.extractionLayoutSize),
+            configuration: configuration
+        )
+        webView.navigationDelegate = self
+        webView.allowsBackForwardNavigationGestures = true
+        webView.allowsMagnification = true
+        storage = webView
+        return webView
     }
 
     static let extractionJavaScript = #"""
