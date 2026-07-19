@@ -93,8 +93,15 @@ final class CodexWebAnalyticsViewModel: ObservableObject {
         provider.reload()
     }
 
+    func setOfficialAnalyticsVisible(_ visible: Bool) {
+        if visible {
+            provider.cancelIdleRelease()
+        } else {
+            provider.scheduleIdleRelease(after: 30 * 60)
+        }
+    }
+
     func refreshWhenPresented() {
-        provider.start()
         guard clearTask == nil else { return }
         if cachePolicy.isFresh(lastSuccessAt: lastSuccessAt, now: now()) {
             applySnapshotState()
@@ -112,7 +119,6 @@ final class CodexWebAnalyticsViewModel: ObservableObject {
     }
 
     func refresh(force: Bool) {
-        provider.start()
         guard clearTask == nil else { return }
         if !force, cachePolicy.isFresh(lastSuccessAt: lastSuccessAt, now: now()) {
             applySnapshotState()

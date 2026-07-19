@@ -321,7 +321,9 @@ struct DetailPanelView: View {
     let onSubAPIRefresh: () -> Void
     let onCodexRadarRefresh: () -> Void
     let onPageSelected: (DetailPage) -> Void
+    let onAnalyticsModeSelected: (AnalyticsDataMode) -> Void
     @State private var detailPage: DetailPage = .codex
+    @State private var analyticsMode: AnalyticsDataMode = .official
 
     private var snapshot: UsageSnapshot {
         viewModel.snapshot
@@ -456,7 +458,7 @@ struct DetailPanelView: View {
         case .codex:
             "Codex Monitor"
         case .analytics:
-            "官方 Analytics"
+            analyticsMode == .official ? "官方 Analytics" : "本地 Token Analytics"
         case .performance:
             "性能诊断"
         case .skillInsights:
@@ -477,7 +479,7 @@ struct DetailPanelView: View {
         case .codex:
             return snapshot.isRunning ? "Running" : "Idle"
         case .analytics:
-            return analyticsViewModel.state.label
+            return analyticsMode == .official ? analyticsViewModel.state.label : localAnalyticsStatus
         case .performance:
             if performanceViewModel.backgroundMonitoringEnabled {
                 return "记录中"
@@ -507,7 +509,7 @@ struct DetailPanelView: View {
         case .codex:
             snapshot.isRunning ? MonitorTheme.running : MonitorTheme.textTertiary
         case .analytics:
-            analyticsStatusColor
+            analyticsMode == .official ? analyticsStatusColor : localAnalyticsStatusColor
         case .performance:
             performanceStatusColor
         case .skillInsights:
@@ -558,7 +560,9 @@ struct DetailPanelView: View {
         case .codex:
             viewModel.isRefreshing || analyticsViewModel.isRefreshing
         case .analytics:
-            analyticsViewModel.isRefreshing
+            analyticsMode == .official
+                ? analyticsViewModel.isRefreshing
+                : viewModel.isCostUsageRefreshing
         case .performance:
             performanceViewModel.isRefreshing
         case .skillInsights:
@@ -579,7 +583,7 @@ struct DetailPanelView: View {
         case .codex:
             "刷新 Codex"
         case .analytics:
-            "刷新官方 Analytics"
+            analyticsMode == .official ? "刷新官方 Analytics" : "刷新本地 Token"
         case .performance:
             "立即采样性能"
         case .skillInsights:
@@ -640,7 +644,11 @@ struct DetailPanelView: View {
         case .codex:
             onLocalRefresh()
         case .analytics:
-            analyticsViewModel.refresh(force: true)
+            if analyticsMode == .official {
+                analyticsViewModel.refresh(force: true)
+            } else {
+                viewModel.refreshLocalTokenAnalytics()
+            }
         case .performance:
             performanceViewModel.refreshNow()
         case .skillInsights:
@@ -686,10 +694,67 @@ struct DetailPanelView: View {
     }
 
     private var analyticsContent: some View {
-        CodexWebAnalyticsChartView(
-            viewModel: analyticsViewModel,
-            onOpenBrowser: onAnalyticsBrowser
-        )
+        VStack(spacing: MonitorTheme.Spacing.row) {
+            Picker("Analytics 数据源", selection: $analyticsMode) {
+                ForEach(AnalyticsDataMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .accessibilityLabel("Analytics 数据源")
+
+            Group {
+                if analyticsMode == .official {
+                    CodexWebAnalyticsChartView(
+                        viewModel: analyticsViewModel,
+                        onOpenBrowser: onAnalyticsBrowser
+                    )
+                } else {
+                    LocalTokenAnalyticsView(
+                        summary: snapshot.costUsage,
+                        isEnabled: settings.showPeriodUsage
+                    )
+                }
+            }
+            .frame(maxHeight: .infinity, alignment: .top)
+        }
+        .onAppear {
+            onAnalyticsModeSelected(analyticsMode)
+        }
+        .onChange(of: analyticsMode) { _, mode in
+            onAnalyticsModeSelected(mode)
+        }
+    }
+
+    private var localAnalyticsStatus: String {
+        guard settings.showPeriodUsage else { return "未启用" }
+        if viewModel.isCostUsageRefreshing {
+            return "扫描中"
+        }
+        switch snapshot.costUsage.tokenQuality {
+        case .complete:
+            return "COMPLETE"
+        case .partial:
+            return "回填中"
+        case .unavailable:
+            return "无数据"
+        }
+    }
+
+    private var localAnalyticsStatusColor: Color {
+        guard settings.showPeriodUsage else { return MonitorTheme.textTertiary }
+        if viewModel.isCostUsageRefreshing {
+            return MonitorTheme.radarBaseline
+        }
+        switch snapshot.costUsage.tokenQuality {
+        case .complete:
+            return MonitorTheme.healthy
+        case .partial:
+            return MonitorTheme.warning
+        case .unavailable:
+            return MonitorTheme.textTertiary
+        }
     }
 
     private var analyticsStatusColor: Color {

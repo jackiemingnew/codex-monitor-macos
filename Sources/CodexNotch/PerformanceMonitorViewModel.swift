@@ -17,6 +17,8 @@ final class PerformanceMonitorViewModel: ObservableObject {
     private var generation = 0
     private var lastMemoryPressureAttemptAt: Date?
     private var settingsCancellable: AnyCancellable?
+    private var environmentCancellables: Set<AnyCancellable> = []
+    private var isDetailVisible = false
 
     init(
         settings: CodexNotchSettings,
@@ -31,6 +33,16 @@ final class PerformanceMonitorViewModel: ObservableObject {
                     self?.applyBackgroundMonitoring(enabled)
                 }
             }
+        Publishers.Merge(
+            NotificationCenter.default.publisher(for: .NSProcessInfoPowerStateDidChange),
+            NotificationCenter.default.publisher(for: ProcessInfo.thermalStateDidChangeNotification)
+        )
+        .sink { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.rescheduleForCurrentCadence()
+            }
+        }
+        .store(in: &environmentCancellables)
         loadRecentHistory()
         if backgroundMonitoringEnabled {
             refreshNow()
@@ -50,10 +62,15 @@ final class PerformanceMonitorViewModel: ObservableObject {
     }
 
     func setDetailVisible(_ visible: Bool) {
-        guard visible else {
+        guard isDetailVisible != visible else {
             return
         }
-        refreshWhenPresented()
+        isDetailVisible = visible
+        if visible {
+            refreshWhenPresented()
+        } else {
+            rescheduleForCurrentCadence()
+        }
     }
 
     func refreshWhenPresented() {
@@ -116,9 +133,7 @@ final class PerformanceMonitorViewModel: ObservableObject {
             case .failure(let message):
                 self.errorMessage = message
             }
-            if self.backgroundMonitoringEnabled {
-                self.scheduleNextRefresh(after: Self.refreshInterval)
-            }
+            self.rescheduleForCurrentCadence()
         }
     }
 
@@ -137,7 +152,7 @@ final class PerformanceMonitorViewModel: ObservableObject {
             return
         }
         backgroundMonitoringEnabled = enabled
-        if enabled {
+        if enabled || isDetailVisible {
             refreshNow()
         } else {
             stopScheduling()
@@ -170,16 +185,34 @@ final class PerformanceMonitorViewModel: ObservableObject {
     }
 
     private func scheduleNextRefresh(after interval: TimeInterval) {
-        guard backgroundMonitoringEnabled else {
-            return
-        }
+        guard PerformanceCadencePolicy.interval(
+            isVisible: isDetailVisible,
+            samplingEnabled: backgroundMonitoringEnabled,
+            environment: .current
+        ) != nil else { return }
         refreshTimer?.invalidate()
         let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.refreshNow()
             }
         }
+        timer.tolerance = PerformanceCadencePolicy.timerTolerance(for: interval)
         refreshTimer = timer
+    }
+
+    private func rescheduleForCurrentCadence() {
+        refreshTimer?.invalidate()
+        refreshTimer = nil
+        guard refreshTask == nil else { return }
+        guard let interval = PerformanceCadencePolicy.interval(
+            isVisible: isDetailVisible,
+            samplingEnabled: backgroundMonitoringEnabled,
+            environment: .current
+        ) else {
+            if !isDetailVisible { stopScheduling() }
+            return
+        }
+        scheduleNextRefresh(after: interval)
     }
 
     private func stopScheduling() {

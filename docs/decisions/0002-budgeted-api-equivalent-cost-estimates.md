@@ -1,6 +1,6 @@
 # ADR 0002: CodexBar-aligned API-equivalent cost snapshots
 
-- Status: Accepted (supersedes the initial partial-publication design; budgeted generation completion is refined by [ADR 0003](0003-frozen-cost-scan-generations.md))
+- Status: Accepted (supersedes the initial partial-publication design; budgeted generation completion is refined by [ADR 0003](0003-frozen-cost-scan-generations.md); the model-breakdown UI boundary is superseded by [ADR 0005](0005-local-model-token-analytics.md))
 - Date: 2026-07-14
 
 ## Context
@@ -63,6 +63,10 @@ Rejected because the app already owns an appropriate derived SQLite store and co
 ### Cost charts, project rankings, and model breakdowns
 
 Rejected for this change. They add UI density and more persisted dimensions without improving the two requested indicators.
+
+The model-breakdown portion of this boundary was later superseded by
+[ADR 0005](0005-local-model-token-analytics.md), which reuses the already
+published day/model buckets without adding a project dimension or public API.
 
 ## Consequences
 

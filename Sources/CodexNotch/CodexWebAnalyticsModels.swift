@@ -64,10 +64,19 @@ struct CodexAnalyticsChart: Codable, Equatable, Sendable {
     let expectedDays: Int
 
     static let empty = CodexAnalyticsChart(points: [], sampledDays: 0, expectedDays: 7)
+    static let codexModelDisplayPriority = [
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "codex-auto-review"
+    ]
 
     var coverageLabel: String { "\(sampledDays)/\(expectedDays) 天" }
 
-    func displaySeries(limit: Int) -> [CodexAnalyticsDisplaySeries] {
+    func displaySeries(
+        limit: Int,
+        preferredSeriesNames: [String] = []
+    ) -> [CodexAnalyticsDisplaySeries] {
         let boundedLimit = max(1, limit)
         var totals: [String: Int] = [:]
         for point in points {
@@ -92,8 +101,23 @@ struct CodexAnalyticsChart: Codable, Equatable, Sendable {
             }
         guard sorted.count > boundedLimit else { return sorted }
 
-        let leading = Array(sorted.prefix(boundedLimit))
-        let remainder = sorted.dropFirst(boundedLimit)
+        // Overflow needs one visible slot for the aggregate remainder.
+        let explicitLimit = max(0, boundedLimit - 1)
+        var selectedNames: Set<String> = []
+        for preferredName in preferredSeriesNames where selectedNames.count < explicitLimit {
+            guard let match = sorted.first(where: {
+                $0.name.compare(preferredName, options: .caseInsensitive) == .orderedSame
+            }) else {
+                continue
+            }
+            selectedNames.insert(match.name)
+        }
+        for candidate in sorted where selectedNames.count < explicitLimit {
+            selectedNames.insert(candidate.name)
+        }
+
+        let leading = sorted.filter { selectedNames.contains($0.name) }
+        let remainder = sorted.filter { !selectedNames.contains($0.name) }
         return leading + [CodexAnalyticsDisplaySeries(
             name: "其他",
             total: remainder.reduce(0) { analyticsClampedAdd($0, $1.total) },
@@ -504,4 +528,15 @@ protocol CodexAnalyticsProviding: AnyObject {
     func reload()
     func clearSession() async
     func fetchSnapshot() async throws -> CodexWebAnalyticsRawSnapshot
+    var hasMaterialized: Bool { get }
+    func scheduleIdleRelease(after delay: TimeInterval)
+    func cancelIdleRelease()
+}
+
+extension CodexAnalyticsProviding {
+    /// Additive lifecycle hooks keep existing injected/fake providers source
+    /// compatible while allowing the production provider to shed WebKit safely.
+    var hasMaterialized: Bool { false }
+    func scheduleIdleRelease(after _: TimeInterval) {}
+    func cancelIdleRelease() {}
 }

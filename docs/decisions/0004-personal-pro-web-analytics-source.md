@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-07-18
+- Refined by: [ADR 0006](0006-low-energy-refresh-and-storage-hot-paths.md)
 
 ## Context
 

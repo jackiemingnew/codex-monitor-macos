@@ -134,6 +134,7 @@ final class CodexUsageStore: @unchecked Sendable {
     private let costUsagePerformanceLock = NSLock()
     private var fastCache: FastSnapshotCache?
     private var deltaCacheReady = false
+    private var deltaCacheMaintenanceReady = false
     private var recentPathsCache: RecentPathsCache?
     private var recentTaskPathsCache: RecentPathsCache?
     private var appServerRateLimitCache = AppServerRateLimitCache()
@@ -141,6 +142,8 @@ final class CodexUsageStore: @unchecked Sendable {
     private var sessionTokenTotalCache: [String: SessionTokenTotalCache] = [:]
     private var sessionContextUsageCache: [String: SessionContextUsageCache] = [:]
     private var sessionPrefixFactsCache: [String: SessionPrefixFactsCache] = [:]
+    private var threadTableColumnsCache: ThreadTableColumnsCache?
+    private var sessionIndexThreadNamesCache: SessionIndexThreadNamesCache?
     private var sessionRateLimitCache: [String: SessionRateLimitCache] = [:]
     private var sessionActivityCache: [String: SessionActivityCache] = [:]
     private var sessionFileCacheCounters = SessionFileCacheCounters()
@@ -322,16 +325,24 @@ final class CodexUsageStore: @unchecked Sendable {
             let subagentUsage = loadSubagentUsage(range: taskHistoryRange, now: now)
             let baseThreads = mergeThreadRecords(databaseThreads + sessionThreads + activeSubagentParents)
             let displayThreads = withSubagentUsage(baseThreads, usage: subagentUsage)
-            let usageDeltaThreadLoad = loadUsageDeltaThreadsWithQuality(range: .month, now: now)
-            let usageDeltaDatabaseThreads = usageDeltaThreadLoad.threads
-            let usageDeltaSessionThreads = loadRecentSessionThreads(
-                range: .month,
-                now: now,
-                knownTokens: tokenMap(from: usageDeltaDatabaseThreads)
-            )
-            let usageDeltaThreads = mergeThreadRecords(
-                usageDeltaDatabaseThreads + usageDeltaSessionThreads + activeSubagentParents
-            )
+            let usageDeltaThreadLoad: UsageDeltaThreadLoadResult
+            let usageDeltaThreads: [ThreadRecord]
+            if includePeriodUsage {
+                let monthThreadLoad = loadUsageDeltaThreadsWithQuality(range: .month, now: now)
+                let monthDatabaseThreads = monthThreadLoad.threads
+                let monthSessionThreads = loadRecentSessionThreads(
+                    range: .month,
+                    now: now,
+                    knownTokens: tokenMap(from: monthDatabaseThreads)
+                )
+                usageDeltaThreadLoad = monthThreadLoad
+                usageDeltaThreads = mergeThreadRecords(
+                    monthDatabaseThreads + monthSessionThreads + activeSubagentParents
+                )
+            } else {
+                usageDeltaThreadLoad = UsageDeltaThreadLoadResult(threads: [], isPartial: false)
+                usageDeltaThreads = []
+            }
             let activeThreadIDs = ((try? loadActiveThreadIDs(now: now)) ?? [])
                 .union(activeSessionThreadIDs(from: displayThreads, now: now))
                 .union(activeSubagentParents.map(\.id))
@@ -345,16 +356,32 @@ final class CodexUsageStore: @unchecked Sendable {
                 diagnosticID: UUID().uuidString
             )
             let deltaStartedAt = Date()
-            recordDeltaSnapshot(for: usageDeltaThreads, now: now)
+            if includePeriodUsage {
+                recordDeltaSnapshot(for: usageDeltaThreads, now: now)
+            }
             var usageResult = includePeriodUsage
                 ? loadRollingPeriodUsage(for: usageDeltaThreads, now: now)
                 : PeriodUsageResult(usage: fallbackUsage ?? .zero, quality: .empty)
-            var dailyUsage = loadDailyUsage(for: usageDeltaThreads, now: now)
+            var dailyUsage = includePeriodUsage
+                ? loadDailyUsage(for: usageDeltaThreads, now: now)
+                : DailyUsage.empty
             if usageDeltaThreadLoad.isPartial {
                 usageResult = markingHistoryPartial(usageResult)
                 dailyUsage = markingHistoryPartial(dailyUsage)
             }
             let deltas = loadTokenDeltas(for: baseThreads, now: now)
+            if !includePeriodUsage, dailyUsage.usageTodayTokens == 0 {
+                let taskTodayTokens = deltas.values
+                    .compactMap(\.deltaTodayTokens)
+                    .reduce(0, Self.saturatedTokenSum)
+                dailyUsage = DailyUsage(
+                    usageTodayTokens: taskTodayTokens,
+                    dayStartedAt: Calendar.current.startOfDay(for: now),
+                    timeZoneIdentifier: TimeZone.current.identifier,
+                    isPartial: false,
+                    missingBaselineSessions: 0
+                )
+            }
             let aggregateDeltas = loadAggregateTokenDeltas(for: baseThreads, now: now)
             let deltaDurationMs = elapsedMilliseconds(since: deltaStartedAt)
             let taskResult = buildTasks(
@@ -451,21 +478,20 @@ final class CodexUsageStore: @unchecked Sendable {
     func loadUsageTotalsWithQuality(
         now: Date = Date()
     ) -> (usage: PeriodUsage, quality: PeriodUsageQuality)? {
-        let threadLoad = loadUsageDeltaThreadsWithQuality(range: .month, now: now)
-        let databaseThreads = threadLoad.threads
-        let sessionThreads = loadRecentSessionThreads(
-            range: .month,
-            now: now,
-            knownTokens: tokenMap(from: databaseThreads)
-        )
-        let threads = mergeThreadRecords(databaseThreads + sessionThreads + loadActiveSubagentParentThreads(now: now))
-        let result = threadLoad.isPartial
-            ? markingHistoryPartial(loadRollingPeriodUsage(for: threads, now: now))
-            : loadRollingPeriodUsage(for: threads, now: now)
-        return (result.usage, result.quality)
+        let combined = loadUsageTotalsAndDailyWithQuality(now: now)
+        return (combined.usage, combined.quality)
     }
 
     func loadDailyUsage(now: Date = Date()) -> DailyUsage {
+        loadUsageTotalsAndDailyWithQuality(now: now).daily
+    }
+
+    /// Loads the month thread set exactly once and derives both period and daily
+    /// history from that same set. Callers that need both values (the usageTotals
+    /// lane) must use this combined entry point to avoid duplicate JSONL/SQLite work.
+    func loadUsageTotalsAndDailyWithQuality(
+        now: Date = Date()
+    ) -> (usage: PeriodUsage, quality: PeriodUsageQuality, daily: DailyUsage) {
         let threadLoad = loadUsageDeltaThreadsWithQuality(range: .month, now: now)
         let databaseThreads = threadLoad.threads
         let sessionThreads = loadRecentSessionThreads(
@@ -474,8 +500,16 @@ final class CodexUsageStore: @unchecked Sendable {
             knownTokens: tokenMap(from: databaseThreads)
         )
         let threads = mergeThreadRecords(databaseThreads + sessionThreads + loadActiveSubagentParentThreads(now: now))
-        let usage = loadDailyUsage(for: threads, now: now)
-        return threadLoad.isPartial ? markingHistoryPartial(usage) : usage
+        // Keep the historical lane warm on its normal cadence before deriving
+        // rolling and daily values from the same month thread set.
+        _ = recordDeltaSnapshot(for: threads, now: now)
+        let period = threadLoad.isPartial
+            ? markingHistoryPartial(loadRollingPeriodUsage(for: threads, now: now))
+            : loadRollingPeriodUsage(for: threads, now: now)
+        let daily = threadLoad.isPartial
+            ? markingHistoryPartial(loadDailyUsage(for: threads, now: now))
+            : loadDailyUsage(for: threads, now: now)
+        return (period.usage, period.quality, daily)
     }
 
     func refreshCostUsageSlice(
@@ -484,7 +518,26 @@ final class CodexUsageStore: @unchecked Sendable {
         reuseExistingCandidates: Bool = false,
         shouldCancel: @escaping @Sendable () -> Bool = { false }
     ) -> CostUsageScanMetrics {
-        if !reuseExistingCandidates {
+        deltaWriteLock.lock()
+        defer { deltaWriteLock.unlock() }
+
+        let inventoryDecision = costUsageEstimator.preflightInventoryDecision(
+            now: now,
+            bypassCadence: bypassCadence,
+            reuseExistingCandidates: reuseExistingCandidates
+        )
+        if case let .skipCadence(isComplete) = inventoryDecision {
+            return CostUsageScanMetrics(
+                jsonlBytesRead: 0,
+                filesAdvanced: 0,
+                databaseWrites: 0,
+                skippedOversizedRows: 0,
+                stopReason: .cadence,
+                isComplete: isComplete
+            )
+        }
+
+        if case .enumerate = inventoryDecision {
             let retentionStart = Calendar.current.date(
                 byAdding: .day,
                 value: -30,
@@ -499,10 +552,10 @@ final class CodexUsageStore: @unchecked Sendable {
                 limit: nil
             )
             updateCostUsageCandidates(from: paths, inventoryTruncated: false)
+            costUsagePerformanceLock.lock()
+            costUsagePerformanceStats.inventoryEnumerations += 1
+            costUsagePerformanceLock.unlock()
         }
-
-        deltaWriteLock.lock()
-        defer { deltaWriteLock.unlock() }
         let metrics = costUsageEstimator.scanSlice(
             now: now,
             bypassCadence: bypassCadence,
@@ -513,7 +566,8 @@ final class CodexUsageStore: @unchecked Sendable {
             scanCount: costUsagePerformanceStats.scanCount + 1,
             jsonlBytesRead: costUsagePerformanceStats.jsonlBytesRead + metrics.jsonlBytesRead,
             filesAdvanced: costUsagePerformanceStats.filesAdvanced + metrics.filesAdvanced,
-            databaseWrites: costUsagePerformanceStats.databaseWrites + metrics.databaseWrites
+            databaseWrites: costUsagePerformanceStats.databaseWrites + metrics.databaseWrites,
+            inventoryEnumerations: costUsagePerformanceStats.inventoryEnumerations
         )
         costUsagePerformanceLock.unlock()
         return metrics
@@ -750,15 +804,26 @@ final class CodexUsageStore: @unchecked Sendable {
         let usage = fallbackUsage ?? cache.periodUsage
         let cumulativeUsage = loadCumulativeUsage()
         let recentUsage = loadRecentUsage(now: now)
-        var dailyUsage = loadDailyUsage(for: cache.usageThreads, now: now)
-        if cache.historyThreadsPartial {
-            dailyUsage = markingHistoryPartial(dailyUsage)
-        }
+        // Fast snapshots must not re-enter the month-history lane. The view model
+        // merges the last usage/daily values from the usageTotals lane below.
+        var dailyUsage = cache.dailyUsage
         let activeThreadIDs = ((try? loadActiveThreadIDs(now: now)) ?? [])
             .union(activeSessionThreadIDs(from: cache.threads, now: now))
             .union(loadActiveSubagentParentThreads(now: now).map(\.id))
         let deltaStartedAt = Date()
         let deltas = loadTokenDeltas(for: cache.threads, now: now)
+        if dailyUsage.usageTodayTokens == 0 {
+            let taskTodayTokens = deltas.values
+                .compactMap(\.deltaTodayTokens)
+                .reduce(0, Self.saturatedTokenSum)
+            dailyUsage = DailyUsage(
+                usageTodayTokens: taskTodayTokens,
+                dayStartedAt: Calendar.current.startOfDay(for: now),
+                timeZoneIdentifier: TimeZone.current.identifier,
+                isPartial: false,
+                missingBaselineSessions: 0
+            )
+        }
         let aggregateDeltas = loadAggregateTokenDeltas(for: cache.threads, now: now)
         let deltaDurationMs = elapsedMilliseconds(since: deltaStartedAt)
         let taskResult = buildTasks(
@@ -1273,23 +1338,37 @@ final class CodexUsageStore: @unchecked Sendable {
     }
 
     @discardableResult
-    private func ensureDeltaCacheReady() -> Bool {
+    private func ensureDeltaCacheReady(performMaintenance: Bool = true) -> Bool {
         deltaCacheSetupLock.lock()
         defer { deltaCacheSetupLock.unlock() }
 
-        if deltaCacheReady {
+        if deltaCacheReady && (!performMaintenance || deltaCacheMaintenanceReady) {
             return true
         }
 
         ensureDeltaDatabaseDirectory()
         do {
+            let isNewOrEmptyDatabase: Bool = {
+                guard FileManager.default.fileExists(atPath: deltaDatabase) else {
+                    return true
+                }
+                let size = (try? FileManager.default.attributesOfItem(atPath: deltaDatabase)[.size] as? NSNumber)?.uint64Value
+                return size == 0
+            }()
+            if isNewOrEmptyDatabase {
+                // SQLite only permits changing auto_vacuum before the first
+                // table is created. Never switch this pragma for an existing
+                // user database and never run a full VACUUM here.
+                try Shell.sqliteExec(database: deltaDatabase, query: "PRAGMA auto_vacuum=INCREMENTAL;")
+            }
             try Shell.sqliteExec(database: deltaDatabase, query: deltaSchemaSQL())
 
             if deltaMetadataValue(for: "legacy_import_completed") != 1 {
                 try Shell.sqliteExec(database: deltaDatabase, query: legacyDeltaMigrationSQL())
             }
 
-            if deltaMetadataValue(for: "history_compaction_completed") != 1 {
+            if performMaintenance,
+               deltaMetadataValue(for: "history_compaction_completed") != 1 {
                 try Shell.sqliteExec(database: deltaDatabase, query: deltaHistoryCompactionSQL())
             }
 
@@ -1315,6 +1394,9 @@ final class CodexUsageStore: @unchecked Sendable {
                 query: maintenanceStatements.joined(separator: "\n")
             )
             deltaCacheReady = true
+            if performMaintenance {
+                deltaCacheMaintenanceReady = true
+            }
             return true
         } catch {
             return false
@@ -1322,7 +1404,7 @@ final class CodexUsageStore: @unchecked Sendable {
     }
 
     private func ensureDeltaCacheSchema() {
-        _ = ensureDeltaCacheReady()
+        _ = ensureDeltaCacheReady(performMaintenance: false)
     }
 
     private func deltaMetadataValue(for key: String) -> Int64? {
@@ -1347,13 +1429,29 @@ final class CodexUsageStore: @unchecked Sendable {
     }
 
     private func threadTableColumns() -> Set<String> {
-        let records = (try? Shell.sqliteJSON(
+        let signatures = sqliteFileSet(stateDatabase).map(fileSignature)
+        cacheLock.lock()
+        let cached = threadTableColumnsCache
+        cacheLock.unlock()
+        if let cached, cached.signatures == signatures {
+            return cached.columns
+        }
+
+        guard let records = try? Shell.sqliteJSON(
             database: stateDatabase,
             query: "pragma table_info(threads);",
             as: [SQLiteNameRecord].self,
             readOnly: true
-        )) ?? []
-        return Set(records.map(\.name))
+        ) else {
+            // Do not cache read failures: a transient locked/unavailable
+            // database must be retried after the next signature check.
+            return []
+        }
+        let columns = Set(records.map(\.name))
+        cacheLock.lock()
+        threadTableColumnsCache = ThreadTableColumnsCache(signatures: signatures, columns: columns)
+        cacheLock.unlock()
+        return columns
     }
 
     private func loadRecentSessionThreads(
@@ -1753,7 +1851,8 @@ final class CodexUsageStore: @unchecked Sendable {
         ON CONFLICT(thread_id) DO UPDATE SET
           tokens_used = excluded.tokens_used,
           updated_at_ms = excluded.updated_at_ms,
-          observed_at_ms = excluded.observed_at_ms;
+          observed_at_ms = excluded.observed_at_ms
+        WHERE token_snapshots.tokens_used != excluded.tokens_used;
 
         DELETE FROM token_snapshot_history
         WHERE observed_at_ms < \(retentionCutoffMs)
@@ -2054,7 +2153,23 @@ final class CodexUsageStore: @unchecked Sendable {
     }
 
     private func loadSessionIndexThreadNames() -> [String: String] {
+        let signature = fileSignature(sessionIndexPath)
+        cacheLock.lock()
+        let cached = sessionIndexThreadNamesCache
+        cacheLock.unlock()
+        if let cached, cached.signature == signature {
+            return cached.names
+        }
+
+        if !signature.exists {
+            cacheLock.lock()
+            sessionIndexThreadNamesCache = SessionIndexThreadNamesCache(signature: signature, names: [:])
+            cacheLock.unlock()
+            return [:]
+        }
+
         guard let content = try? String(contentsOfFile: sessionIndexPath, encoding: .utf8) else {
+            // A failed read is intentionally not cached as an empty index.
             return [:]
         }
 
@@ -2073,6 +2188,9 @@ final class CodexUsageStore: @unchecked Sendable {
             names[record.id] = name
         }
 
+        cacheLock.lock()
+        sessionIndexThreadNamesCache = SessionIndexThreadNamesCache(signature: signature, names: names)
+        cacheLock.unlock()
         return names
     }
 
@@ -2542,6 +2660,11 @@ final class CodexUsageStore: @unchecked Sendable {
         }
     }
 
+    private static func saturatedTokenSum(_ lhs: Int, _ rhs: Int) -> Int {
+        let (sum, overflow) = lhs.addingReportingOverflow(max(0, rhs))
+        return overflow ? Int.max : sum
+    }
+
     private func buildTasks(
         from threads: [ThreadRecord],
         activeThreadIDs: Set<String>,
@@ -2757,46 +2880,98 @@ final class CodexUsageStore: @unchecked Sendable {
         }
 
         let scanLimit: UInt64 = 1_024 * 1_024
+        // A changed timestamp at the same size is an in-place rewrite, not an
+        // append. Only a strictly larger file with the same inode can consume
+        // the cached pending tail incrementally.
         let isAppend = cached?.signature.inode == signature.inode
-            && (cached?.signature.size ?? 0) <= signature.size
-            && (cached?.signature.modifiedAtNanoseconds ?? 0) <= signature.modifiedAtNanoseconds
-        if let cached,
-           isAppend,
-           cached.scannedBytes >= scanLimit
-                || (cached.facts.meta != nil && cached.facts.runtime != nil && cached.facts.title != nil) {
-            let retained = SessionPrefixFactsCache(
-                signature: signature,
-                scannedBytes: cached.scannedBytes,
-                facts: cached.facts
-            )
-            cacheLock.lock()
-            sessionPrefixFactsCache[cacheKey] = retained
-            cacheLock.unlock()
-            return retained.facts
+            && (cached?.signature.size ?? 0) < signature.size
+        let previous = isAppend ? cached : nil
+        let scanStart = previous?.scannedBytes ?? 0
+        let scanEnd = min(signature.size, scanLimit)
+        guard scanStart < scanEnd || previous == nil else {
+            if let previous {
+                cacheLock.lock()
+                sessionPrefixFactsCache[cacheKey] = SessionPrefixFactsCache(
+                    signature: signature,
+                    scannedBytes: previous.scannedBytes,
+                    facts: previous.facts,
+                    pendingBytes: previous.pendingBytes
+                )
+                cacheLock.unlock()
+            }
+            return previous?.facts ?? empty
         }
 
-        let text = filePrefix(from: path, maxBytes: Int(scanLimit))
-        let parsed = SessionPrefixFacts(
-            meta: text.flatMap(parseSessionMeta(from:)),
-            runtime: text.flatMap(parseSessionRuntimeInfo(from:)),
-            title: text.flatMap(parseSessionTitle(from:))
-        )
-        let facts = isAppend
-            ? SessionPrefixFacts(
-                meta: cached?.facts.meta ?? parsed.meta,
-                runtime: cached?.facts.runtime ?? parsed.runtime,
-                title: cached?.facts.title ?? parsed.title
+        if let previous,
+           previous.facts.meta != nil,
+           previous.facts.runtime != nil,
+           previous.facts.title != nil {
+            cacheLock.lock()
+            sessionPrefixFactsCache[cacheKey] = SessionPrefixFactsCache(
+                signature: signature,
+                scannedBytes: previous.scannedBytes,
+                facts: previous.facts,
+                pendingBytes: previous.pendingBytes
             )
-            : parsed
+            cacheLock.unlock()
+            return previous.facts
+        }
+
+        guard let chunk = fileChunkData(from: path, offset: scanStart, maxBytes: scanEnd - scanStart) else {
+            return previous?.facts ?? empty
+        }
+        var facts = previous?.facts ?? empty
+        var bytes = previous?.pendingBytes ?? Data()
+        bytes.append(chunk)
+        let endsWithNewline = bytes.last == UInt8(ascii: "\n")
+        // A valid JSON object at the file's current EOF is a complete JSONL
+        // record even without a trailing newline. A syntactically incomplete
+        // tail may be a live writer observed mid-record, so retain it until a
+        // later append completes it or terminates it with a newline.
+        let reachesEOF = scanEnd == signature.size
+        let lines = bytes.split(separator: UInt8(ascii: "\n"), omittingEmptySubsequences: true)
+        let finalLine = endsWithNewline ? nil : lines.last.map { Data($0) }
+        let finalLineText = finalLine.flatMap { String(data: $0, encoding: .utf8) }
+        let consumesFinalLine = endsWithNewline
+            || (reachesEOF && finalLineText.map(isCompleteJSONLine) == true)
+        let completeLines = consumesFinalLine ? lines[...] : lines.dropLast()
+        for line in completeLines {
+            guard let lineText = String(data: Data(line), encoding: .utf8) else {
+                continue
+            }
+            parseSessionPrefixLine(lineText, into: &facts)
+        }
+        let pendingBytes = consumesFinalLine ? Data() : (finalLine ?? Data())
         cacheLock.lock()
         sessionPrefixFactsCache[cacheKey] = SessionPrefixFactsCache(
             signature: signature,
-            scannedBytes: min(signature.size, scanLimit),
-            facts: facts
+            scannedBytes: scanEnd,
+            facts: facts,
+            pendingBytes: pendingBytes
         )
         sessionFileCacheCounters.prefixScans += 1
         cacheLock.unlock()
         return facts
+    }
+
+    private func isCompleteJSONLine(_ line: String) -> Bool {
+        guard let data = line.data(using: .utf8),
+              (try? JSONSerialization.jsonObject(with: data)) is [String: Any] else {
+            return false
+        }
+        return true
+    }
+
+    private func parseSessionPrefixLine(_ line: String, into facts: inout SessionPrefixFacts) {
+        if facts.meta == nil {
+            facts.meta = parseSessionMeta(from: line)
+        }
+        if facts.runtime == nil {
+            facts.runtime = parseSessionRuntimeInfo(from: line)
+        }
+        if facts.title == nil {
+            facts.title = parseSessionTitle(from: line)
+        }
     }
 
     private func parseSessionTitle(from text: String) -> String? {
@@ -3018,6 +3193,24 @@ final class CodexUsageStore: @unchecked Sendable {
             }
             let data = try handle.read(upToCount: maxBytes) ?? Data()
             return String(decoding: data, as: UTF8.self)
+        } catch {
+            return nil
+        }
+    }
+
+    private func fileChunkData(from path: String, offset: UInt64, maxBytes: UInt64) -> Data? {
+        guard maxBytes > 0,
+              FileManager.default.fileExists(atPath: path) else {
+            return Data()
+        }
+
+        do {
+            let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
+            defer {
+                try? handle.close()
+            }
+            try handle.seek(toOffset: offset)
+            return try handle.read(upToCount: Int(maxBytes)) ?? Data()
         } catch {
             return nil
         }
@@ -4664,15 +4857,26 @@ private struct SessionFileCacheCounters {
 }
 
 private struct SessionPrefixFacts {
-    let meta: SessionMetaInfo?
-    let runtime: SessionRuntimeInfo?
-    let title: String?
+    var meta: SessionMetaInfo?
+    var runtime: SessionRuntimeInfo?
+    var title: String?
 }
 
 private struct SessionPrefixFactsCache {
     let signature: FileSignature
     let scannedBytes: UInt64
     let facts: SessionPrefixFacts
+    let pendingBytes: Data
+}
+
+private struct ThreadTableColumnsCache {
+    let signatures: [FileSignature]
+    let columns: Set<String>
+}
+
+private struct SessionIndexThreadNamesCache {
+    let signature: FileSignature
+    let names: [String: String]
 }
 
 private struct SessionRateLimitCache {

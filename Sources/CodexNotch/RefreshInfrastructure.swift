@@ -211,6 +211,31 @@ struct RefreshCadenceDecision: Equatable, Sendable {
     let reasonCode: String
 }
 
+/// Cadence for the process-performance sampler. This is deliberately a pure
+/// value policy so the VM can be tested without timers, notifications, or
+/// ProcessInfo globals.
+enum PerformanceCadencePolicy {
+    static let visibleInterval: TimeInterval = 5
+    static let hiddenOptInInterval: TimeInterval = 60
+    static let constrainedInterval: TimeInterval = 300
+
+    static func interval(
+        isVisible: Bool,
+        samplingEnabled: Bool,
+        environment: RefreshEnvironment
+    ) -> TimeInterval? {
+        guard isVisible || samplingEnabled else { return nil }
+        if environment.isConstrained {
+            return constrainedInterval
+        }
+        return isVisible ? visibleInterval : hiddenOptInInterval
+    }
+
+    static func timerTolerance(for interval: TimeInterval) -> TimeInterval {
+        min(max(interval * 0.1, 1), 30)
+    }
+}
+
 enum AdaptiveRefreshPolicy {
     static let localVisibleRunning: TimeInterval = 15
     static let localHiddenRunning: TimeInterval = 30

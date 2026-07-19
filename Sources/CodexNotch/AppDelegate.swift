@@ -430,6 +430,11 @@ private final class StatusItemHostingView<Content: View>: NSHostingView<Content>
     }
 }
 
+private final class DetailKeyboardPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
 @MainActor
 final class NotchOverlayController {
     private let settings = CodexNotchSettings()
@@ -458,7 +463,6 @@ final class NotchOverlayController {
         analyticsViewModel: analyticsViewModel,
         onRefresh: { [weak self] in
             self?.viewModel.refreshAll()
-            self?.analyticsViewModel.refresh(force: true)
         }
     )
     private var cancellables: Set<AnyCancellable> = []
@@ -468,6 +472,7 @@ final class NotchOverlayController {
     private var overlayVerticalPosition: CGFloat = 0
     private var dragSession: OverlayDragSession?
     private var selectedDetailPage: DetailPage = .codex
+    private var selectedAnalyticsMode: AnalyticsDataMode = .official
     private var menuBarCompatibility = MenuBarRevealCompatibility(barbeeIsRunning: false)
     private var statusItem: NSStatusItem?
     private var statusItemHostingView: NSView?
@@ -695,7 +700,7 @@ final class NotchOverlayController {
             return detailWindow
         }
 
-        let panel = NSPanel(
+        let panel = DetailKeyboardPanel(
             contentRect: NSRect(x: 0, y: 0, width: IslandMetrics.width, height: currentDetailHeight),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
@@ -732,7 +737,6 @@ final class NotchOverlayController {
             },
             onLocalRefresh: { [weak self] in
                 self?.viewModel.refreshAll()
-                self?.analyticsViewModel.refresh(force: true)
             },
             onRemoteRefresh: { [weak self] in
                 self?.remoteViewModel.refreshNow()
@@ -748,6 +752,9 @@ final class NotchOverlayController {
             },
             onPageSelected: { [weak self] page in
                 self?.selectDetailPage(page)
+            },
+            onAnalyticsModeSelected: { [weak self] mode in
+                self?.selectAnalyticsMode(mode)
             }
         )
         let detailHostingView = NSHostingView(rootView: detailView)
@@ -991,9 +998,36 @@ final class NotchOverlayController {
         }
     }
 
+    private func selectAnalyticsMode(_ mode: AnalyticsDataMode) {
+        let changed = selectedAnalyticsMode != mode
+        selectedAnalyticsMode = mode
+        guard changed,
+              overlayState.isExpanded,
+              selectedDetailPage == .analytics else {
+            return
+        }
+        refreshSelectedAnalyticsModeWhenPresented()
+    }
+
+    private func refreshSelectedAnalyticsModeWhenPresented() {
+        switch selectedAnalyticsMode.refreshSource {
+        case .officialWebPage:
+            analyticsViewModel.startBrowserSession()
+            analyticsViewModel.refreshWhenPresented()
+        case .publishedLocalCostSnapshot:
+            analyticsViewModel.setOfficialAnalyticsVisible(false)
+            viewModel.loadPublishedCostUsageWhenPresented()
+        }
+    }
+
     private func updateSourceVisibility() {
         let detailIsVisible = overlayState.isExpanded
         let codexDetailIsVisible = detailIsVisible && selectedDetailPage == .codex
+        analyticsViewModel.setOfficialAnalyticsVisible(
+            detailIsVisible
+                && selectedDetailPage == .analytics
+                && selectedAnalyticsMode.refreshSource == .officialWebPage
+        )
         viewModel.setDetailVisible(codexDetailIsVisible)
         viewModel.setSourceVisible(codexDetailIsVisible)
         performanceViewModel.setDetailVisible(detailIsVisible && selectedDetailPage == .performance)
@@ -1006,9 +1040,8 @@ final class NotchOverlayController {
         switch selectedDetailPage {
         case .codex:
             viewModel.refreshWhenPresented()
-            analyticsViewModel.refreshWhenPresented()
         case .analytics:
-            analyticsViewModel.refreshWhenPresented()
+            refreshSelectedAnalyticsModeWhenPresented()
         case .performance:
             performanceViewModel.refreshWhenPresented()
         case .skillInsights:

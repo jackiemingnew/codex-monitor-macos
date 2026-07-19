@@ -96,8 +96,8 @@ paths, or raw SQLite output.
 ## Opt-in Performance History
 
 The **Background performance monitoring** setting defaults off. When enabled,
-the app samples every five seconds even while the HUD detail panel is closed and
-writes a separate bounded history to:
+the app samples every 60 seconds while the HUD detail panel is closed and writes
+a separate bounded history to:
 
 ```text
 ~/Library/Logs/CodexMonitor/performance-samples.jsonl
@@ -105,7 +105,9 @@ writes a separate bounded history to:
 
 The file is capped at 4 MiB with one rotated backup, uses `0600`, and lives in a
 `0700` directory. Turning the setting off stops new sampling without deleting
-the existing evidence.
+the existing evidence. The visible Performance detail samples every five
+seconds even when background history is disabled. Low Power Mode or
+serious/critical thermal pressure slows either allowed cadence to five minutes.
 
 Read a live one-shot snapshot:
 

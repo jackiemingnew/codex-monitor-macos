@@ -91,7 +91,7 @@ private struct CodexWebAnalyticsBrowserView: View {
 }
 
 @MainActor
-final class CodexWebAnalyticsBrowserWindowController {
+final class CodexWebAnalyticsBrowserWindowController: NSObject, NSWindowDelegate {
     private let provider: CodexWebAnalyticsProvider
     private let viewModel: CodexWebAnalyticsViewModel
     private var window: NSWindow?
@@ -99,11 +99,13 @@ final class CodexWebAnalyticsBrowserWindowController {
     init(provider: CodexWebAnalyticsProvider, viewModel: CodexWebAnalyticsViewModel) {
         self.provider = provider
         self.viewModel = viewModel
+        super.init()
     }
 
     func show() {
         let window = window ?? makeWindow()
         self.window = window
+        provider.cancelIdleRelease()
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -121,7 +123,19 @@ final class CodexWebAnalyticsBrowserWindowController {
         window.title = "Codex Analytics 网页"
         window.contentView = hostingView
         window.isReleasedWhenClosed = false
+        window.delegate = self
         window.minSize = NSSize(width: 900, height: 620)
         return window
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard let closingWindow = notification.object as? NSWindow,
+              closingWindow === window else { return }
+        // Release the hosting hierarchy immediately. The provider keeps the
+        // WebsiteDataStore-backed web view only until its idle grace period.
+        closingWindow.contentView = nil
+        closingWindow.delegate = nil
+        window = nil
+        provider.scheduleIdleRelease(after: 30 * 60)
     }
 }
