@@ -447,10 +447,13 @@ final class NotchOverlayController {
     private lazy var performanceViewModel = PerformanceMonitorViewModel(settings: settings)
     private lazy var analyticsProvider = CodexWebAnalyticsProvider()
     private lazy var analyticsViewModel = CodexWebAnalyticsViewModel(provider: analyticsProvider)
+    // Kept by the overlay controller so its 21:00 local scheduler is independent of page visibility.
+    private lazy var routingTelemetryViewModel = RoutingTelemetryViewModel()
     private lazy var analyticsBrowserController = CodexWebAnalyticsBrowserWindowController(
         provider: analyticsProvider,
         viewModel: analyticsViewModel
     )
+    private lazy var routingAssessmentReportController = RoutingAssessmentReportWindowController()
     private let overlayState = OverlayState()
     private let window: NSPanel
     private var detailWindow: NSPanel?
@@ -504,6 +507,8 @@ final class NotchOverlayController {
         _ = skillInsightsCoordinator
         _ = performanceViewModel
         _ = analyticsViewModel
+        // Instantiate at controller lifetime, not when the Analytics page first becomes visible.
+        _ = routingTelemetryViewModel
         updateFrames()
     }
 
@@ -722,6 +727,7 @@ final class NotchOverlayController {
         let detailView = DetailPanelView(
             viewModel: viewModel,
             analyticsViewModel: analyticsViewModel,
+            routingTelemetryViewModel: routingTelemetryViewModel,
             performanceViewModel: performanceViewModel,
             skillInsightsCoordinator: skillInsightsCoordinator,
             remoteViewModel: remoteViewModel,
@@ -734,6 +740,9 @@ final class NotchOverlayController {
             },
             onAnalyticsBrowser: { [weak self] in
                 self?.analyticsBrowserController.show()
+            },
+            onOpenAssessmentReport: { [weak self] assessment in
+                self?.routingAssessmentReportController.show(assessment: assessment)
             },
             onLocalRefresh: { [weak self] in
                 self?.viewModel.refreshAll()
@@ -1017,6 +1026,9 @@ final class NotchOverlayController {
         case .publishedLocalCostSnapshot:
             analyticsViewModel.setOfficialAnalyticsVisible(false)
             viewModel.loadPublishedCostUsageWhenPresented()
+        case .routingTelemetry:
+            analyticsViewModel.setOfficialAnalyticsVisible(false)
+            routingTelemetryViewModel.loadPublishedSnapshot()
         }
     }
 

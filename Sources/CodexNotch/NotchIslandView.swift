@@ -306,6 +306,7 @@ private struct CollapsedMetricRow: View {
 struct DetailPanelView: View {
     @ObservedObject var viewModel: UsageViewModel
     @ObservedObject var analyticsViewModel: CodexWebAnalyticsViewModel
+    @ObservedObject var routingTelemetryViewModel: RoutingTelemetryViewModel
     @ObservedObject var performanceViewModel: PerformanceMonitorViewModel
     @ObservedObject var skillInsightsCoordinator: SkillInsightsFeatureCoordinator
     @ObservedObject var remoteViewModel: RemoteMonitorViewModel
@@ -315,6 +316,7 @@ struct DetailPanelView: View {
     @ObservedObject var settings: CodexNotchSettings
     let onSettings: () -> Void
     let onAnalyticsBrowser: () -> Void
+    let onOpenAssessmentReport: (RoutingAssessment) -> Void
     let onLocalRefresh: () -> Void
     let onRemoteRefresh: () -> Void
     let onNewAPIRefresh: () -> Void
@@ -458,7 +460,11 @@ struct DetailPanelView: View {
         case .codex:
             "Codex Monitor"
         case .analytics:
-            analyticsMode == .official ? "官方 Analytics" : "本地 Token Analytics"
+            switch analyticsMode {
+            case .official: "官方 Analytics"
+            case .localTokens: "本地 Token Analytics"
+            case .routing: "路由监测"
+            }
         case .performance:
             "性能诊断"
         case .skillInsights:
@@ -479,7 +485,11 @@ struct DetailPanelView: View {
         case .codex:
             return snapshot.isRunning ? "Running" : "Idle"
         case .analytics:
-            return analyticsMode == .official ? analyticsViewModel.state.label : localAnalyticsStatus
+            switch analyticsMode {
+            case .official: return analyticsViewModel.state.label
+            case .localTokens: return localAnalyticsStatus
+            case .routing: return routingTelemetryViewModel.manualState == .assessing ? "评估中" : routingTelemetryViewModel.dailyState.label
+            }
         case .performance:
             if performanceViewModel.backgroundMonitoringEnabled {
                 return "记录中"
@@ -509,7 +519,11 @@ struct DetailPanelView: View {
         case .codex:
             snapshot.isRunning ? MonitorTheme.running : MonitorTheme.textTertiary
         case .analytics:
-            analyticsMode == .official ? analyticsStatusColor : localAnalyticsStatusColor
+            switch analyticsMode {
+            case .official: analyticsStatusColor
+            case .localTokens: localAnalyticsStatusColor
+            case .routing: routingTelemetryStatusColor
+            }
         case .performance:
             performanceStatusColor
         case .skillInsights:
@@ -560,9 +574,11 @@ struct DetailPanelView: View {
         case .codex:
             viewModel.isRefreshing || analyticsViewModel.isRefreshing
         case .analytics:
-            analyticsMode == .official
-                ? analyticsViewModel.isRefreshing
-                : viewModel.isCostUsageRefreshing
+            switch analyticsMode {
+            case .official: analyticsViewModel.isRefreshing
+            case .localTokens: viewModel.isCostUsageRefreshing
+            case .routing: routingTelemetryViewModel.dailyState == .loading || routingTelemetryViewModel.manualState == .assessing
+            }
         case .performance:
             performanceViewModel.isRefreshing
         case .skillInsights:
@@ -583,7 +599,11 @@ struct DetailPanelView: View {
         case .codex:
             "刷新 Codex"
         case .analytics:
-            analyticsMode == .official ? "刷新官方 Analytics" : "刷新本地 Token"
+            switch analyticsMode {
+            case .official: "刷新官方 Analytics"
+            case .localTokens: "刷新本地 Token"
+            case .routing: "刷新路由监测（轻量扫描）"
+            }
         case .performance:
             "立即采样性能"
         case .skillInsights:
@@ -644,10 +664,10 @@ struct DetailPanelView: View {
         case .codex:
             onLocalRefresh()
         case .analytics:
-            if analyticsMode == .official {
-                analyticsViewModel.refresh(force: true)
-            } else {
-                viewModel.refreshLocalTokenAnalytics()
+            switch analyticsMode {
+            case .official: analyticsViewModel.refresh(force: true)
+            case .localTokens: viewModel.refreshLocalTokenAnalytics()
+            case .routing: routingTelemetryViewModel.refreshLight()
             }
         case .performance:
             performanceViewModel.refreshNow()
@@ -710,11 +730,13 @@ struct DetailPanelView: View {
                         viewModel: analyticsViewModel,
                         onOpenBrowser: onAnalyticsBrowser
                     )
-                } else {
+                } else if analyticsMode == .localTokens {
                     LocalTokenAnalyticsView(
                         summary: snapshot.costUsage,
                         isEnabled: settings.showPeriodUsage
                     )
+                } else {
+                    RoutingTelemetryView(viewModel: routingTelemetryViewModel, onOpenAssessmentReport: onOpenAssessmentReport)
                 }
             }
             .frame(maxHeight: .infinity, alignment: .top)
@@ -767,6 +789,22 @@ struct DetailPanelView: View {
             MonitorTheme.radarBaseline
         case .loginRequired, .unavailable:
             MonitorTheme.textTertiary
+        }
+    }
+
+    private var routingTelemetryStatusColor: Color {
+        if routingTelemetryViewModel.manualState == .assessing {
+            return MonitorTheme.warning
+        }
+        switch routingTelemetryViewModel.dailyState {
+        case .ready:
+            return MonitorTheme.healthy
+        case .partial, .stale:
+            return MonitorTheme.warning
+        case .loading:
+            return MonitorTheme.radarBaseline
+        case .empty, .unavailable:
+            return MonitorTheme.textTertiary
         }
     }
 

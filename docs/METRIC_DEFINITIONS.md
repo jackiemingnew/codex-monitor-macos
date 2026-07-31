@@ -50,6 +50,18 @@ Skill Insights, and opt-in performance diagnostics metrics. Any change that adds
 | `web.analytics.turns_by_model_daily_7d` | Daily Turns by model | visible `By model` Turns chart Tooltip rows | retain seven unique labeled days; complete aggregate must equal `web.analytics.turns_7d` | personal account; rolling 7-day web view |
 | `web.analytics.skills_by_skill_daily_7d` | Daily calls by Skill | visible `Skills used` chart Tooltip rows | retain seven unique labeled days; complete aggregate must equal `web.analytics.skills_used_7d` | personal account; rolling 7-day web view |
 | `web.analytics.report_quality` | Completeness of the visible web snapshot | KPI presence + Tooltip day/date coverage + independent sum checks | `COMPLETE` only when all three KPIs exist, the three charts cover the same seven dates, model/Surface totals equal Turns, and Skill totals equal Skills used; verified incomplete points remain visible as `PARTIAL` without synthetic zeroes; otherwise `UNAVAILABLE` | latest in-memory web snapshot |
+| `routing.daily.structure` | Daily-generated route snapshot | readonly latest `state_*.sqlite` `threads` + `thread_spawn_edges` | as-of preceding seven local-natural-days source/root/child counts and relevant edge count; orphan edges cover the full stored edge table, while cycle impact counts recent child threads whose ancestry reaches a cycle; points are not event buckets and must not be summed | daily snapshot history; display latest or trend |
+| `routing.child.metadata_coverage` | Child role/model/effort evidence coverage | readonly state SQLite child rows | covered only when all role, model, and effort are present; missing is explicit, including anonymous role-less Sol children | route window |
+| `routing.tokens.cumulative_and_delta` | Current cumulative route Tokens and adjacent-observation movement | readonly state SQLite + `routing-telemetry.sqlite` SHA-256 baseline | cumulative total and child subtotal; delta is current minus previous hashed baseline, rollback clamps to zero and makes quality partial; first baseline has no synthetic delta | route window |
+| `routing.child_roles.breakdown` | Child-agent burden by globally registered role | readonly state SQLite child rows + existing SHA-256 token baseline | exactly ten registered roles materialize in fixed order (`code-explorer`, `quick-implementer`, `implementer`, `terra-implementer`, `terra-high-implementer`, `terra-max-implementer`, `sol_ultra_terra`, `terra-reviewer`, `code-reviewer`, `commit-pusher`); each actual in-window edge child enters one bucket only by exact `agent_role`/`role` match. Non-matches or missing role enter one opaque nonzero-only unknown bucket; raw unknown values are never persisted. Per-bucket child count, cumulative tokens, adjacent delta, metadata-complete count, and exact registered model/Effort identity-match count reconcile to the child totals. Old payloads expose no breakdown rather than a synthetic empty array. | route window; snapshot-as-of only |
+| `routing.token_share.overall` | Overall child Token share | readonly state SQLite recent rows and all spawn edges | cumulative Tokens of every recent edge-child divided by cumulative Tokens of every recent row. This remains the broad structural ratio. | route window; snapshot-as-of only |
+| `routing.token_share.ultra_routing` | Strict Ultra-routing child Token share | readonly state SQLite recent rows and all spawn edges | strictly attributable Ultra-child cumulative Tokens divided by exact Ultra-root cumulative Tokens plus those child Tokens. Exact Ultra roots normalize to `gpt-5.6-sol` + `ultra`; exact Max roots are retained as aggregate context but excluded from this denominator. A child is eligible only when its full upward path is unique, acyclic, non-orphaned, and ends at a window-included exact Ultra root. Missing nodes, ambiguous parents, cycles, roots outside the window, or insufficient root metadata leave only the affected child unattributed and visible in the aggregate coverage counts; they are never forced into the Ultra numerator. Old payloads, duplicate IDs, or a zero strict denominator display unavailable (`--`), never `0%`. | route window; snapshot-as-of only |
+| `routing.token_share.ultra_daily_observed` | Strict Ultra-routing daily observed Token share | same-light-scan SHA-256 routing baselines plus aggregate root/child/other class and `last_seen` | local-day sum of strictly attributable child Token increases divided by the sum of exact Ultra-root and strictly attributable child increases. It is never derived by subtracting two cumulative snapshots. Every strict line must retain a matching baseline and class, have no rollback, class drift, or >48h absence; otherwise the day's evidence is incomplete and its share is unavailable. Max and other roots never enter this denominator. Multiple same-day light scans add their safe increases; old payloads and previously incomplete days remain incomplete. | local natural day; strict evidence only |
+| `routing.ultra_daily_guidance` | Local strict-delta operational guardrail | valid `routing.token_share.ultra_daily_observed` daily points | Token-weighted share across valid daily points only. The initial local bands are `<20%` low, `20%...35%` balanced, `>35%...50%` elevated, and `>50%` excessive; fewer than three valid days are observing, and no valid denominator is unavailable. | local operations only; not a health or outcome metric |
+| `routing.updated_span_proxy` | Created-to-updated timing proxy | readonly state SQLite timestamps | median of each recent thread `max(0, updated_at - created_at)`; not a true task execution interval | as-of route window |
+| `routing.verified_success_rate` | Verified task success rate | unavailable from route source | `UNVERIFIED`; state SQLite has no outcome evidence | never inferred |
+| `routing.token_per_verified_success` | Token per verified successful task | unavailable from route source | `UNVERIFIED`; requires verified outcome evidence | never inferred |
+| `routing.true_e2e_speedup` | True end-to-end parallelism speedup | unavailable from route source | `UNVERIFIED`; requires real start/end and outcome evidence | never inferred |
 | `skill.catalog.enabled_count` | Currently enabled Skill count | local Codex app-server `skills/list`; `PARTIAL` frontmatter fallback | `count(distinct stable_path_id) where enabled = true` | current catalog |
 | `skill.catalog.disabled_count` | Currently disabled Skill count | local Codex app-server `skills/list`; `PARTIAL` frontmatter fallback | `count(distinct stable_path_id) where enabled = false` | current catalog |
 | `skill.catalog.context_token_estimate` | Enabled catalog/context cost | enabled Skill `name` + `description` metadata from `skills/list` | `sum(ceil((name.characters + description.characters) / 4))` | current enabled catalog |
@@ -117,6 +129,12 @@ Skill Insights, and opt-in performance diagnostics metrics. Any change that adds
   must use a future independent metric if they become visible.
 - `period.*`, `daily.*`, `delta.*`, and `task.total_tokens` are parent-only.
   Subagent tokens must not be folded into a parent task or period delta.
+- `routing.child_roles.breakdown` is a structural token-burden attribution, not a
+  success rate, efficiency score, quality ranking, or proof of which model
+  executed the work. It never infers a registered role from model or effort.
+  Role changes within a thread cannot be separated from the current SQLite row,
+  so each as-of snapshot attributes that thread conservatively to its current
+  exact role metadata.
 - `local.model_tokens.*` is a separate complete-corpus metric. It aggregates the
   current and archived local JSONL inventory, including parent tasks and
   subagents, after fork and repeated-export deduplication. It must not be
@@ -380,6 +398,19 @@ Skill Insights, and opt-in performance diagnostics metrics. Any change that adds
   increment the oversized/partial metrics and therefore prevent `COMPLETE`.
 
 ## Output Contract
+
+- The native manual Routing Assessment Report deterministically interprets the
+  same aggregate `RoutingAssessment` as three states. Structure follows metric
+  quality and explicitly presents depth, orphan edges, and cycle impact.
+  Identity is `PARTIAL` for missing metadata, an unknown bucket, registered
+  role identity mismatches, or legacy `roleBuckets=nil`. Efficiency remains
+  `UNVERIFIED`: success rate, Token per verified success, and true E2E speedup
+  are never inferred from state SQLite.
+- A 30-day report's Token burden is the recency-window cumulative burden as of
+  assessment time; it is not 30-day consumption. Browser view is only a manual
+  action: it atomically replaces one local 0600 self-contained HTML file from
+  the aggregate report, then opens its file URL. It includes no raw IDs,
+  titles, prompts, or paths and uses no network, localhost, WebKit, or model.
 
 - Compact Swift JSON exposes cumulative totals as `cumulative_usage`.
 - Compact Swift JSON exposes recent rolling 20 day state totals as

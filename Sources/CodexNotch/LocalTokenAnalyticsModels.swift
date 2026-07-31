@@ -3,6 +3,7 @@ import Foundation
 enum AnalyticsDataMode: String, CaseIterable, Identifiable, Sendable {
     case official
     case localTokens
+    case routing
 
     var id: String { rawValue }
 
@@ -12,6 +13,8 @@ enum AnalyticsDataMode: String, CaseIterable, Identifiable, Sendable {
             "官方轮次"
         case .localTokens:
             "本地 Token"
+        case .routing:
+            "路由监测"
         }
     }
 
@@ -21,6 +24,8 @@ enum AnalyticsDataMode: String, CaseIterable, Identifiable, Sendable {
             .officialWebPage
         case .localTokens:
             .publishedLocalCostSnapshot
+        case .routing:
+            .routingTelemetry
         }
     }
 }
@@ -28,6 +33,7 @@ enum AnalyticsDataMode: String, CaseIterable, Identifiable, Sendable {
 enum AnalyticsRefreshSource: String, Equatable, Sendable {
     case officialWebPage
     case publishedLocalCostSnapshot
+    case routingTelemetry
 }
 
 enum LocalTokenAnalyticsPeriod: String, CaseIterable, Identifiable, Sendable {
