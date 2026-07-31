@@ -84,3 +84,25 @@ swiftc \
   -o "${BUILD_DIR}/CodexWebAnalyticsViewModelTests"
 
 "${BUILD_DIR}/CodexWebAnalyticsViewModelTests"
+
+swiftc \
+  -swift-version 6 \
+  -parse-as-library \
+  "${ROOT_DIR}/Sources/CodexNotch/RoutingTelemetryModels.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/RoutingAssessmentReport.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/RoutingTelemetryStore.swift" \
+  "${ROOT_DIR}/Tests/RoutingTelemetryTests/main.swift" \
+  -o "${BUILD_DIR}/RoutingTelemetryTests"
+
+"${BUILD_DIR}/RoutingTelemetryTests"
+
+swiftc \
+  -swift-version 6 \
+  -parse-as-library \
+  "${ROOT_DIR}/Sources/CodexNotch/RoutingTelemetryModels.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/RoutingTelemetryStore.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/RoutingTelemetryViewModel.swift" \
+  "${ROOT_DIR}/Tests/RoutingTelemetryViewModelTests/main.swift" \
+  -o "${BUILD_DIR}/RoutingTelemetryViewModelTests"
+
+"${BUILD_DIR}/RoutingTelemetryViewModelTests"
