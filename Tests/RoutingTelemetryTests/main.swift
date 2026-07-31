@@ -143,7 +143,7 @@ struct RoutingTelemetryTests {
         check(warm.days.last?.ultraTokenPartition?.dailyDeltaEvidenceComplete == false && warm.days.last?.ultraRoutingDailyObservedTokenShare == nil, "first strict observation must establish a baseline without fabricating a daily share")
         let nextDay = now.addingTimeInterval(24 * 3600)
         check(sqlite3_open(dailyDeltaSource.path, &db) == SQLITE_OK, "daily delta fixture should reopen")
-        exec(db, "UPDATE threads SET tokens_used = CASE id WHEN 'daily-ultra-root' THEN 130 WHEN 'daily-ultra-child' THEN 35 WHEN 'daily-max-root' THEN 9_000 WHEN 'daily-max-child' THEN 8_000 ELSE tokens_used END;")
+        exec(db, "UPDATE threads SET tokens_used = CASE id WHEN 'daily-ultra-root' THEN 130 WHEN 'daily-ultra-child' THEN 35 WHEN 'daily-max-root' THEN \(9_000) WHEN 'daily-max-child' THEN \(8_000) ELSE tokens_used END;")
         sqlite3_close(db); db = nil
         let firstDaily = try! dailyDeltaStore.lightScan(now: nextDay).days.last!
         check(firstDaily.ultraTokenPartition?.ultraRootDailyObservedTokenDelta == 30 && firstDaily.ultraTokenPartition?.attributedUltraChildDailyObservedTokenDelta == 15 && firstDaily.ultraTokenPartition?.dailyDeltaEvidenceComplete == true && firstDaily.ultraRoutingDailyObservedTokenShare == Double(15) / Double(45), "strict daily share must use same-scan hashed-baseline increases and exclude Max growth")
