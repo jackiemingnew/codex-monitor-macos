@@ -295,8 +295,17 @@ struct RoutingTelemetryTests {
         if failures.isEmpty { print("RoutingTelemetryTests: PASS") } else { failures.forEach { FileHandle.standardError.write(Data("FAIL: \($0)\n".utf8)) }; exit(1) }
     }
 
-    private static func exec(_ db: OpaquePointer?, _ sql: String) {
-        guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else { fatalError("fixture SQL failed") }
+    private static func exec(
+        _ db: OpaquePointer?,
+        _ sql: String,
+        file: StaticString = #fileID,
+        line: UInt = #line
+    ) {
+        let result = sqlite3_exec(db, sql, nil, nil, nil)
+        guard result == SQLITE_OK else {
+            let message = db.map { String(cString: sqlite3_errmsg($0)) } ?? "database unavailable"
+            fatalError("fixture SQL failed at \(file):\(line) [\(result)]: \(message)")
+        }
     }
 
     private static func scalarInt(_ url: URL, _ sql: String) -> Int {
