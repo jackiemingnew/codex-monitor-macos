@@ -9,9 +9,10 @@ APP_BUILD_NUMBER="${APP_BUILD_NUMBER:-1}"
 BUNDLE_ID="com.alight.codexnotch"
 CODE_SIGN_IDENTITY="${CODE_SIGN_IDENTITY:--}"
 DIST_DIR="$ROOT_DIR/dist"
-APP_DIR="$DIST_DIR/$APP_NAME.app"
-DMG_STAGE_DIR="$DIST_DIR/dmg-stage"
-PACKAGE_STAGE_DIR="$DIST_DIR/package-stage"
+APP_DIR="$DIST_DIR/$APP_NAME.app.noindex"
+LEGACY_APP_DIR="$DIST_DIR/$APP_NAME.app"
+DMG_STAGE_DIR="$DIST_DIR/dmg-stage.noindex"
+PACKAGE_STAGE_DIR="$DIST_DIR/package-stage.noindex"
 ICON_BUILD_DIR="$DIST_DIR/icon-build"
 ICON_PATH="$ICON_BUILD_DIR/AppIcon.icns"
 
@@ -26,6 +27,7 @@ fi
 
 cd "$ROOT_DIR"
 mkdir -p "$DIST_DIR"
+rm -rf "$LEGACY_APP_DIR"
 swift "$ROOT_DIR/scripts/generate-app-icon.swift" "$ICON_BUILD_DIR"
 find "$DIST_DIR" -maxdepth 1 -type f \( -name "$APP_NAME.dmg" -o -name "$APP_NAME-*.dmg" -o -name "$PACKAGE_NAME-*.dmg" \) -delete
 rm -rf "$DMG_STAGE_DIR" "$PACKAGE_STAGE_DIR"

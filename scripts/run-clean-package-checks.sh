@@ -49,6 +49,11 @@ unset CODEXRADAR_API_TOKEN
 "$ROOT_DIR/scripts/run-regression-tests.sh"
 "$ROOT_DIR/scripts/build-app.sh"
 
+[[ ! -e "$ROOT_DIR/dist/codex监测.app" ]] || {
+  echo "Spotlight-visible host app must not remain in dist" >&2
+  exit 1
+}
+
 expected_version="$(tr -d '[:space:]' < "$ROOT_DIR/VERSION")"
 expected_bundle_id="$(sed -n 's/^BUNDLE_ID="\([^"]*\)"/\1/p' "$ROOT_DIR/scripts/build-app.sh")"
 if [[ -z "$expected_version" || -z "$expected_bundle_id" ]]; then
@@ -108,7 +113,7 @@ shopt -u nullglob
 validate_dmg "${arm64_dmgs[0]}" "arm64" "arm64"
 validate_dmg "${amd64_dmgs[0]}" "x86_64" "amd64"
 
-host_app="$ROOT_DIR/dist/codex监测.app"
+host_app="$ROOT_DIR/dist/codex监测.app.noindex"
 host_binary="$host_app/Contents/MacOS/CodexNotch"
 host_plist="$host_app/Contents/Info.plist"
 [[ -x "$host_binary" ]] || { echo "Missing host app executable" >&2; exit 1; }
