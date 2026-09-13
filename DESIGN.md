@@ -2,7 +2,7 @@
 
 ## Intent
 
-Codex Monitor is a compact macOS HUD for people who keep Codex running all day. The visual system should feel like a native command palette attached to the MacBook notch: dark, calm, precise, and easy to scan while work is in progress.
+Codex Monitor is a compact macOS HUD for people who keep Codex running all day. The collapsed capsule stays dark for desktop contrast; the expanded 520pt detail panel is opaque, calm, and precise in both light and dark appearances. Detail appearance defaults to following macOS, with explicit light and dark overrides.
 
 The product is not a marketing site. Do not use oversized hero typography, decorative gradient backgrounds, brand mascots, or landing-page card stacks inside the app.
 
@@ -10,53 +10,55 @@ The product is not a marketing site. Do not use oversized hero typography, decor
 
 This project uses public `DESIGN.md` systems from `VoltAgent/awesome-design-md` as reference material only.
 
-- Primary reference: Raycast-style command-palette dark chrome.
-- Constraint reference: Linear-style software density, hairline borders, and restrained accent usage.
+- Primary reference: Linear-style software density, hairline separators, and restrained accent usage, adapted to native macOS rather than its website or dark palette.
+- Capsule reference: Raycast-style command-palette dark chrome, confined to the collapsed HUD.
 - Do not copy Raycast or Linear brand identity, proprietary marks, red brand stripes, lavender brand treatment, marketing CTAs, or website-specific layout patterns.
 
 ## Atmosphere
 
 - Native macOS utility, not web app chrome.
-- HUD first: translucent near-black panels, compact tables, small status chips, and restrained depth.
+- HUD first: a translucent near-black collapsed capsule and an opaque warm-white or charcoal detail panel; compact tables and restrained depth.
 - The floating HUD is the default identity. The optional menu-bar mode removes the pill surface, uses a high-contrast custom monitor mark, and prioritizes the remaining 5-hour quota; full metrics remain available in the detail panel.
 - Developer tool: values, quota windows, task rows, and error states must be more legible than decorative.
-- Quiet polish: surface hierarchy should come from opacity, hairline borders, and spacing, not from colorful decoration.
+- Quiet polish: detail hierarchy comes from spacing, typography and separators, not translucent grey layers or decorative gradients.
 
 ## Color Roles
 
 ### HUD Surfaces
 
 - `hud.pill`: near-black translucent surface for the collapsed notch capsule.
-- `hud.detail`: near-black translucent surface for the expanded panel.
-- `hud.section`: subtle white overlay for grouped areas.
-- `hud.row`: subtle white overlay for rows and compact cards.
-- `hud.rowSelected`: stronger white overlay for selected rows.
-- `hud.control`: compact controls, pills, and filters.
-- `hud.controlSelected`: active segmented control or selected pill.
-- `hud.hairline`: low-contrast white border.
-- `hud.separator`: low-contrast separator line.
+- `hud.detail`: opaque `#F8F9F7` in light and `#1E2024` in dark, with no visual-effect material behind detail content.
+- `hud.section` / `hud.row`: quiet neutral surfaces; dark elevated content uses `#25282D`. Prefer separators to nested cards.
+- `hud.rowSelected`: pale neutral hover/selection, never a full green running row.
+- `hud.control`: neutral compact controls.
+- `hud.controlSelected`: pale blue `#EAF0FF` with blue `#365DC7` labels in light; muted navy `#263853` with `#8AACFF` labels in dark.
+- `hud.hairline` / `hud.separator`: subtle neutral-grey boundaries.
+- Collapsed-only tokens must preserve their original white-on-dark contrast independently of these detail tokens.
 
 ### Text
 
-- `text.primary`: high-contrast white for labels and important values.
-- `text.secondary`: muted white for table headers and secondary metadata.
-- `text.tertiary`: faint white for helper text and disabled values.
+- `text.primary`: `#252A31` in light, soft off-white `#E7EAF0` in dark, for labels and important values.
+- `text.secondary`: `#616B76` in light, `#A8B0BC` in dark, for table headers and secondary metadata.
+- `text.tertiary`: sufficiently contrasting neutral grey; do not fade meaningful metadata below readable contrast.
 
 ### Status
 
 - `status.healthy`: quota available, idle OK, successful remote account.
-- `status.running`: active work, token activity, informational positive state.
+- `status.running`: restrained blue, represented with a dot plus text, not a broad tinted row.
 - `status.warning`: quota approaching threshold or stale data.
 - `status.critical`: error, exhausted quota, invalid credentials.
 - `status.neutral`: inactive, unknown, or disabled.
 
 Use status color only where it communicates state. Avoid broad colored backgrounds.
 
+Dark healthy/warning/critical colors are `#78C99A`, `#E9B86A`, and `#F18A8A`. Dark controls use `#2B3037`, separators `#3B414B`, and progress tracks `#3C444F`. Meaningful text must maintain at least 4.5:1 contrast on its actual surface. Dark mode is a separately tuned palette, not an inversion or the old translucent grey stack.
+
 ## Typography
 
 Use system fonts. The app should inherit macOS sharpness and rendering.
 
-- HUD title: 16px, semibold.
+- Detail title: 20pt, semibold; main quota/Today values: 34pt, medium.
+- Task title/value: 13pt; metadata: 11pt. Keep monospaced digits and aligned numeric columns.
 - HUD labels: 10-11px, semibold.
 - HUD values: 10-17px, semibold, rounded design for numbers where useful.
 - Settings title: 18px, bold.
@@ -94,8 +96,8 @@ Do not scale font size with viewport width. Do not use negative letter spacing.
 
 ### Detail Panel
 
-- Treat it as a command-palette panel with tabs.
-- Use subtle section backgrounds and hairline borders.
+- Treat it as one native utility panel with tabs and two appearance palettes. Apply the selected appearance at the detail window boundary, so native controls, all detail pages, charts, and tooltips agree. Settings remain system-semantic, the menu-bar mark follows its existing policy, and the collapsed capsule remains dark.
+- Use separators and whitespace before adding section backgrounds or borders.
 - Keep `Codex`, `Skills`, `Codex Radar`, `CLIProxyAPI`, `NewAPI`, and `Sub2API` visually related.
 - Keep Skill Insights in the expanded detail panel; never add its weekly metrics
   to the collapsed capsule or menu-bar item.
@@ -128,17 +130,31 @@ Do not scale font size with viewport width. Do not use negative letter spacing.
 - Healthy quota is green; warning and critical states take over only at thresholds.
 - `Today`, 5h, 7d, and 30d values should scan as numbers first, explanations second.
 - Keep reset-credit availability in the existing provenance row as tertiary text; do not add a new quota card or increase panel height.
-- Show API-equivalent cost beneath the existing Today/7d/30d token values in the fixed 44px footer. Use tertiary text, monospaced digits, and scaling for long amounts.
+- Place weekly quota and Today Token side by side at the top; subordinate 7d/30d totals below Today. Keep API-equivalent costs in an accessible disclosure labeled `API 等值，非订阅账单`.
 - Show `回填中` instead of a monetary subtotal until the complete local history snapshot is ready. Preserve the last complete amount during later incremental scans; append `*` only when a complete snapshot contains unpriced models. Explain the fact that this is not a subscription bill through help and accessibility text rather than permanent chrome.
-- Once that complete snapshot exists, use its Today/7d/30d token buckets in the footer as well, so the visible Token and cost figures share CodexBar-compatible lineage accounting. Keep CLI/Node/JSON token contracts unchanged.
+- Once that complete snapshot exists, use its Today/7d/30d token buckets, so Token and cost figures retain their existing lineage accounting. Keep CLI/Node/JSON token contracts unchanged.
 - Keep pace language deterministic and compact: either the current rate lasts
   until reset or it has a projected exhaustion time. Hide pace when inputs are
   insufficient rather than implying precision.
 - Show quota source and freshness as secondary provenance. Never expose paths,
   account identifiers, credentials, prompts, or tool payloads.
 
+### Task Table And Evidence
+
+- Default to five roots in the existing Store order. `查看全部` only expands the roots already in the snapshot; it must not trigger a new scan or imply that query-limited history is exhaustive.
+- Use two-line rows: task title with status metadata; Today Token with one-decimal whole-day share; lifetime Token in its own column. Remove green left stripes and full-row running tints.
+- Published Today includes attributed child agents only when `hasReconciledTodayLedger` is true. Otherwise visibly label the existing local estimate. Never present the fallback as a reconciled ledger.
+- Lifetime is the existing thread cumulative counter, not a new root-plus-child sum. Explain that distinction in help and VoiceOver; do not alter or inflate the data to make Today smaller than lifetime.
+- If a reconciled ledger contains Token outside the available root list, an expanded `其他本地记录` summary may show the exact remainder. It is not another task and has no lifetime total. Never label known omitted roots as un-attributed.
+- Unknown Token is `--`, real zero is `0`, and zero/unknown share denominators show `--` with `暂无占比`. Display one decimal for 万/亿, preserving one decimal for 亿 and handling rounding carry with integer arithmetic. Existing public compact formatters remain unchanged.
+- Exact integer Token counts and the real scope must remain available in help and accessibility text.
+- AGY quota availability and Sidecar health remain independent. Existing cache timestamps, unavailable states and official-login failures must not be converted into healthy values by presentation.
+- This redesign adds no provider calls, timers, scanners, permissions, notifications or model invocations.
+
 ### Settings
 
+- Offer only `跟随系统` (default), `浅色`, and `深色` for `详情外观`, using the existing draft/save/cancel flow. Follow macOS appearance instead of maintaining a separate schedule or changing global macOS preferences.
+- Appearance changes must not create a new timer, scanner, network request, model call, or data cache. Use native appearance propagation; do not recreate the detail view or reset selected tabs/disclosures when switching.
 - Settings may use macOS semantic colors so the window remains native in light and dark mode.
 - Settings should share radius, typography, and hierarchy tokens with the HUD where practical.
 - Sidebar selection should be subtle and precise, not a bright brand block.

@@ -201,7 +201,7 @@ private struct LocalTokenQualityBadge: View {
             .foregroundStyle(color)
             .padding(.horizontal, 5)
             .padding(.vertical, 2)
-            .background(color.opacity(0.14), in: Capsule())
+            .background(MonitorTheme.sectionFill, in: Capsule())
     }
 }
 
@@ -244,7 +244,7 @@ private struct LocalTokenSummaryCard: View {
                     Text("Token")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(MonitorTheme.textSecondary)
-                    Text(Formatters.compactTokensEnglish(report.totalTokens))
+                    Text(HUDTokenFormatter.compact(report.totalTokens))
                         .font(.system(size: 24, weight: .medium, design: .rounded))
                         .foregroundStyle(MonitorTheme.textPrimary)
                         .monospacedDigit()
@@ -342,7 +342,7 @@ private struct LocalTokenStackedTrendChart: View {
                         AxisGridLine().foregroundStyle(MonitorTheme.separator.opacity(0.55))
                         AxisValueLabel {
                             if let tokens = value.as(Int.self) {
-                                Text(Formatters.compactTokensEnglish(tokens))
+                                Text(HUDTokenFormatter.compact(tokens))
                                     .font(.system(size: 8))
                                     .foregroundStyle(MonitorTheme.textTertiary)
                             }
@@ -663,7 +663,7 @@ private struct LocalTokenDayTooltip: View {
         .foregroundStyle(MonitorTheme.textSecondary)
         .padding(MonitorTheme.Spacing.row)
         .frame(width: 214)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous))
+        .background(MonitorTheme.routingTooltipSurface, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous)
                 .stroke(MonitorTheme.panelStroke, lineWidth: MonitorTheme.Stroke.hairline)
@@ -755,7 +755,7 @@ private struct LocalTokenRankingRow: View {
             Spacer(minLength: MonitorTheme.Spacing.row)
 
             VStack(alignment: .trailing, spacing: 1) {
-                Text(Formatters.compactTokensEnglish(usage.totalTokens))
+                Text(HUDTokenFormatter.compact(usage.totalTokens))
                     .font(.system(size: 11, weight: .semibold, design: .rounded))
                     .foregroundStyle(MonitorTheme.textPrimary)
                     .monospacedDigit()

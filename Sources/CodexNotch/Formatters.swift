@@ -60,7 +60,10 @@ enum Formatters {
 
     static func apiEquivalentCost(_ window: CostEstimateWindow) -> String {
         guard let usd = window.usd, usd.isFinite, usd >= 0 else {
-            return window.isPartial ? "回填中" : "--"
+            guard window.isPartial else {
+                return "--"
+            }
+            return window.tokenCount == nil ? "回填中" : "未定价"
         }
 
         let amount: String
@@ -93,7 +96,11 @@ enum Formatters {
             "不含 Priority、区域溢价和工具调用费。"
         ]
         if window.usd == nil, window.isPartial {
-            parts.append("正在后台扫描完整本地历史；完成前不发布局部金额。")
+            if window.tokenCount == nil {
+                parts.append("正在后台扫描完整本地历史；完成前不发布局部金额。")
+            } else {
+                parts.append("Token 已完整，但当前模型没有可确认的本地定价；不把未定价 Token 计入金额。")
+            }
         } else if window.isPartial {
             parts.append("带 * 表示窗口包含未知模型；当前金额只统计可确认定价的模型。")
         }

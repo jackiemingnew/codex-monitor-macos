@@ -15,8 +15,15 @@ struct RoutingTelemetryView: View {
         points.last
     }
 
-    private var dailyObservationPoints: [RoutingDailyMetric] {
-        points.filter { $0.ultraRoutingDailyObservedTokenShare != nil }
+    private var hasDailyObservation: Bool {
+        points.contains {
+            $0.routingDailyObservedTokenShare != nil
+                || $0.ultraRoutingDailyObservedTokenShare != nil
+        }
+    }
+
+    private var routingGuidance: RoutingDeltaGuidance {
+        RoutingDeltaGuidance.evaluate(points)
     }
 
     private var ultraGuidance: RoutingUltraDeltaGuidance {
@@ -28,7 +35,7 @@ struct RoutingTelemetryView: View {
             LazyVStack(alignment: .leading, spacing: MonitorTheme.Spacing.row) {
                 sourceStrip
                 periodPicker
-                ultraGuidanceCard
+                routingGuidanceCard
                 trend
                 moreDataButton
                 if showMoreData {
@@ -55,14 +62,14 @@ struct RoutingTelemetryView: View {
                     .foregroundStyle(MonitorTheme.textSecondary)
                 Text(sourceStatusText)
                     .font(.system(size: 8.5))
-                    .foregroundStyle(MonitorTheme.textTertiary)
+                    .foregroundStyle(MonitorTheme.textSecondary)
             }
             Spacer()
             Text(viewModel.dailyState.label)
                 .font(.system(size: 8.5, weight: .bold, design: .rounded))
                 .foregroundStyle(statusColor)
                 .padding(5)
-                .background(statusColor.opacity(0.15), in: Capsule())
+                .background(MonitorTheme.sectionFill, in: Capsule())
         }
         .padding(.horizontal, MonitorTheme.Spacing.row)
         .frame(height: 42)
@@ -90,79 +97,105 @@ struct RoutingTelemetryView: View {
         .background(MonitorTheme.controlFill, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous))
     }
 
-    private var ultraGuidanceCard: some View {
+    private var routingGuidanceCard: some View {
         VStack(alignment: .leading, spacing: MonitorTheme.Spacing.inline) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Ultra 路由强度")
-                        .font(.system(size: 11.5, weight: .semibold))
-                    Text("严格归因的新增 Token 占比")
-                        .font(.system(size: 8.5))
-                        .foregroundStyle(MonitorTheme.textTertiary)
-                }
-                Spacer()
-                Text(ultraGuidanceStateLabel)
-                    .font(.system(size: 8.5, weight: .bold, design: .rounded))
-                    .foregroundStyle(ultraGuidanceColor)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(ultraGuidanceColor.opacity(0.14), in: Capsule())
+            VStack(alignment: .leading, spacing: 1) {
+                Text("多代理路由强度")
+                    .font(.system(size: 11.5, weight: .semibold))
+                Text("每日新增 Token：严格归因子任务 ÷（对应根任务＋子任务）")
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(MonitorTheme.textSecondary)
             }
 
-            if let share = ultraGuidance.weightedShare {
-                HStack(alignment: .firstTextBaseline, spacing: MonitorTheme.Spacing.row) {
-                    Text(percent(share))
-                        .font(.system(size: 24, weight: .bold, design: .rounded))
-                        .foregroundStyle(ultraGuidanceColor)
-                        .monospacedDigit()
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("建议带 20–35%")
-                            .font(.system(size: 8.5, weight: .semibold))
-                            .foregroundStyle(MonitorTheme.textSecondary)
-                        Text("\(ultraGuidance.validDays) 个完整日 · Token 加权")
-                            .font(.system(size: 8))
-                            .foregroundStyle(MonitorTheme.textTertiary)
-                    }
-                }
-            } else {
-                HStack(alignment: .firstTextBaseline, spacing: MonitorTheme.Spacing.row) {
-                    Text("--")
-                        .font(.system(size: 24, weight: .bold, design: .rounded))
-                        .foregroundStyle(MonitorTheme.textSecondary)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("建议带 20–35%")
-                            .font(.system(size: 8.5, weight: .semibold))
-                            .foregroundStyle(MonitorTheme.textSecondary)
-                        Text("等待完整日观测")
-                            .font(.system(size: 8))
-                            .foregroundStyle(MonitorTheme.textTertiary)
-                    }
-                }
+            HStack(spacing: 0) {
+                routingGuidanceMetric(
+                    label: "全部路由",
+                    share: routingGuidance.weightedShare,
+                    validDays: routingGuidance.validDays,
+                    stateLabel: routingGuidanceStateLabel,
+                    color: routingGuidanceColor
+                )
+                Rectangle()
+                    .fill(MonitorTheme.separator)
+                    .frame(width: MonitorTheme.Stroke.hairline, height: 42)
+                    .padding(.horizontal, MonitorTheme.Spacing.row)
+                    .accessibilityHidden(true)
+                routingGuidanceMetric(
+                    label: "Ultra",
+                    share: ultraGuidance.weightedShare,
+                    validDays: ultraGuidance.validDays,
+                    stateLabel: ultraGuidanceStateLabel,
+                    color: ultraGuidanceColor
+                )
             }
 
-            RoutingUltraGuidanceBand(share: ultraGuidance.weightedShare)
+            RoutingGuidanceBand(routingShare: routingGuidance.weightedShare, ultraShare: ultraGuidance.weightedShare)
 
-            Text(ultraGuidanceDetail)
-                .font(.system(size: 8.5, weight: .medium))
-                .foregroundStyle(MonitorTheme.textSecondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("全部：\(routingGuidanceDetail)")
+                Text("Ultra：\(ultraGuidanceDetail)")
+            }
+            .font(.system(size: 8.5, weight: .medium))
+            .foregroundStyle(MonitorTheme.textSecondary)
 
             if let metric = latest {
-                Text("累计参考  Ultra \(metric.ultraRoutingTokenShare.map(percent) ?? "--")  ·  整体子任务 \(percent(metric.childTokenShare))")
+                Text("累计参考  全部 \(metric.routingIntensityTokenShare.map(percent) ?? "--")  ·  Ultra \(metric.ultraRoutingTokenShare.map(percent) ?? "--")  ·  整体 \(percent(metric.childTokenShare))  ·  根覆盖 \(metric.rootDispatchCoverage.map(percent) ?? "--")")
                     .font(.system(size: 8.5, weight: .semibold, design: .rounded))
                     .foregroundStyle(MonitorTheme.textTertiary)
                     .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                parentSourceSummary(metric)
             }
 
-            Text("20–35% 是本机运营指导带，不是官方健康标准；累计占比不参与判定。")
+            Text("20–35% 是本机运营指导带，不是官方健康标准；累计值仅作参考，不参与判定。")
                 .font(.system(size: 7.5))
-                .foregroundStyle(MonitorTheme.textTertiary)
+                .foregroundStyle(MonitorTheme.textSecondary)
         }
         .padding(MonitorTheme.Spacing.row)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(MonitorTheme.sectionFill, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.section, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: MonitorTheme.Radius.section, style: .continuous)
+                .stroke(MonitorTheme.routingCardHairline, lineWidth: MonitorTheme.Stroke.hairline)
+        }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Ultra 路由强度")
-        .accessibilityValue(ultraGuidanceAccessibilityValue)
+        .accessibilityLabel("多代理路由强度")
+        .accessibilityValue(routingGuidanceAccessibilityValue)
+    }
+
+    private func routingGuidanceMetric(
+        label: String,
+        share: Double?,
+        validDays: Int,
+        stateLabel: String,
+        color: Color
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: MonitorTheme.Spacing.compact) {
+                Circle()
+                    .fill(color)
+                    .frame(width: 5, height: 5)
+                    .accessibilityHidden(true)
+                Text(label)
+                    .font(.system(size: 8.5, weight: .semibold))
+                    .foregroundStyle(MonitorTheme.textSecondary)
+                Spacer(minLength: MonitorTheme.Spacing.compact)
+                Text(stateLabel)
+                    .font(.system(size: 7.5, weight: .bold, design: .rounded))
+                    .foregroundStyle(color)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+            }
+            Text(share.map(percent) ?? "--")
+                .font(.system(size: 22, weight: .bold, design: .rounded))
+                .foregroundStyle(share == nil ? MonitorTheme.textSecondary : MonitorTheme.textPrimary)
+                .monospacedDigit()
+            Text(validDays > 0 ? "\(validDays) 个完整日 · Token 加权" : "等待完整日观测")
+                .font(.system(size: 8))
+                .foregroundStyle(MonitorTheme.textSecondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var moreDataButton: some View {
@@ -200,9 +233,9 @@ struct RoutingTelemetryView: View {
             if let metric = latest {
                 HStack(spacing: 0) {
                     RoutingSnapshotStat(
-                        label: "Ultra 累计参考",
-                        value: metric.ultraRoutingTokenShare.map(percent) ?? "--",
-                        detail: "不含 Max 根任务"
+                        label: "路由内累计参考",
+                        value: metric.routingIntensityTokenShare.map(percent) ?? "--",
+                        detail: "仅严格归因路由工作"
                     )
                     snapshotDivider
                     RoutingSnapshotStat(
@@ -214,16 +247,21 @@ struct RoutingTelemetryView: View {
                 HStack {
                     Text("子任务 \(metric.childThreads)/\(metric.sourceThreads)")
                     Spacer()
-                    Text("全部新增 \(Formatters.compactTokens(metric.tokenDelta))")
+                    Text("全部新增 \(HUDTokenFormatter.compact(metric.tokenDelta))")
                     Spacer()
                     Text("身份 \(metric.roleMetadataCovered)/\(metric.childThreads)")
                 }
                 .font(.system(size: 8.5, weight: .medium, design: .rounded))
                 .foregroundStyle(MonitorTheme.textSecondary)
                 .monospacedDigit()
-                Text("Ultra 累计＝已归因子任务÷（Ultra 根＋已归因子任务）；整体累计＝子任务÷全部任务。")
+                Text("路由内累计＝严格归因子任务÷（已分发根＋严格归因子任务）；整体累计＝全部子任务÷全部任务。")
                     .font(.system(size: 8))
                     .foregroundStyle(MonitorTheme.textTertiary)
+                Text(rootCoverageSummary(metric))
+                    .font(.system(size: 8.5, weight: .medium, design: .rounded))
+                    .foregroundStyle(MonitorTheme.textSecondary)
+                    .monospacedDigit()
+                parentSourceSummary(metric, includesTokenBurden: true)
                 Text("二级以上 \(metric.depthAtLeastTwo) · 孤儿关系 \(metric.orphanEdges) · 循环影响 \(metric.cycleAffectedChildren) · 匿名 Sol \(metric.anonymousSolChildren) · 时长代理 \(duration(metric.createdToUpdatedMedianMilliseconds))")
                     .font(.system(size: 9))
                     .foregroundStyle(MonitorTheme.textTertiary)
@@ -244,6 +282,130 @@ struct RoutingTelemetryView: View {
             .frame(width: MonitorTheme.Stroke.hairline, height: 32)
             .padding(.horizontal, MonitorTheme.Spacing.compact)
             .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private func parentSourceSummary(_ metric: RoutingDailyMetric, includesTokenBurden: Bool = false) -> some View {
+        if let partition = metric.routingTokenPartition, !partition.parentSourceBuckets.isEmpty {
+            let rootGroups = Dictionary(grouping: partition.parentSourceBuckets, by: { sourceEffortLabel($0.effort) })
+                .mapValues { $0.reduce(0) { saturatedViewTokens($0, $1.rootThreads) } }
+            let rankedRoots = rootGroups.filter { $0.key != "其他" }.sorted {
+                $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value
+            }
+            let shownRoots = Array(rankedRoots.prefix(4))
+            let remainingRoots = rankedRoots.dropFirst(4).reduce(rootGroups["其他"] ?? 0) { saturatedViewTokens($0, $1.value) }
+            let childTokenGroups = Dictionary(grouping: partition.parentSourceBuckets, by: { sourceEffortLabel($0.effort) })
+                .mapValues { $0.reduce(0) { saturatedViewTokens($0, $1.attributedChildCumulativeTokens) } }
+            let rankedChildTokens = childTokenGroups.filter { $0.key != "其他" }.sorted {
+                $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value
+            }
+            let shownChildTokens = Array(rankedChildTokens.prefix(4))
+            let remainingChildTokens = rankedChildTokens.dropFirst(4).reduce(childTokenGroups["其他"] ?? 0) { saturatedViewTokens($0, $1.value) }
+            let totalChildTokens = max(0, partition.attributedChildCumulativeTokens)
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: MonitorTheme.Spacing.compact) {
+                    Text("发起根任务")
+                        .foregroundStyle(MonitorTheme.textTertiary)
+                    ForEach(shownRoots, id: \.key) { item in
+                        Text("\(item.key) \(item.value)")
+                    }
+                    if remainingRoots > 0 {
+                        Text("其他 \(remainingRoots)")
+                    }
+                }
+                if includesTokenBurden {
+                    HStack(spacing: MonitorTheme.Spacing.compact) {
+                        Text("子任务 Token")
+                            .foregroundStyle(MonitorTheme.textTertiary)
+                        ForEach(shownChildTokens, id: \.key) { item in
+                            Text("\(item.key) \(sourceShare(item.value, total: totalChildTokens))")
+                        }
+                        if remainingChildTokens > 0 {
+                            Text("其他 \(sourceShare(remainingChildTokens, total: totalChildTokens))")
+                        }
+                    }
+                }
+            }
+            .font(.system(size: 8, weight: .medium, design: .rounded))
+            .foregroundStyle(MonitorTheme.textSecondary)
+            .monospacedDigit()
+            .lineLimit(1)
+            .minimumScaleFactor(0.75)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("路由来源")
+            .accessibilityValue(parentSourceAccessibilityValue(rootGroups: rootGroups, childTokenGroups: childTokenGroups, totalChildTokens: totalChildTokens, includesTokenBurden: includesTokenBurden))
+        } else {
+            Text("路由来源：旧快照无通用父根桶")
+                .font(.system(size: 8))
+                .foregroundStyle(MonitorTheme.textTertiary)
+        }
+    }
+
+    private func sourceEffortLabel(_ effort: RoutingEffortBucket) -> String {
+        switch effort {
+        case .ultra: "Ultra"
+        case .max: "Max"
+        case .high, .xhigh: "High"
+        case .medium: "Medium"
+        case .none, .low, .unknown: "其他"
+        }
+    }
+
+    private func rootCoverageSummary(_ metric: RoutingDailyMetric) -> String {
+        guard let partition = metric.routingTokenPartition else {
+            return "根任务分发覆盖 --（旧快照无通用父根分区）"
+        }
+        return "根任务分发覆盖 \(partition.routedRootThreads)/\(partition.windowRootThreads) · \(partition.routedRootCoverage.map(percent) ?? "--")"
+    }
+
+    private func saturatedViewTokens(_ lhs: Int, _ rhs: Int) -> Int {
+        let (value, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? Int.max : value
+    }
+
+    private func sourceShare(_ value: Int, total: Int) -> String {
+        guard total > 0, value > 0 else { return "0%" }
+        let share = Double(value) / Double(total)
+        return share < 0.001 ? "<0.1%" : percent(share)
+    }
+
+    private func rootSourceAccessibility(_ partition: RoutingTokenPartition) -> String {
+        let grouped = Dictionary(grouping: partition.parentSourceBuckets, by: { sourceEffortLabel($0.effort) })
+            .mapValues { $0.reduce(0) { saturatedViewTokens($0, $1.rootThreads) } }
+        let sorted = grouped.sorted { lhs, rhs in
+            lhs.value == rhs.value ? lhs.key < rhs.key : lhs.value > rhs.value
+        }
+        var parts: [String] = []
+        for item in sorted {
+            parts.append("\(item.key) \(item.value) 个")
+        }
+        return parts.joined(separator: "，")
+    }
+
+    private func parentSourceAccessibilityValue(
+        rootGroups: [String: Int],
+        childTokenGroups: [String: Int],
+        totalChildTokens: Int,
+        includesTokenBurden: Bool
+    ) -> String {
+        let sortedRoots = rootGroups.sorted { lhs, rhs in
+            lhs.value == rhs.value ? lhs.key < rhs.key : lhs.value > rhs.value
+        }
+        var rootParts: [String] = []
+        for item in sortedRoots {
+            rootParts.append("\(item.key) \(item.value) 个根任务")
+        }
+        guard includesTokenBurden else { return rootParts.joined(separator: "，") }
+
+        let sortedTokens = childTokenGroups.sorted { lhs, rhs in
+            lhs.value == rhs.value ? lhs.key < rhs.key : lhs.value > rhs.value
+        }
+        var tokenParts: [String] = []
+        for item in sortedTokens {
+            tokenParts.append("\(item.key) \(sourceShare(item.value, total: totalChildTokens))")
+        }
+        return rootParts.joined(separator: "，") + "；子任务 Token：" + tokenParts.joined(separator: "，")
     }
 
     private var roleBreakdown: some View {
@@ -292,16 +454,18 @@ struct RoutingTelemetryView: View {
     }
 
     private func roleBreakdownSummary(metric: RoutingDailyMetric, buckets: [RoutingRoleBucket]) -> String {
-        let active = buckets.filter { !$0.isUnknown && $0.childThreads > 0 }.count
+        let active = buckets.filter { $0.isActive && $0.childThreads > 0 }.count
+        let retired = buckets.filter { $0.isRetired && $0.childThreads > 0 }.count
         let attributed = buckets.filter { !$0.isUnknown }.reduce(0) { $0 + $1.childThreads }
-        return "已使用 \(active)/\(RoutingRegisteredRole.allCases.count) 个角色 · \(attributed)/\(metric.childThreads) 个子任务已归因"
+        let history = retired > 0 ? " · 历史角色 \(retired) 类" : ""
+        return "已使用 \(active)/\(RoutingRegisteredRole.activeCases.count) 个当前角色 · \(attributed)/\(metric.childThreads) 个子任务已归因\(history)"
     }
 
     private func roleTokenSummary(label: String, value: Int) -> some View {
         HStack(spacing: MonitorTheme.Spacing.compact) {
             Text(label)
                 .foregroundStyle(MonitorTheme.textTertiary)
-            Text(Formatters.compactTokens(value))
+            Text(HUDTokenFormatter.compact(value))
                 .fontWeight(.semibold)
                 .foregroundStyle(MonitorTheme.textSecondary)
         }
@@ -311,7 +475,7 @@ struct RoutingTelemetryView: View {
     private func roleBreakdownStatus(metric: RoutingDailyMetric, buckets: [RoutingRoleBucket]) -> String {
         let unknown = buckets.first(where: \.isUnknown)?.childThreads ?? 0
         let identityDrift = buckets.contains {
-            guard !$0.isUnknown, let matched = $0.identityMatchedThreads else { return false }
+            guard $0.isActive, let matched = $0.identityMatchedThreads else { return false }
             return matched != $0.childThreads
         }
         return metric.roleMetadataMissing > 0 || unknown > 0 || identityDrift ? "PARTIAL" : "COMPLETE"
@@ -324,15 +488,19 @@ struct RoutingTelemetryView: View {
     private var trend: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text("Ultra 新增趋势")
+                Text("路由强度新增趋势")
                     .font(.system(size: 10.5, weight: .semibold))
                 Spacer()
                 Text("建议带 20–35%")
                     .font(.system(size: 8, weight: .semibold))
-                    .foregroundStyle(MonitorTheme.healthy)
+                    .foregroundStyle(MonitorTheme.routingGuidance)
             }
-            if dailyObservationPoints.isEmpty {
-                Text("等待完整日观测后显示；累计参考仍保留在上方。")
+            HStack(spacing: MonitorTheme.Spacing.row) {
+                routingTrendLegend(label: "全部路由", color: MonitorTheme.routingTrend, isDiamond: false)
+                routingTrendLegend(label: "Ultra", color: MonitorTheme.routingUltraTrend, isDiamond: true)
+            }
+            if !hasDailyObservation {
+                Text("等待完整日观测；不会从累计值伪造历史。")
                     .font(.system(size: 9))
                     .foregroundStyle(MonitorTheme.textTertiary)
             } else {
@@ -342,6 +510,24 @@ struct RoutingTelemetryView: View {
         .padding(MonitorTheme.Spacing.row)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(MonitorTheme.sectionFill, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.section, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: MonitorTheme.Radius.section, style: .continuous)
+                .stroke(MonitorTheme.routingCardHairline, lineWidth: MonitorTheme.Stroke.hairline)
+        }
+    }
+
+    private func routingTrendLegend(label: String, color: Color, isDiamond: Bool) -> some View {
+        HStack(spacing: 4) {
+            RoundedRectangle(cornerRadius: isDiamond ? 1 : 3, style: .continuous)
+                .fill(color)
+                .frame(width: 6, height: 6)
+                .rotationEffect(.degrees(isDiamond ? 45 : 0))
+            Text(label)
+                .font(.system(size: 7.5, weight: .medium))
+                .foregroundStyle(MonitorTheme.textSecondary)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(label)趋势")
     }
 
     private var assessmentCard: some View {
@@ -396,7 +582,7 @@ struct RoutingTelemetryView: View {
     private var evidenceBoundary: some View {
         Text("Verified success rate、Token per verified success、真实 E2E speedup 均为 UNVERIFIED：state SQLite 没有任务结果或真实起止证据。")
             .font(.system(size: 8.5))
-            .foregroundStyle(MonitorTheme.textTertiary)
+            .foregroundStyle(MonitorTheme.textSecondary)
             .accessibilityLabel("证据边界")
             .accessibilityValue("成功率、每成功任务 Token 和真实端到端加速均未验证")
     }
@@ -419,6 +605,34 @@ struct RoutingTelemetryView: View {
         }
     }
 
+    private var routingGuidanceStateLabel: String {
+        switch routingGuidance.state {
+        case .unavailable: "暂无完整日观测"
+        case .observing: "观测中"
+        case .low: "低于指导带"
+        case .balanced: "在指导带内"
+        case .elevated: "高于指导带"
+        case .excessive: "显著高于指导带"
+        }
+    }
+
+    private var routingGuidanceDetail: String {
+        switch routingGuidance.state {
+        case .unavailable:
+            "等待完整日观测；不会用累计值代替新增占比。"
+        case .observing:
+            "已有 \(routingGuidance.validDays)/\(RoutingDeltaGuidance.minimumValidDays) 个完整日；继续积累后再判定。"
+        case .low:
+            "低于 20%；可能分发不足，先核对任务是否具备可并行切片。"
+        case .balanced:
+            "处于 20–35% 指导带；继续结合完成质量与耗时观察。"
+        case .elevated:
+            "高于 35%；复核重复探索、无效并发和过细任务切分。"
+        case .excessive:
+            "高于 50%；子任务新增 Token 已超过已分发根任务，优先复核。"
+        }
+    }
+
     private var ultraGuidanceStateLabel: String {
         switch ultraGuidance.state {
         case .unavailable: "暂无完整日观测"
@@ -433,25 +647,55 @@ struct RoutingTelemetryView: View {
     private var ultraGuidanceDetail: String {
         switch ultraGuidance.state {
         case .unavailable:
-            "等待完整日观测；不会用累计值代替新增占比。"
+            "旧快照无完整 Ultra 日；不从累计值伪回填。"
         case .observing:
-            "已有 \(ultraGuidance.validDays)/\(RoutingUltraDeltaGuidance.minimumValidDays) 个完整日；继续积累后再判定。"
+            "已有 \(ultraGuidance.validDays)/\(RoutingUltraDeltaGuidance.minimumValidDays) 个完整 Ultra 日；继续积累后再判定。"
         case .low:
-            "低于 20%；可能分发不足，先核对任务是否具备可并行切片。"
+            "低于 20%；Ultra 根内分发可能偏少。"
         case .balanced:
-            "处于 20–35% 指导带；继续结合完成质量与耗时观察。"
+            "处于 20–35% 指导带。"
         case .elevated:
-            "高于 35%；复核重复探索、无效并发和过细任务切分。"
+            "高于 35%；复核 Ultra 根下重复探索与过细切分。"
         case .excessive:
-            "高于 50%；子任务新增 Token 已超过 Ultra 根任务，优先复核。"
+            "高于 50%；Ultra 子任务新增已超过 Ultra 根新增。"
         }
     }
 
-    private var ultraGuidanceAccessibilityValue: String {
-        if let share = ultraGuidance.weightedShare {
-            return "\(percent(share))，\(ultraGuidanceStateLabel)，\(ultraGuidance.validDays) 个完整日。\(ultraGuidanceDetail)"
+    private var routingGuidanceAccessibilityValue: String {
+        var details: [String] = []
+        if let share = routingGuidance.weightedShare {
+            details.append("全部路由 \(percent(share))，\(routingGuidanceStateLabel)，\(routingGuidance.validDays) 个完整日。\(routingGuidanceDetail)")
+        } else {
+            details.append("全部路由不可用。\(routingGuidanceDetail)")
         }
-        return ultraGuidanceDetail
+        if let share = ultraGuidance.weightedShare {
+            details.append("Ultra \(percent(share))，\(ultraGuidanceStateLabel)，\(ultraGuidance.validDays) 个完整日。\(ultraGuidanceDetail)")
+        } else {
+            details.append("Ultra 不可用。\(ultraGuidanceDetail)")
+        }
+        if let metric = latest {
+            details.append("累计参考：全部路由 \(metric.routingIntensityTokenShare.map(percent) ?? "不可用")，Ultra \(metric.ultraRoutingTokenShare.map(percent) ?? "不可用")，整体占用 \(percent(metric.childTokenShare))")
+            if let partition = metric.routingTokenPartition {
+                details.append("根任务分发覆盖 \(partition.routedRootThreads) 比 \(partition.windowRootThreads)，\(partition.routedRootCoverage.map(percent) ?? "不可用")")
+                details.append("发起根任务：\(rootSourceAccessibility(partition))")
+            }
+        }
+        return details.joined(separator: "；")
+    }
+
+    private var routingGuidanceColor: Color {
+        switch routingGuidance.state {
+        case .balanced:
+            MonitorTheme.healthy
+        case .low, .elevated:
+            MonitorTheme.warning
+        case .excessive:
+            MonitorTheme.critical
+        case .observing:
+            MonitorTheme.radarBaseline
+        case .unavailable:
+            MonitorTheme.textTertiary
+        }
     }
 
     private var ultraGuidanceColor: Color {
@@ -463,7 +707,7 @@ struct RoutingTelemetryView: View {
         case .excessive:
             MonitorTheme.critical
         case .observing:
-            MonitorTheme.radarBaseline
+            MonitorTheme.routingUltraTrend
         case .unavailable:
             MonitorTheme.textTertiary
         }
@@ -504,8 +748,9 @@ struct RoutingTelemetryView: View {
     }
 }
 
-private struct RoutingUltraGuidanceBand: View {
-    let share: Double?
+private struct RoutingGuidanceBand: View {
+    let routingShare: Double?
+    let ultraShare: Double?
 
     var body: some View {
         VStack(spacing: 3) {
@@ -515,15 +760,33 @@ private struct RoutingUltraGuidanceBand: View {
                     Capsule()
                         .fill(MonitorTheme.progressTrack)
                     Capsule()
-                        .fill(MonitorTheme.healthy.opacity(0.42))
-                        .frame(width: width * (RoutingUltraDeltaGuidance.upperBound - RoutingUltraDeltaGuidance.lowerBound))
-                        .offset(x: width * RoutingUltraDeltaGuidance.lowerBound)
-                    if let share {
+                        .fill(MonitorTheme.routingGuidanceBandFill)
+                        .frame(width: width * (RoutingDeltaGuidance.upperBound - RoutingDeltaGuidance.lowerBound))
+                        .overlay {
+                            Capsule()
+                                .stroke(
+                                    MonitorTheme.routingGuidanceBoundary,
+                                    style: StrokeStyle(lineWidth: MonitorTheme.Stroke.hairline, dash: [2, 2])
+                                )
+                        }
+                        .offset(x: width * RoutingDeltaGuidance.lowerBound)
+                    if let routingShare {
                         Circle()
-                            .fill(MonitorTheme.textPrimary)
+                            .fill(MonitorTheme.routingTrend)
                             .frame(width: 7, height: 7)
                             .overlay(Circle().stroke(MonitorTheme.sectionFill, lineWidth: 1))
-                            .offset(x: max(0, min(width - 7, width * min(1, max(0, share)) - 3.5)))
+                            .offset(x: max(0, min(width - 7, width * min(1, max(0, routingShare)) - 3.5)))
+                    }
+                    if let ultraShare {
+                        RoundedRectangle(cornerRadius: 1, style: .continuous)
+                            .fill(MonitorTheme.routingUltraTrend)
+                            .frame(width: 6, height: 6)
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 1, style: .continuous)
+                                    .stroke(MonitorTheme.sectionFill, lineWidth: 1)
+                            }
+                            .rotationEffect(.degrees(45))
+                            .offset(x: max(0, min(width - 6, width * min(1, max(0, ultraShare)) - 3)))
                     }
                 }
             }
@@ -533,7 +796,7 @@ private struct RoutingUltraGuidanceBand: View {
                 Text("0%")
                 Spacer()
                 Text("20–35% 建议")
-                    .foregroundStyle(MonitorTheme.healthy)
+                    .foregroundStyle(MonitorTheme.routingGuidance)
                 Spacer()
                 Text("100%")
             }
@@ -553,32 +816,45 @@ private struct RoutingRoleBreakdownRow: View {
     }
 
     private var accentColor: Color {
-        switch bucket.role {
-        case .codeExplorer, .quickImplementer, .implementer, .commitPusher:
-            MonitorTheme.radarBaseline
-        case .terraImplementer, .terraHighImplementer, .terraMaxImplementer, .solUltraTerra, .terraReviewer:
-            MonitorTheme.healthy
-        case .codeReviewer:
-            MonitorTheme.warning
-        case nil:
-            MonitorTheme.neutral
+        switch bucket.role?.accent {
+        case .luna: MonitorTheme.radarBaseline
+        case .terra: MonitorTheme.healthy
+        case .sol: MonitorTheme.warning
+        case nil: MonitorTheme.neutral
         }
     }
 
+    private var tierBadgeLabel: String {
+        bucket.isRetired ? "历史" : bucket.tierLabel
+    }
+
     private var detailLabel: String {
+        guard let role = bucket.role else { return "当前与历史目录均未注册" }
         if bucket.identityCompleteThreads < bucket.childThreads {
             return "元数据 \(bucket.identityCompleteThreads)/\(bucket.childThreads)"
+        }
+        if role.isRetired {
+            return "\(role.rawValue) · \(role.tierLabel)"
         }
         if let matched = bucket.identityMatchedThreads, matched < bucket.childThreads {
             return "身份匹配 \(matched)/\(bucket.childThreads)"
         }
-        return bucket.role?.rawValue ?? "未注册或未标注"
+        return role.rawValue
     }
 
     private var hasIdentityIssue: Bool {
         bucket.identityCompleteThreads < bucket.childThreads
-            || bucket.identityMatchedThreads.map { $0 < bucket.childThreads } == true
+            || (bucket.isActive && bucket.identityMatchedThreads.map { $0 < bucket.childThreads } == true)
             || bucket.isUnknown
+    }
+
+    private var accessibilityIdentity: String {
+        guard let role = bucket.role else { return "当前与历史目录均未注册" }
+        if bucket.identityCompleteThreads < bucket.childThreads {
+            return "元数据完整 \(bucket.identityCompleteThreads) / \(bucket.childThreads)"
+        }
+        if role.isRetired { return "历史角色" }
+        return "身份匹配 \(bucket.identityMatchedThreads.map(String.init) ?? "不可验证") / \(bucket.childThreads)"
     }
 
     var body: some View {
@@ -589,7 +865,7 @@ private struct RoutingRoleBreakdownRow: View {
                         Text(bucket.displayName)
                             .font(.system(size: 9, weight: .semibold))
                             .foregroundStyle(MonitorTheme.textPrimary)
-                        Text(bucket.tierLabel)
+                        Text(tierBadgeLabel)
                             .font(.system(size: 7.5, weight: .medium, design: .rounded))
                             .foregroundStyle(MonitorTheme.textSecondary)
                             .padding(.horizontal, 4)
@@ -607,7 +883,7 @@ private struct RoutingRoleBreakdownRow: View {
                         .foregroundStyle(MonitorTheme.textPrimary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.85)
-                    Text("累计 \(Formatters.compactTokens(bucket.cumulativeTokens)) · 相邻新增 +\(Formatters.compactTokens(bucket.tokenDelta))")
+                    Text("累计 \(HUDTokenFormatter.compact(bucket.cumulativeTokens)) · 相邻新增 +\(HUDTokenFormatter.compact(bucket.tokenDelta))")
                         .font(.system(size: 8.5, weight: .medium, design: .monospaced))
                         .foregroundStyle(MonitorTheme.textTertiary)
                         .lineLimit(1)
@@ -628,8 +904,8 @@ private struct RoutingRoleBreakdownRow: View {
         .opacity(bucket.childThreads == 0 ? 0.58 : 1)
         .accessibilityElement(children: .ignore)
         .accessibilityIdentifier("routing-role-\(bucket.id)")
-        .accessibilityLabel("\(bucket.displayName)，\(bucket.tierLabel)")
-        .accessibilityValue("子任务 \(bucket.childThreads)，元数据完整 \(bucket.identityCompleteThreads)，身份匹配 \(bucket.identityMatchedThreads.map(String.init) ?? "不可验证")，累计 Token \(bucket.cumulativeTokens)，相邻观测新增 \(bucket.tokenDelta)，占子任务 Token \(String(format: "%.1f", max(0, share) * 100))%")
+        .accessibilityLabel("\(bucket.displayName)，\(tierBadgeLabel)")
+        .accessibilityValue("子任务 \(bucket.childThreads)，\(accessibilityIdentity)，累计 Token \(bucket.cumulativeTokens)，相邻观测新增 \(bucket.tokenDelta)，占子任务 Token \(String(format: "%.1f", max(0, share) * 100))%")
     }
 }
 
@@ -664,7 +940,25 @@ private struct RoutingTrendChart: View {
     @State private var hoveredIndex: Int?
     @State private var keyboardIndex: Int?
 
-    private var plottedPoints: [(index: Int, metric: RoutingDailyMetric, share: Double, segment: Int)] {
+    private var routingPoints: [(index: Int, metric: RoutingDailyMetric, share: Double, segment: Int)] {
+        var result: [(index: Int, metric: RoutingDailyMetric, share: Double, segment: Int)] = []
+        var segment = 0
+        var previousIndex: Int?
+        for (index, metric) in points.enumerated() {
+            guard let share = metric.routingDailyObservedTokenShare else {
+                previousIndex = nil
+                continue
+            }
+            if previousIndex == nil {
+                segment += 1
+            }
+            result.append((index, metric, share, segment))
+            previousIndex = index
+        }
+        return result
+    }
+
+    private var ultraPoints: [(index: Int, metric: RoutingDailyMetric, share: Double, segment: Int)] {
         var result: [(index: Int, metric: RoutingDailyMetric, share: Double, segment: Int)] = []
         var segment = 0
         var previousIndex: Int?
@@ -686,14 +980,21 @@ private struct RoutingTrendChart: View {
         hoveredIndex ?? keyboardIndex
     }
 
+    private var activeIndex: Int? {
+        selectedIndex ?? points.lastIndex {
+            $0.routingDailyObservedTokenShare != nil
+                || $0.ultraRoutingDailyObservedTokenShare != nil
+        }
+    }
+
     private var selectedPoint: RoutingDailyMetric? {
-        guard let index = selectedIndex ?? points.indices.last, points.indices.contains(index) else { return nil }
+        guard let index = activeIndex, points.indices.contains(index) else { return nil }
         return points[index]
     }
 
     private var tooltipAlignment: Alignment {
-        guard let selectedIndex else { return .topTrailing }
-        return selectedIndex > points.count / 2 ? .topLeading : .topTrailing
+        guard let activeIndex else { return .topTrailing }
+        return activeIndex > points.count / 2 ? .topLeading : .topTrailing
     }
 
     var body: some View {
@@ -703,26 +1004,52 @@ private struct RoutingTrendChart: View {
                     RectangleMark(
                         xStart: .value("开始", 0),
                         xEnd: .value("结束", max(1, points.count - 1)),
-                        yStart: .value("建议下限", RoutingUltraDeltaGuidance.lowerBound),
-                        yEnd: .value("建议上限", RoutingUltraDeltaGuidance.upperBound)
+                        yStart: .value("建议下限", RoutingDeltaGuidance.lowerBound),
+                        yEnd: .value("建议上限", RoutingDeltaGuidance.upperBound)
                     )
-                    .foregroundStyle(MonitorTheme.healthy.opacity(0.12))
+                    .foregroundStyle(MonitorTheme.routingGuidanceFill)
 
-                    ForEach(Array(plottedPoints.enumerated()), id: \.offset) { _, point in
+                    RuleMark(y: .value("建议下限边界", RoutingDeltaGuidance.lowerBound))
+                        .foregroundStyle(MonitorTheme.routingGuidanceBoundary)
+                        .lineStyle(StrokeStyle(lineWidth: MonitorTheme.Stroke.hairline, dash: [3, 3]))
+
+                    RuleMark(y: .value("建议上限边界", RoutingDeltaGuidance.upperBound))
+                        .foregroundStyle(MonitorTheme.routingGuidanceBoundary)
+                        .lineStyle(StrokeStyle(lineWidth: MonitorTheme.Stroke.hairline, dash: [3, 3]))
+
+                    ForEach(Array(routingPoints.enumerated()), id: \.offset) { _, point in
                         LineMark(
                             x: .value("日期", point.index),
-                            y: .value("每日新增 Token 占比", point.share),
-                            series: .value("连续证据段", point.segment)
+                            y: .value("全部路由每日新增 Token 占比", point.share),
+                            series: .value("连续证据段", "全部-\(point.segment)")
                         )
                         .interpolationMethod(.linear)
-                        .foregroundStyle(MonitorTheme.warning)
+                        .foregroundStyle(MonitorTheme.routingTrend)
 
                         PointMark(
                             x: .value("日期", point.index),
-                            y: .value("每日新增 Token 占比", point.share)
+                            y: .value("全部路由每日新增 Token 占比", point.share)
                         )
                         .symbolSize(20)
-                        .foregroundStyle(MonitorTheme.warning)
+                        .foregroundStyle(MonitorTheme.routingTrendPoint)
+                    }
+
+                    ForEach(Array(ultraPoints.enumerated()), id: \.offset) { _, point in
+                        LineMark(
+                            x: .value("日期", point.index),
+                            y: .value("Ultra 每日新增 Token 占比", point.share),
+                            series: .value("连续证据段", "Ultra-\(point.segment)")
+                        )
+                        .interpolationMethod(.linear)
+                        .foregroundStyle(MonitorTheme.routingUltraTrend)
+
+                        PointMark(
+                            x: .value("日期", point.index),
+                            y: .value("Ultra 每日新增 Token 占比", point.share)
+                        )
+                        .symbol(.diamond)
+                        .symbolSize(26)
+                        .foregroundStyle(MonitorTheme.routingUltraTrendPoint)
                     }
 
                     if let selectedIndex {
@@ -788,9 +1115,9 @@ private struct RoutingTrendChart: View {
             }
             .accessibilityElement(children: .ignore)
             .accessibilityIdentifier("routing-snapshot-trend")
-            .accessibilityLabel("Ultra 严格新增 Token 占比趋势")
+            .accessibilityLabel("全部路由与 Ultra 严格新增 Token 占比趋势")
             .accessibilityValue(accessibilityValueText)
-            .accessibilityHint("绿色区域为百分之二十至三十五的本地指导带。获得键盘焦点后，使用左右方向键选择快照")
+            .accessibilityHint("蓝色为全部路由，琥珀色为 Ultra，绿色区域为百分之二十至三十五的本地指导带。获得键盘焦点后，使用左右方向键选择快照")
             .accessibilityAdjustableAction { direction in
                 switch direction {
                 case .increment:
@@ -802,9 +1129,9 @@ private struct RoutingTrendChart: View {
                 }
             }
 
-            Text("横轴为本地自然日严格新增；每日 payload 同时承载最近7日结构快照，缺证据日期会断线。")
+            Text("Ultra 历史仅复用已发布聚合点；缺失日期与通用历史不回填。后续两种口径由同一次轻量扫描持续采集。")
                 .font(.system(size: 8))
-                .foregroundStyle(MonitorTheme.textTertiary)
+                .foregroundStyle(MonitorTheme.textSecondary)
         }
     }
 
@@ -819,10 +1146,10 @@ private struct RoutingTrendChart: View {
     }
 
     private var accessibilityValueText: String {
-        let point = selectedPoint ?? points.last
-        guard let point else { return "暂无快照" }
-        let evidence = point.ultraTokenPartition?.dailyDeltaEvidenceComplete == true ? "证据完整" : "证据不完整"
-        return "\(point.dayKey)，Ultra 严格每日观测新增 Token 占比 \(point.ultraRoutingDailyObservedTokenShare.map(percentage) ?? "--")，\(evidence)，本地指导带百分之二十至三十五"
+        guard let point = selectedPoint else { return "暂无完整日观测" }
+        let routingEvidence = point.routingTokenPartition?.dailyDeltaEvidenceComplete == true ? "完整" : "不完整"
+        let ultraEvidence = point.ultraTokenPartition?.dailyDeltaEvidenceComplete == true ? "完整" : "不完整"
+        return "\(point.dayKey)，全部路由 \(point.routingDailyObservedTokenShare.map(percentage) ?? "--")，证据\(routingEvidence)；Ultra \(point.ultraRoutingDailyObservedTokenShare.map(percentage) ?? "--")，证据\(ultraEvidence)；本地指导带百分之二十至三十五"
     }
 
     private func percentage(_ value: Double) -> String {
@@ -862,23 +1189,24 @@ private struct RoutingTrendTooltip: View {
             Text(metric.dayKey)
                 .fontWeight(.semibold)
                 .foregroundStyle(MonitorTheme.textPrimary)
-            value("Ultra 新增占比", metric.ultraRoutingDailyObservedTokenShare.map(percentage) ?? "--")
-            value("Ultra 根新增", tokenDelta(metric.ultraTokenPartition?.ultraRootDailyObservedTokenDelta))
-            value("归因子任务新增", tokenDelta(metric.ultraTokenPartition?.attributedUltraChildDailyObservedTokenDelta))
-            value("日增量证据", metric.ultraTokenPartition?.dailyDeltaEvidenceComplete == true ? "完整" : "不完整")
-            value("累计参考", metric.ultraRoutingTokenShare.map(percentage) ?? "--")
-            Text("已归因 Ultra 子任务新增÷（Ultra 根新增＋已归因子任务新增）")
+            value("全部路由", metric.routingDailyObservedTokenShare.map(percentage) ?? "--")
+            value("Ultra", metric.ultraRoutingDailyObservedTokenShare.map(percentage) ?? "--")
+            value("全部 根 / 子", tokenPair(metric.routingTokenPartition?.rootDailyObservedTokenDelta, metric.routingTokenPartition?.attributedChildDailyObservedTokenDelta))
+            value("Ultra 根 / 子", tokenPair(metric.ultraTokenPartition?.ultraRootDailyObservedTokenDelta, metric.ultraTokenPartition?.attributedUltraChildDailyObservedTokenDelta))
+            value("证据", evidenceText)
+            value("累计参考", "全部 \(metric.routingIntensityTokenShare.map(percentage) ?? "--") · U \(metric.ultraRoutingTokenShare.map(percentage) ?? "--")")
+            Text("全部使用已分发根；Ultra 使用精确 Ultra 根。")
                 .font(.system(size: 7.5))
                 .foregroundStyle(MonitorTheme.textTertiary)
         }
         .font(.system(size: 8.5, weight: .medium))
         .foregroundStyle(MonitorTheme.textSecondary)
         .padding(MonitorTheme.Spacing.row)
-        .frame(width: 176)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous))
+        .frame(width: 204)
+        .background(MonitorTheme.routingTooltipSurface, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous)
-                .stroke(MonitorTheme.panelStroke, lineWidth: MonitorTheme.Stroke.hairline)
+                .stroke(MonitorTheme.routingTooltipStroke, lineWidth: MonitorTheme.Stroke.hairline)
         }
         .shadow(color: .black.opacity(0.24), radius: 8, x: 0, y: 4)
     }
@@ -886,8 +1214,11 @@ private struct RoutingTrendTooltip: View {
     private func value(_ label: String, _ text: String) -> some View {
         HStack {
             Text(label)
+                .foregroundStyle(MonitorTheme.textSecondary)
             Spacer(minLength: MonitorTheme.Spacing.row)
             Text(text)
+                .fontWeight(.semibold)
+                .foregroundStyle(MonitorTheme.textPrimary)
                 .monospacedDigit()
         }
     }
@@ -897,6 +1228,16 @@ private struct RoutingTrendTooltip: View {
     }
 
     private func tokenDelta(_ value: Int?) -> String {
-        value.map { "+\(Formatters.compactTokens($0))" } ?? "--"
+        value.map { "+\(HUDTokenFormatter.compact($0))" } ?? "--"
+    }
+
+    private func tokenPair(_ root: Int?, _ child: Int?) -> String {
+        "\(tokenDelta(root)) / \(tokenDelta(child))"
+    }
+
+    private var evidenceText: String {
+        let routing = metric.routingTokenPartition?.dailyDeltaEvidenceComplete == true ? "全 完整" : "全 不完整"
+        let ultra = metric.ultraTokenPartition?.dailyDeltaEvidenceComplete == true ? "U 完整" : "U 不完整"
+        return "\(routing) · \(ultra)"
     }
 }

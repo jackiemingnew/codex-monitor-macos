@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 
 enum RefreshLane: String, CaseIterable, Hashable, Sendable {
@@ -202,6 +203,19 @@ struct RefreshEnvironment: Equatable, Sendable {
             isLowPowerModeEnabled: processInfo.isLowPowerModeEnabled,
             isThermallyConstrained: thermalState == .serious || thermalState == .critical
         )
+    }
+}
+
+enum RefreshEnvironmentNotifications {
+    static func publisher(
+        center: NotificationCenter = .default
+    ) -> AnyPublisher<Notification, Never> {
+        Publishers.Merge(
+            center.publisher(for: .NSProcessInfoPowerStateDidChange),
+            center.publisher(for: ProcessInfo.thermalStateDidChangeNotification)
+        )
+        .receive(on: DispatchQueue.main)
+        .eraseToAnyPublisher()
     }
 }
 

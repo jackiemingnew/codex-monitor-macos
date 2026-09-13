@@ -204,10 +204,7 @@ final class BalanceMonitorViewModel: ObservableObject {
     }
 
     private func observeRefreshEnvironment() {
-        Publishers.Merge(
-            NotificationCenter.default.publisher(for: .NSProcessInfoPowerStateDidChange),
-            NotificationCenter.default.publisher(for: ProcessInfo.thermalStateDidChangeNotification)
-        )
+        RefreshEnvironmentNotifications.publisher()
         .sink { [weak self] _ in
             Task { @MainActor in
                 self?.refreshEnvironmentDidChange()

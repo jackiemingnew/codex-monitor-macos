@@ -9,8 +9,17 @@ final class RoutingTelemetryStore: @unchecked Sendable {
     private struct ThreadRow { let id: String; let recencyMs, createdMs, updatedMs: Int64; let tokens: Int; let role, model, effort: String? }
     private struct Edge { let parent, child: String }
     private struct StoredDaily { let metric: RoutingDailyMetric; let observedAt: Date }
-    private struct StrictTopology { let partition: RoutingUltraTokenPartition; let classifications: [String: String] }
-    private struct MetricBuild { let metric: RoutingDailyMetric; let strictClassifications: [String: String] }
+    private struct StrictTopology {
+        let partition: RoutingTokenPartition
+        let legacyUltraPartition: RoutingUltraTokenPartition
+        let classifications: [String: String]
+        let ultraClassifications: [String: String]
+    }
+    private struct MetricBuild {
+        let metric: RoutingDailyMetric
+        let strictClassifications: [String: String]
+        let ultraClassifications: [String: String]
+    }
     private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
     private let sourceURL: URL
     private let databaseURL: URL
@@ -81,7 +90,7 @@ final class RoutingTelemetryStore: @unchecked Sendable {
                             childRoleKeys[row.id] = roleBucketKey(row.role)
                         }
                     }
-                    let baseline = try updateBaselines(source.recent, childRoleKeys: childRoleKeys, strictClassifications: build.strictClassifications, previousObservedAt: previous, db: db, now: now, shouldCancel: shouldCancel)
+                    let baseline = try updateBaselines(source.recent, childRoleKeys: childRoleKeys, strictClassifications: build.strictClassifications, ultraClassifications: build.ultraClassifications, previousObservedAt: previous, db: db, now: now, shouldCancel: shouldCancel)
                     metric = replacing(metric, tokenDelta: baseline.totalDelta, childTokenDelta: baseline.childDelta, roleTokenDeltas: baseline.roleDeltas, missingBaselines: baseline.missing, tokenRollbacks: baseline.rollbacks, derivedWrites: baseline.writes + 1, quality: worse(metric.quality, baseline.quality))
                     let prior = try loadDaily(dayKey: metric.dayKey, db: db)
                     metric = mergingDailyStrictDelta(metric, baseline: baseline, prior: prior)
@@ -197,49 +206,114 @@ final class RoutingTelemetryStore: @unchecked Sendable {
         let orphanEdges = edges.filter { !allIDs.contains($0.parent) || !allIDs.contains($0.child) }.count
         let topology = hasDuplicateIDs ? nil : try makeStrictTopology(rows: rows, recentChildren: recentChildren, allIDs: allIDs, parentMap: parentMap, shouldCancel: shouldCancel)
         let quality: RoutingTelemetryQuality = rows.isEmpty || hasDuplicateIDs || !cycleAffectedChildren.isEmpty || orphanEdges > 0 ? .partial : .complete
-        let metric = RoutingDailyMetric(dayKey: RoutingTelemetryScanPolicy.localDayKey(now), sourceThreads: rows.count, edgeCount: relevant.count, rootThreads: rows.filter { !recentChildren.contains($0.id) }.count, childThreads: childRows.count, roleMetadataCovered: covered, roleMetadataMissing: max(0, childRows.count - covered), depthAtLeastTwo: depthTwo.count, orphanEdges: orphanEdges, cycleAffectedChildren: cycleAffectedChildren.count, anonymousSolChildren: childRows.filter { $0.role.orEmpty.isEmpty && $0.model.orEmpty.lowercased().contains("sol") }.count, cumulativeTokens: rows.reduce(0) { saturated($0, $1.tokens) }, childCumulativeTokens: childRows.reduce(0) { saturated($0, $1.tokens) }, tokenDelta: 0, childTokenDelta: 0, missingBaselines: 0, tokenRollbacks: 0, createdToUpdatedMedianMilliseconds: median, readRows: readRows, derivedWrites: 0, scanMilliseconds: scanMilliseconds, quality: quality, roleBuckets: makeRoleBuckets(childRows), ultraTokenPartition: topology?.partition)
-        return MetricBuild(metric: metric, strictClassifications: topology?.classifications ?? [:])
+        let metric = RoutingDailyMetric(dayKey: RoutingTelemetryScanPolicy.localDayKey(now), sourceThreads: rows.count, edgeCount: relevant.count, rootThreads: rows.filter { !recentChildren.contains($0.id) }.count, childThreads: childRows.count, roleMetadataCovered: covered, roleMetadataMissing: max(0, childRows.count - covered), depthAtLeastTwo: depthTwo.count, orphanEdges: orphanEdges, cycleAffectedChildren: cycleAffectedChildren.count, anonymousSolChildren: childRows.filter { $0.role.orEmpty.isEmpty && $0.model.orEmpty.lowercased().contains("sol") }.count, cumulativeTokens: rows.reduce(0) { saturated($0, $1.tokens) }, childCumulativeTokens: childRows.reduce(0) { saturated($0, $1.tokens) }, tokenDelta: 0, childTokenDelta: 0, missingBaselines: 0, tokenRollbacks: 0, createdToUpdatedMedianMilliseconds: median, readRows: readRows, derivedWrites: 0, scanMilliseconds: scanMilliseconds, quality: quality, roleBuckets: makeRoleBuckets(childRows), ultraTokenPartition: topology?.legacyUltraPartition, routingTokenPartition: topology?.partition)
+        return MetricBuild(metric: metric, strictClassifications: topology?.classifications ?? [:], ultraClassifications: topology?.ultraClassifications ?? [:])
     }
 
     private func makeStrictTopology(rows: [ThreadRow], recentChildren: Set<String>, allIDs: Set<String>, parentMap: [String: [String]], shouldCancel: @escaping @Sendable () -> Bool) throws -> StrictTopology {
         let rowsByID = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
         let rootRows = rows.filter { parentMap[$0.id] == nil }
-        let ultraRoots = rootRows.filter { isExactSolRoot($0, effort: "ultra") }
-        let maxRoots = rootRows.filter { isExactSolRoot($0, effort: "max") }
-        var attributedIDs: Set<String> = []
+        var rootByChild: [String: String] = [:]
+
+        // Resolve each recent child through one and only one complete parent
+        // chain. A missing parent, a multi-parent node, a cycle, or a root
+        // outside the current window fails closed for that child.
         for childID in recentChildren {
             if shouldCancel() { throw RoutingTelemetryStoreError.cancelled }
             var node = childID
             var visited: Set<String> = []
             var attributable = true
-            while let parents = parentMap[node] {
-                if !visited.insert(node).inserted || parents.count != 1 || !allIDs.contains(node) {
+            var rootID: String?
+            while true {
+                if !visited.insert(node).inserted || !allIDs.contains(node) {
                     attributable = false
                     break
                 }
-                let parent = parents[0]
-                guard allIDs.contains(parent) else { attributable = false; break }
-                node = parent
+                guard let parents = parentMap[node] else {
+                    rootID = node
+                    break
+                }
+                guard parents.count == 1, allIDs.contains(parents[0]) else {
+                    attributable = false
+                    break
+                }
+                node = parents[0]
             }
-            guard attributable, visited.insert(node).inserted, let root = rowsByID[node], isExactSolRoot(root, effort: "ultra") else { continue }
-            attributedIDs.insert(childID)
+            guard attributable, let rootID, rowsByID[rootID] != nil else { continue }
+            rootByChild[childID] = rootID
         }
+
+        let attributedIDs = Set(rootByChild.keys)
+        let routedRootIDs = Set(rootByChild.values)
+        let routedRoots = rootRows.filter { routedRootIDs.contains($0.id) }
         let attributedRows = rows.filter { attributedIDs.contains($0.id) }
         let unattributedRows = rows.filter { recentChildren.contains($0.id) && !attributedIDs.contains($0.id) }
-        let partition = RoutingUltraTokenPartition(
+        let childrenByRoot = Dictionary(grouping: attributedRows) { rootByChild[$0.id]! }
+
+        // Keep model family and effort as a composite key. Both dimensions are
+        // mapped to finite vocabularies before they enter the persisted bucket.
+        var bucketValues: [String: (modelFamily: RoutingModelFamily, effort: RoutingEffortBucket, roots: Int, rootTokens: Int, children: Int, childTokens: Int)] = [:]
+        for root in routedRoots {
+            let modelFamily = RoutingModelFamily.classify(root.model)
+            let effort = RoutingEffortBucket.classify(root.effort)
+            let key = "\(modelFamily.rawValue)|\(effort.rawValue)"
+            let children = childrenByRoot[root.id] ?? []
+            var value = bucketValues[key] ?? (modelFamily, effort, 0, 0, 0, 0)
+            value.roots += 1
+            value.rootTokens = saturated(value.rootTokens, root.tokens)
+            value.children += children.count
+            value.childTokens = children.reduce(value.childTokens) { saturated($0, $1.tokens) }
+            bucketValues[key] = value
+        }
+        let parentSourceBuckets = bucketValues.values
+            .map { RoutingParentSourceBucket(modelFamily: $0.modelFamily, effort: $0.effort, rootThreads: $0.roots, rootCumulativeTokens: $0.rootTokens, attributedChildThreads: $0.children, attributedChildCumulativeTokens: $0.childTokens) }
+            .sorted { $0.id < $1.id }
+        let partition = RoutingTokenPartition(
+            windowRootThreads: rootRows.count,
+            windowRootCumulativeTokens: rootRows.reduce(0) { saturated($0, $1.tokens) },
+            routedRootThreads: routedRoots.count,
+            routedRootCumulativeTokens: routedRoots.reduce(0) { saturated($0, $1.tokens) },
+            attributedChildThreads: attributedRows.count,
+            attributedChildCumulativeTokens: attributedRows.reduce(0) { saturated($0, $1.tokens) },
+            unattributedChildThreads: unattributedRows.count,
+            unattributedChildCumulativeTokens: unattributedRows.reduce(0) { saturated($0, $1.tokens) },
+            parentSourceBuckets: parentSourceBuckets
+        )
+
+        // Legacy cumulative Ultra partition remains available to old payload
+        // consumers. Its daily fields are populated later from the independent
+        // Ultra baseline evidence; the generalized partition never writes them.
+        let ultraRoots = rootRows.filter { isExactSolRoot($0, effort: "ultra") }
+        let maxRoots = rootRows.filter { isExactSolRoot($0, effort: "max") }
+        let legacyAttributedIDs = Set<String>(rootByChild.compactMap { childID, rootID in
+            guard let root = rowsByID[rootID], isExactSolRoot(root, effort: "ultra") else { return nil }
+            return childID
+        })
+        let legacyAttributedRows = rows.filter { legacyAttributedIDs.contains($0.id) }
+        let legacyUnattributedRows = rows.filter { recentChildren.contains($0.id) && !legacyAttributedIDs.contains($0.id) }
+        let legacyPartition = RoutingUltraTokenPartition(
             ultraRootThreads: ultraRoots.count,
             ultraRootCumulativeTokens: ultraRoots.reduce(0) { saturated($0, $1.tokens) },
             maxRootThreads: maxRoots.count,
             maxRootCumulativeTokens: maxRoots.reduce(0) { saturated($0, $1.tokens) },
-            attributedUltraChildThreads: attributedRows.count,
-            attributedUltraChildCumulativeTokens: attributedRows.reduce(0) { saturated($0, $1.tokens) },
-            unattributedChildThreads: unattributedRows.count,
-            unattributedChildCumulativeTokens: unattributedRows.reduce(0) { saturated($0, $1.tokens) }
+            attributedUltraChildThreads: legacyAttributedRows.count,
+            attributedUltraChildCumulativeTokens: legacyAttributedRows.reduce(0) { saturated($0, $1.tokens) },
+            unattributedChildThreads: legacyUnattributedRows.count,
+            unattributedChildCumulativeTokens: legacyUnattributedRows.reduce(0) { saturated($0, $1.tokens) }
         )
         var classifications = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, "other") })
-        for root in ultraRoots { classifications[root.id] = "root" }
+        for rootID in routedRootIDs { classifications[rootID] = "root" }
         for childID in attributedIDs { classifications[childID] = "child" }
-        return StrictTopology(partition: partition, classifications: classifications)
+
+        // Keep the legacy Ultra denominator and its daily evidence independent
+        // from the generalized root/child classes. An Ultra root is an exact
+        // in-window `gpt-5.6-sol` + `ultra` root even when it has no attributed
+        // child. A child is Ultra-attributed only when its complete chain ends
+        // at one of those exact roots; every other row is opaque `other`.
+        var ultraClassifications = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, "other") })
+        for root in ultraRoots { ultraClassifications[root.id] = "root" }
+        for childID in legacyAttributedIDs { ultraClassifications[childID] = "child" }
+        return StrictTopology(partition: partition, legacyUltraPartition: legacyPartition, classifications: classifications, ultraClassifications: ultraClassifications)
     }
 
     private func isExactSolRoot(_ row: ThreadRow, effort: String) -> Bool {
@@ -253,9 +327,12 @@ final class RoutingTelemetryStore: @unchecked Sendable {
     private func withExistingDerivedDatabase<T>(_ body: (OpaquePointer) throws -> T) throws -> T { var db: OpaquePointer?; guard sqlite3_open_v2(databaseURL.path, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nil) == SQLITE_OK, let db else { throw RoutingTelemetryStoreError.sqlite("open readonly") }; defer { sqlite3_close(db) }; return try body(db) }
     private func withWritableDerivedDatabase<T>(_ body: (OpaquePointer) throws -> T) throws -> T { try FileManager.default.createDirectory(at: databaseURL.deletingLastPathComponent(), withIntermediateDirectories: true); try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: databaseURL.deletingLastPathComponent().path); var db: OpaquePointer?; guard sqlite3_open_v2(databaseURL.path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX, nil) == SQLITE_OK, let db else { throw RoutingTelemetryStoreError.sqlite("open derived") }; defer { sqlite3_close(db) }; try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: databaseURL.path); return try body(db) }
     private func ensureSchema(_ db: OpaquePointer) throws {
-        try execute("CREATE TABLE IF NOT EXISTS routing_daily(day_key TEXT PRIMARY KEY, observed_at_ms INTEGER NOT NULL, payload BLOB NOT NULL, quality TEXT NOT NULL); CREATE TABLE IF NOT EXISTS routing_baselines(thread_key TEXT PRIMARY KEY, tokens INTEGER NOT NULL, last_seen_ms INTEGER NOT NULL, strict_class TEXT); CREATE TABLE IF NOT EXISTS routing_assessments(id INTEGER PRIMARY KEY, generated_at_ms INTEGER NOT NULL, period_days INTEGER NOT NULL, payload BLOB NOT NULL);", db)
+        try execute("CREATE TABLE IF NOT EXISTS routing_daily(day_key TEXT PRIMARY KEY, observed_at_ms INTEGER NOT NULL, payload BLOB NOT NULL, quality TEXT NOT NULL); CREATE TABLE IF NOT EXISTS routing_baselines(thread_key TEXT PRIMARY KEY, tokens INTEGER NOT NULL, last_seen_ms INTEGER NOT NULL, strict_class TEXT, ultra_class TEXT); CREATE TABLE IF NOT EXISTS routing_assessments(id INTEGER PRIMARY KEY, generated_at_ms INTEGER NOT NULL, period_days INTEGER NOT NULL, payload BLOB NOT NULL);", db)
         if try !columnNames("routing_baselines", db).contains("strict_class") {
             try execute("ALTER TABLE routing_baselines ADD COLUMN strict_class TEXT;", db)
+        }
+        if try !columnNames("routing_baselines", db).contains("ultra_class") {
+            try execute("ALTER TABLE routing_baselines ADD COLUMN ultra_class TEXT;", db)
         }
     }
     private func loadDaily(_ db: OpaquePointer, days: Int) throws -> [StoredDaily] { let s = try prepare("SELECT observed_at_ms,payload FROM routing_daily ORDER BY day_key DESC LIMIT ?;", db); defer { sqlite3_finalize(s) }; sqlite3_bind_int(s, 1, Int32(days)); var values: [StoredDaily] = []; while sqlite3_step(s) == SQLITE_ROW, let bytes = sqlite3_column_blob(s, 1), let metric = try? JSONDecoder().decode(RoutingDailyMetric.self, from: Data(bytes: bytes, count: Int(sqlite3_column_bytes(s, 1)))) { values.append(StoredDaily(metric: metric, observedAt: Date(timeIntervalSince1970: Double(sqlite3_column_int64(s, 0)) / 1000))) }; return Array(values.reversed()) }
@@ -264,23 +341,28 @@ final class RoutingTelemetryStore: @unchecked Sendable {
     private func loadLatestAssessment(_ db: OpaquePointer) throws -> RoutingAssessment? { let s = try prepare("SELECT payload FROM routing_assessments ORDER BY generated_at_ms DESC LIMIT 1;", db); defer { sqlite3_finalize(s) }; guard sqlite3_step(s) == SQLITE_ROW, let bytes = sqlite3_column_blob(s, 0) else { return nil }; return try? JSONDecoder().decode(RoutingAssessment.self, from: Data(bytes: bytes, count: Int(sqlite3_column_bytes(s, 0)))) }
     private func upsertDaily(_ metric: RoutingDailyMetric, observedAt: Date, db: OpaquePointer) throws { let s = try prepare("INSERT INTO routing_daily(day_key,observed_at_ms,payload,quality) VALUES(?,?,?,?) ON CONFLICT(day_key) DO UPDATE SET observed_at_ms=excluded.observed_at_ms,payload=excluded.payload,quality=excluded.quality;", db); defer { sqlite3_finalize(s) }; let data = try JSONEncoder().encode(metric); sqlite3_bind_text(s, 1, metric.dayKey, -1, Self.transient); sqlite3_bind_int64(s, 2, millis(observedAt)); _ = data.withUnsafeBytes { sqlite3_bind_blob(s, 3, $0.baseAddress, Int32(data.count), Self.transient) }; sqlite3_bind_text(s, 4, metric.quality.rawValue, -1, Self.transient); guard sqlite3_step(s) == SQLITE_DONE else { throw RoutingTelemetryStoreError.sqlite("daily write") } }
     private func saveAssessment(_ value: RoutingAssessment, db: OpaquePointer) throws { let s = try prepare("INSERT INTO routing_assessments(generated_at_ms,period_days,payload) VALUES(?,?,?);", db); defer { sqlite3_finalize(s) }; let data = try JSONEncoder().encode(value); sqlite3_bind_int64(s, 1, millis(value.generatedAt)); sqlite3_bind_int(s, 2, Int32(value.periodDays)); _ = data.withUnsafeBytes { sqlite3_bind_blob(s, 3, $0.baseAddress, Int32(data.count), Self.transient) }; guard sqlite3_step(s) == SQLITE_DONE else { throw RoutingTelemetryStoreError.sqlite("assessment write") } }
-    private func updateBaselines(_ rows: [ThreadRow], childRoleKeys: [String: String], strictClassifications: [String: String], previousObservedAt: Date?, db: OpaquePointer, now: Date, shouldCancel: @escaping @Sendable () -> Bool) throws -> (totalDelta: Int, childDelta: Int, roleDeltas: [String: Int], missing: Int, rollbacks: Int, writes: Int, quality: RoutingTelemetryQuality, strictRootDelta: Int, strictChildDelta: Int, strictEvidenceComplete: Bool) {
-        let read = try prepare("SELECT tokens,last_seen_ms,strict_class FROM routing_baselines WHERE thread_key=?;", db)
-        let write = try prepare("INSERT INTO routing_baselines(thread_key,tokens,last_seen_ms,strict_class) VALUES(?,?,?,?) ON CONFLICT(thread_key) DO UPDATE SET tokens=excluded.tokens,last_seen_ms=excluded.last_seen_ms,strict_class=excluded.strict_class;", db)
+    private func updateBaselines(_ rows: [ThreadRow], childRoleKeys: [String: String], strictClassifications: [String: String], ultraClassifications: [String: String], previousObservedAt: Date?, db: OpaquePointer, now: Date, shouldCancel: @escaping @Sendable () -> Bool) throws -> (totalDelta: Int, childDelta: Int, roleDeltas: [String: Int], missing: Int, rollbacks: Int, writes: Int, quality: RoutingTelemetryQuality, strictRootDelta: Int, strictChildDelta: Int, strictEvidenceComplete: Bool, ultraRootDelta: Int, ultraChildDelta: Int, ultraEvidenceComplete: Bool) {
+        let read = try prepare("SELECT tokens,last_seen_ms,strict_class,ultra_class FROM routing_baselines WHERE thread_key=?;", db)
+        let write = try prepare("INSERT INTO routing_baselines(thread_key,tokens,last_seen_ms,strict_class,ultra_class) VALUES(?,?,?,?,?) ON CONFLICT(thread_key) DO UPDATE SET tokens=excluded.tokens,last_seen_ms=excluded.last_seen_ms,strict_class=excluded.strict_class,ultra_class=excluded.ultra_class;", db)
         defer { sqlite3_finalize(read); sqlite3_finalize(write) }
-        var total = 0, child = 0, missing = 0, rollbacks = 0, strictRoot = 0, strictChild = 0
+        var total = 0, child = 0, missing = 0, rollbacks = 0
+        var strictRoot = 0, strictChild = 0, ultraRoot = 0, ultraChild = 0
         var roleDeltas: [String: Int] = [:]
         var strictEvidenceComplete = true
+        var ultraEvidenceComplete = true
         for row in rows {
             if shouldCancel() { throw RoutingTelemetryStoreError.cancelled }
             let key = Self.hash(row.id)
-            let currentClass = strictClassifications[row.id] ?? "other"
-            let isStrictParticipant = currentClass == "root" || currentClass == "child"
+            let currentStrictClass = strictClassifications[row.id] ?? "other"
+            let currentUltraClass = ultraClassifications[row.id] ?? "other"
+            let isStrictParticipant = isStrictClass(currentStrictClass)
+            let isUltraParticipant = isStrictClass(currentUltraClass)
             sqlite3_reset(read); sqlite3_clear_bindings(read); sqlite3_bind_text(read, 1, key, -1, Self.transient)
             let found = sqlite3_step(read) == SQLITE_ROW
             let prior = found ? Int(sqlite3_column_int64(read, 0)) : 0
             let priorSeen = found ? sqlite3_column_int64(read, 1) : 0
-            let priorClass = found ? text(read, 2) : nil
+            let priorStrictClass = found ? text(read, 2) : nil
+            let priorUltraClass = found ? text(read, 3) : nil
             let newlyCreated = !found && previousObservedAt.map { row.createdMs > millis($0) } == true
             let increase: Int?
             if !found && !newlyCreated { missing += 1; increase = nil }
@@ -294,44 +376,81 @@ final class RoutingTelemetryStore: @unchecked Sendable {
                 }
             }
 
-            // Strict daily guidance may use an increment only when the same hashed
-            // observation lineage and a non-sensitive root/child/other class agree.
+            // The generalized and legacy Ultra partitions deliberately have
+            // independent evidence gates. A class drift from a known prior
+            // value is unsafe even when the current class is `other`; a nil
+            // prior class is handled as missing class evidence only for a
+            // participant in that partition. This keeps an old baseline's
+            // unrelated rows from poisoning the other metric.
             let stale = found && millis(now) - priorSeen > 48 * 3600 * 1000
-            let classDrift = found && priorClass != currentClass
-            let unsafeStrictLine = isStrictParticipant && ((!found && !newlyCreated) || (found && (priorClass == nil || stale || row.tokens < prior)))
-            if classDrift || unsafeStrictLine { strictEvidenceComplete = false }
-            if isStrictParticipant, !classDrift, !unsafeStrictLine, let increase {
-                if currentClass == "root" { strictRoot = saturated(strictRoot, increase) }
+            let strictClassDrift = found && priorStrictClass != nil && priorStrictClass != currentStrictClass
+            let ultraClassDrift = found && priorUltraClass != nil && priorUltraClass != currentUltraClass
+            let strictUnsafeLine = isStrictParticipant && ((!found && !newlyCreated) || (found && (priorStrictClass == nil || stale || row.tokens < prior)))
+            let ultraUnsafeLine = isUltraParticipant && ((!found && !newlyCreated) || (found && (priorUltraClass == nil || stale || row.tokens < prior)))
+            if strictClassDrift || strictUnsafeLine { strictEvidenceComplete = false }
+            if ultraClassDrift || ultraUnsafeLine { ultraEvidenceComplete = false }
+            if isStrictParticipant, !strictClassDrift, !strictUnsafeLine, let increase {
+                if currentStrictClass == "root" { strictRoot = saturated(strictRoot, increase) }
                 else { strictChild = saturated(strictChild, increase) }
+            }
+            if isUltraParticipant, !ultraClassDrift, !ultraUnsafeLine, let increase {
+                if currentUltraClass == "root" { ultraRoot = saturated(ultraRoot, increase) }
+                else { ultraChild = saturated(ultraChild, increase) }
             }
 
             sqlite3_reset(write); sqlite3_clear_bindings(write)
             sqlite3_bind_text(write, 1, key, -1, Self.transient)
             sqlite3_bind_int64(write, 2, Int64(row.tokens))
             sqlite3_bind_int64(write, 3, millis(now))
-            sqlite3_bind_text(write, 4, currentClass, -1, Self.transient)
+            sqlite3_bind_text(write, 4, currentStrictClass, -1, Self.transient)
+            sqlite3_bind_text(write, 5, currentUltraClass, -1, Self.transient)
             guard sqlite3_step(write) == SQLITE_DONE else { throw RoutingTelemetryStoreError.sqlite("baseline write") }
         }
-        return (total, child, roleDeltas, missing, rollbacks, rows.count, missing > 0 || rollbacks > 0 ? .partial : .complete, strictRoot, strictChild, strictEvidenceComplete)
+        return (total, child, roleDeltas, missing, rollbacks, rows.count, missing > 0 || rollbacks > 0 ? .partial : .complete, strictRoot, strictChild, strictEvidenceComplete, ultraRoot, ultraChild, ultraEvidenceComplete)
     }
-    private func mergingDailyStrictDelta(_ metric: RoutingDailyMetric, baseline: (totalDelta: Int, childDelta: Int, roleDeltas: [String: Int], missing: Int, rollbacks: Int, writes: Int, quality: RoutingTelemetryQuality, strictRootDelta: Int, strictChildDelta: Int, strictEvidenceComplete: Bool), prior: RoutingDailyMetric?) -> RoutingDailyMetric {
-        guard let partition = metric.ultraTokenPartition else { return metric }
-        let priorPartition = prior?.ultraTokenPartition
-        let priorHasStrictDelta = priorPartition?.ultraRootDailyObservedTokenDelta != nil
-            && priorPartition?.attributedUltraChildDailyObservedTokenDelta != nil
+    private func mergingDailyStrictDelta(_ metric: RoutingDailyMetric, baseline: (totalDelta: Int, childDelta: Int, roleDeltas: [String: Int], missing: Int, rollbacks: Int, writes: Int, quality: RoutingTelemetryQuality, strictRootDelta: Int, strictChildDelta: Int, strictEvidenceComplete: Bool, ultraRootDelta: Int, ultraChildDelta: Int, ultraEvidenceComplete: Bool), prior: RoutingDailyMetric?) -> RoutingDailyMetric {
+        let priorPartition = prior?.routingTokenPartition
+        let priorHasStrictDelta = priorPartition?.rootDailyObservedTokenDelta != nil
+            && priorPartition?.attributedChildDailyObservedTokenDelta != nil
             && priorPartition?.dailyDeltaEvidenceComplete != nil
-        let priorObservations = prior == nil ? 0 : (priorPartition?.dailyMergeObservationCount ?? 1)
-        let root = priorHasStrictDelta ? saturated(priorPartition?.ultraRootDailyObservedTokenDelta ?? 0, baseline.strictRootDelta) : baseline.strictRootDelta
-        let child = priorHasStrictDelta ? saturated(priorPartition?.attributedUltraChildDailyObservedTokenDelta ?? 0, baseline.strictChildDelta) : baseline.strictChildDelta
-        let evidenceComplete = prior == nil
-            ? baseline.strictEvidenceComplete
-            : priorHasStrictDelta && priorPartition?.dailyDeltaEvidenceComplete == true && baseline.strictEvidenceComplete
-        let mergedPartition = partition.withDailyObservedDelta(root: root, child: child, evidenceComplete: evidenceComplete, mergeObservationCount: priorObservations + 1)
-        return RoutingDailyMetric(dayKey: metric.dayKey, sourceThreads: metric.sourceThreads, edgeCount: metric.edgeCount, rootThreads: metric.rootThreads, childThreads: metric.childThreads, roleMetadataCovered: metric.roleMetadataCovered, roleMetadataMissing: metric.roleMetadataMissing, depthAtLeastTwo: metric.depthAtLeastTwo, orphanEdges: metric.orphanEdges, cycleAffectedChildren: metric.cycleAffectedChildren, anonymousSolChildren: metric.anonymousSolChildren, cumulativeTokens: metric.cumulativeTokens, childCumulativeTokens: metric.childCumulativeTokens, tokenDelta: metric.tokenDelta, childTokenDelta: metric.childTokenDelta, missingBaselines: metric.missingBaselines, tokenRollbacks: metric.tokenRollbacks, createdToUpdatedMedianMilliseconds: metric.createdToUpdatedMedianMilliseconds, readRows: metric.readRows, derivedWrites: metric.derivedWrites, scanMilliseconds: metric.scanMilliseconds, quality: metric.quality, roleBuckets: metric.roleBuckets, ultraTokenPartition: mergedPartition)
+        let priorStrictObservations = prior == nil ? 0 : (priorPartition?.dailyMergeObservationCount ?? 1)
+        let mergedStrictPartition: RoutingTokenPartition?
+        if let partition = metric.routingTokenPartition {
+            let root = priorHasStrictDelta ? saturated(priorPartition?.rootDailyObservedTokenDelta ?? 0, baseline.strictRootDelta) : baseline.strictRootDelta
+            let child = priorHasStrictDelta ? saturated(priorPartition?.attributedChildDailyObservedTokenDelta ?? 0, baseline.strictChildDelta) : baseline.strictChildDelta
+            // An existing same-day row without the new fields is legacy
+            // history, not a zero. Surface the current values only as an
+            // explicitly incomplete observation; never fabricate history.
+            let evidenceComplete = prior == nil
+                ? baseline.strictEvidenceComplete
+                : priorHasStrictDelta && priorPartition?.dailyDeltaEvidenceComplete == true && baseline.strictEvidenceComplete
+            mergedStrictPartition = partition.withDailyObservedDelta(root: root, child: child, evidenceComplete: evidenceComplete, mergeObservationCount: priorStrictObservations + 1)
+        } else {
+            mergedStrictPartition = nil
+        }
+
+        let priorUltraPartition = prior?.ultraTokenPartition
+        let priorHasUltraDelta = priorUltraPartition?.ultraRootDailyObservedTokenDelta != nil
+            && priorUltraPartition?.attributedUltraChildDailyObservedTokenDelta != nil
+            && priorUltraPartition?.dailyDeltaEvidenceComplete != nil
+        let priorUltraObservations = prior == nil ? 0 : (priorUltraPartition?.dailyMergeObservationCount ?? 1)
+        let mergedUltraPartition: RoutingUltraTokenPartition?
+        if let partition = metric.ultraTokenPartition {
+            let root = priorHasUltraDelta ? saturated(priorUltraPartition?.ultraRootDailyObservedTokenDelta ?? 0, baseline.ultraRootDelta) : baseline.ultraRootDelta
+            let child = priorHasUltraDelta ? saturated(priorUltraPartition?.attributedUltraChildDailyObservedTokenDelta ?? 0, baseline.ultraChildDelta) : baseline.ultraChildDelta
+            let evidenceComplete = prior == nil
+                ? baseline.ultraEvidenceComplete
+                : priorHasUltraDelta && priorUltraPartition?.dailyDeltaEvidenceComplete == true && baseline.ultraEvidenceComplete
+            mergedUltraPartition = partition.withDailyObservedDelta(root: root, child: child, evidenceComplete: evidenceComplete, mergeObservationCount: priorUltraObservations + 1)
+        } else {
+            mergedUltraPartition = nil
+        }
+
+        return RoutingDailyMetric(dayKey: metric.dayKey, sourceThreads: metric.sourceThreads, edgeCount: metric.edgeCount, rootThreads: metric.rootThreads, childThreads: metric.childThreads, roleMetadataCovered: metric.roleMetadataCovered, roleMetadataMissing: metric.roleMetadataMissing, depthAtLeastTwo: metric.depthAtLeastTwo, orphanEdges: metric.orphanEdges, cycleAffectedChildren: metric.cycleAffectedChildren, anonymousSolChildren: metric.anonymousSolChildren, cumulativeTokens: metric.cumulativeTokens, childCumulativeTokens: metric.childCumulativeTokens, tokenDelta: metric.tokenDelta, childTokenDelta: metric.childTokenDelta, missingBaselines: metric.missingBaselines, tokenRollbacks: metric.tokenRollbacks, createdToUpdatedMedianMilliseconds: metric.createdToUpdatedMedianMilliseconds, readRows: metric.readRows, derivedWrites: metric.derivedWrites, scanMilliseconds: metric.scanMilliseconds, quality: metric.quality, roleBuckets: metric.roleBuckets, ultraTokenPartition: mergedUltraPartition, routingTokenPartition: mergedStrictPartition)
     }
     private func prune(_ db: OpaquePointer, now: Date) throws { let calendar = Calendar.current; let retainedDayStart = calendar.date(byAdding: .day, value: -(RoutingTelemetryScanPolicy.dayRetention - 1), to: calendar.startOfDay(for: now)) ?? now; let dailyCutoff = RoutingTelemetryScanPolicy.localDayKey(retainedDayStart); let assessmentCutoff = millis(retainedDayStart); let baselineCutoff = millis(calendar.date(byAdding: .day, value: -RoutingTelemetryScanPolicy.baselineRetentionDays, to: calendar.startOfDay(for: now)) ?? now); for (sql, value) in [("DELETE FROM routing_daily WHERE day_key < ?;", dailyCutoff), ("DELETE FROM routing_assessments WHERE generated_at_ms < ?;", String(assessmentCutoff)), ("DELETE FROM routing_baselines WHERE last_seen_ms < ?;", String(baselineCutoff))] { let s = try prepare(sql, db); defer { sqlite3_finalize(s) }; if sql.contains("daily") { sqlite3_bind_text(s, 1, value, -1, Self.transient) } else { sqlite3_bind_int64(s, 1, Int64(value) ?? 0) }; guard sqlite3_step(s) == SQLITE_DONE else { throw RoutingTelemetryStoreError.sqlite("prune") } } }
     private func synchronized<T>(_ body: () throws -> T) rethrows -> T { lock.lock(); defer { lock.unlock() }; return try body() }
-    private func replacing(_ m: RoutingDailyMetric, tokenDelta: Int, childTokenDelta: Int, roleTokenDeltas: [String: Int], missingBaselines: Int, tokenRollbacks: Int, derivedWrites: Int, quality: RoutingTelemetryQuality) -> RoutingDailyMetric { RoutingDailyMetric(dayKey: m.dayKey, sourceThreads: m.sourceThreads, edgeCount: m.edgeCount, rootThreads: m.rootThreads, childThreads: m.childThreads, roleMetadataCovered: m.roleMetadataCovered, roleMetadataMissing: m.roleMetadataMissing, depthAtLeastTwo: m.depthAtLeastTwo, orphanEdges: m.orphanEdges, cycleAffectedChildren: m.cycleAffectedChildren, anonymousSolChildren: m.anonymousSolChildren, cumulativeTokens: m.cumulativeTokens, childCumulativeTokens: m.childCumulativeTokens, tokenDelta: tokenDelta, childTokenDelta: childTokenDelta, missingBaselines: missingBaselines, tokenRollbacks: tokenRollbacks, createdToUpdatedMedianMilliseconds: m.createdToUpdatedMedianMilliseconds, readRows: m.readRows, derivedWrites: derivedWrites, scanMilliseconds: m.scanMilliseconds, quality: quality, roleBuckets: m.roleBuckets?.map { $0.withTokenDelta(roleTokenDeltas[$0.id] ?? 0) }, ultraTokenPartition: m.ultraTokenPartition) }
+    private func replacing(_ m: RoutingDailyMetric, tokenDelta: Int, childTokenDelta: Int, roleTokenDeltas: [String: Int], missingBaselines: Int, tokenRollbacks: Int, derivedWrites: Int, quality: RoutingTelemetryQuality) -> RoutingDailyMetric { RoutingDailyMetric(dayKey: m.dayKey, sourceThreads: m.sourceThreads, edgeCount: m.edgeCount, rootThreads: m.rootThreads, childThreads: m.childThreads, roleMetadataCovered: m.roleMetadataCovered, roleMetadataMissing: m.roleMetadataMissing, depthAtLeastTwo: m.depthAtLeastTwo, orphanEdges: m.orphanEdges, cycleAffectedChildren: m.cycleAffectedChildren, anonymousSolChildren: m.anonymousSolChildren, cumulativeTokens: m.cumulativeTokens, childCumulativeTokens: m.childCumulativeTokens, tokenDelta: tokenDelta, childTokenDelta: childTokenDelta, missingBaselines: missingBaselines, tokenRollbacks: tokenRollbacks, createdToUpdatedMedianMilliseconds: m.createdToUpdatedMedianMilliseconds, readRows: m.readRows, derivedWrites: derivedWrites, scanMilliseconds: m.scanMilliseconds, quality: quality, roleBuckets: m.roleBuckets?.map { $0.withTokenDelta(roleTokenDeltas[$0.id] ?? 0) }, ultraTokenPartition: m.ultraTokenPartition, routingTokenPartition: m.routingTokenPartition) }
     private func roleBucketKey(_ rawRole: String?) -> String { RoutingRegisteredRole(rawValue: rawRole ?? "")?.rawValue ?? "unknown" }
     private func makeRoleBuckets(_ childRows: [ThreadRow]) -> [RoutingRoleBucket] {
         var counts = Dictionary(uniqueKeysWithValues: RoutingRegisteredRole.allCases.map { ($0.rawValue, (threads: 0, tokens: 0, complete: 0, matched: 0)) })
@@ -344,14 +463,19 @@ final class RoutingTelemetryStore: @unchecked Sendable {
                 value.threads += 1
                 value.tokens = saturated(value.tokens, row.tokens)
                 if isComplete { value.complete += 1 }
-                if RoutingRegisteredRole(rawValue: key)?.matches(model: row.model, effort: row.effort) == true { value.matched += 1 }
+                if RoutingRegisteredRole(rawValue: key)?.matches(model: row.model, effort: row.effort, createdAtMs: row.createdMs) == true { value.matched += 1 }
                 counts[key] = value
             }
         }
-        var result = RoutingRegisteredRole.allCases.map { role -> RoutingRoleBucket in
+        var result = RoutingRegisteredRole.activeCases.map { role -> RoutingRoleBucket in
             let value = counts[role.rawValue]!
             return RoutingRoleBucket(role: role, childThreads: value.threads, cumulativeTokens: value.tokens, tokenDelta: 0, identityCompleteThreads: value.complete, identityMatchedThreads: value.matched)
         }
+        result.append(contentsOf: RoutingRegisteredRole.retiredCases.compactMap { role -> RoutingRoleBucket? in
+            let value = counts[role.rawValue]!
+            guard value.threads > 0 else { return nil }
+            return RoutingRoleBucket(role: role, childThreads: value.threads, cumulativeTokens: value.tokens, tokenDelta: 0, identityCompleteThreads: value.complete, identityMatchedThreads: value.matched)
+        })
         if unknown.threads > 0 {
             result.append(RoutingRoleBucket(role: nil, childThreads: unknown.threads, cumulativeTokens: unknown.tokens, tokenDelta: 0, identityCompleteThreads: unknown.complete, identityMatchedThreads: nil))
         }
@@ -372,6 +496,7 @@ final class RoutingTelemetryStore: @unchecked Sendable {
     private func text(_ s: OpaquePointer, _ index: Int32) -> String? { guard sqlite3_column_type(s, index) != SQLITE_NULL, let value = sqlite3_column_text(s, index) else { return nil }; return String(cString: value) }
     private func startOfWindow(days: Int, now: Date) -> Date { Calendar.current.date(byAdding: .day, value: -(max(1, days) - 1), to: Calendar.current.startOfDay(for: now)) ?? now }
     private func millis(_ date: Date) -> Int64 { Int64(date.timeIntervalSince1970 * 1000) }
+    private func isStrictClass(_ value: String) -> Bool { value == "root" || value == "child" }
     private func saturated(_ a: Int, _ b: Int) -> Int { let (v, overflow) = a.addingReportingOverflow(b); return overflow ? Int.max : v }
     private func worse(_ a: RoutingTelemetryQuality, _ b: RoutingTelemetryQuality) -> RoutingTelemetryQuality { a == .unavailable || b == .unavailable ? .unavailable : (a == .partial || b == .partial ? .partial : .complete) }
     private static func identifier(_ name: String) -> String { "\"\(name.replacingOccurrences(of: "\"", with: "\"\""))\"" }

@@ -18,6 +18,25 @@ enum HUDDisplayMode: String, CaseIterable, Identifiable {
     }
 }
 
+enum HUDDetailAppearance: String, CaseIterable, Identifiable, Sendable {
+    case system
+    case light
+    case dark
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .system:
+            "跟随系统"
+        case .light:
+            "浅色"
+        case .dark:
+            "深色"
+        }
+    }
+}
+
 enum CodexRadarCredentialSource: Equatable, Sendable {
     case environment
     case secretStore
@@ -73,10 +92,13 @@ final class CodexNotchSettings: ObservableObject {
         static let showContextMetrics = "showContextMetrics"
         static let skillInsightsEnabled = "skillInsightsEnabled"
         static let performanceMonitoringEnabled = "performanceMonitoringEnabled"
+        static let agySidecarAutomaticCanaryEnabled = "agySidecarAutomaticCanaryEnabled"
+        static let agySidecarAutomaticCanaryInterval = "agySidecarAutomaticCanaryInterval"
         static let codexRadarEnabled = "codexRadarEnabled"
         static let codexRadarUsesAuthorizedAPI = "codexRadarUsesAuthorizedAPI"
         static let enablePulse = "enablePulse"
         static let hudDisplayMode = "hudDisplayMode"
+        static let detailAppearance = "detailAppearance"
         static let overlayHorizontalPosition = "overlayHorizontalPosition"
         static let overlayVerticalPosition = "overlayVerticalPosition"
         static let taskHistoryRange = "taskHistoryRange"
@@ -198,6 +220,23 @@ final class CodexNotchSettings: ObservableObject {
         }
     }
 
+    @Published var agySidecarAutomaticCanaryEnabled: Bool {
+        didSet {
+            defaults.set(agySidecarAutomaticCanaryEnabled, forKey: Keys.agySidecarAutomaticCanaryEnabled)
+        }
+    }
+
+    @Published var agySidecarAutomaticCanaryInterval: TimeInterval {
+        didSet {
+            let normalized = AGYSidecarHealthPolicy.automaticInterval(agySidecarAutomaticCanaryInterval)
+            if normalized != agySidecarAutomaticCanaryInterval {
+                agySidecarAutomaticCanaryInterval = normalized
+                return
+            }
+            defaults.set(normalized, forKey: Keys.agySidecarAutomaticCanaryInterval)
+        }
+    }
+
     @Published var codexRadarEnabled: Bool {
         didSet {
             defaults.set(codexRadarEnabled, forKey: Keys.codexRadarEnabled)
@@ -219,6 +258,12 @@ final class CodexNotchSettings: ObservableObject {
     @Published var hudDisplayMode: HUDDisplayMode {
         didSet {
             defaults.set(hudDisplayMode.rawValue, forKey: Keys.hudDisplayMode)
+        }
+    }
+
+    @Published var detailAppearance: HUDDetailAppearance {
+        didSet {
+            defaults.set(detailAppearance.rawValue, forKey: Keys.detailAppearance)
         }
     }
 
@@ -518,10 +563,18 @@ final class CodexNotchSettings: ObservableObject {
         self.showContextMetrics = defaults.object(forKey: Keys.showContextMetrics) as? Bool ?? false
         self.skillInsightsEnabled = defaults.object(forKey: Keys.skillInsightsEnabled) as? Bool ?? true
         self.performanceMonitoringEnabled = defaults.object(forKey: Keys.performanceMonitoringEnabled) as? Bool ?? false
+        self.agySidecarAutomaticCanaryEnabled = defaults.object(forKey: Keys.agySidecarAutomaticCanaryEnabled) as? Bool ?? false
+        self.agySidecarAutomaticCanaryInterval = Self.clamped(
+            defaults.object(forKey: Keys.agySidecarAutomaticCanaryInterval) as? TimeInterval
+                ?? AGYSidecarHealthPolicy.defaultAutomaticCanaryInterval,
+            min: AGYSidecarHealthPolicy.minimumAutomaticCanaryInterval,
+            max: AGYSidecarHealthPolicy.maximumAutomaticCanaryInterval
+        )
         self.codexRadarEnabled = defaults.object(forKey: Keys.codexRadarEnabled) as? Bool ?? true
         self.codexRadarUsesAuthorizedAPI = defaults.object(forKey: Keys.codexRadarUsesAuthorizedAPI) as? Bool ?? false
         self.enablePulse = defaults.object(forKey: Keys.enablePulse) as? Bool ?? true
         self.hudDisplayMode = HUDDisplayMode(rawValue: defaults.string(forKey: Keys.hudDisplayMode) ?? "") ?? .floatingHUD
+        self.detailAppearance = HUDDetailAppearance(rawValue: defaults.string(forKey: Keys.detailAppearance) ?? "") ?? .system
         self.overlayHorizontalPosition = Self.clampedOverlayHorizontalPosition(
             defaults.object(forKey: Keys.overlayHorizontalPosition) as? Double ?? 0
         )

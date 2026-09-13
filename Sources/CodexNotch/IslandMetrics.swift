@@ -7,7 +7,7 @@ enum IslandMetrics {
     static let collapsedHeight: CGFloat = 38
     static let collapsedPillHorizontalPadding: CGFloat = 10
     static let menuBarRevealSafetyGap: CGFloat = 4
-    static let detailHeaderHeight: CGFloat = 22
+    static let detailHeaderHeight: CGFloat = 28
     static let detailPageSwitcherHeight: CGFloat = 30
     static let detailTopPadding: CGFloat = 26
     static let detailBottomPadding: CGFloat = 12
@@ -15,8 +15,9 @@ enum IslandMetrics {
     static let detailQuotaHeight: CGFloat = 66
     static let detailProvenanceHeight: CGFloat = 18
     static let detailSparkHeight: CGFloat = 32
+    static let detailAntigravityQuotaHeight: CGFloat = 87
     static let detailTaskHeaderHeight: CGFloat = 28
-    static let detailTaskRowHeight: CGFloat = 34
+    static let detailTaskRowHeight: CGFloat = 44
     static let detailTaskEmptySpace: CGFloat = 50
     static let detailAnalyticsHeight: CGFloat = 48
     static let detailPeriodFooterHeight: CGFloat = 44
@@ -124,9 +125,15 @@ enum IslandMetrics {
         return min(1, max(0, (range.upperBound - clampedTopEdge) / travel))
     }
 
-    static func detailHeight(taskRows: Int, showsPeriodUsage: Bool, showsSparkQuota: Bool = false) -> CGFloat {
+    static func detailHeight(
+        taskRows: Int,
+        showsPeriodUsage: Bool,
+        showsSparkQuota: Bool = false,
+        showsAntigravityQuota: Bool = false
+    ) -> CGFloat {
         let rows = max(1, min(visibleTaskRows, taskRows))
         let sparkHeight: CGFloat = showsSparkQuota ? 8 + detailSparkHeight : 0
+        let antigravityHeight: CGFloat = showsAntigravityQuota ? 8 + detailAntigravityQuotaHeight : 0
         let periodHeight: CGFloat = showsPeriodUsage ? 12 + detailPeriodFooterHeight : 0
         let contentHeight = detailTopPadding
             + detailHeaderHeight
@@ -138,6 +145,7 @@ enum IslandMetrics {
             + detailProvenanceHeight
             + 8
             + sparkHeight
+            + antigravityHeight
             + taskTableHeight(taskRows: rows)
             + 8
             + detailAnalyticsHeight

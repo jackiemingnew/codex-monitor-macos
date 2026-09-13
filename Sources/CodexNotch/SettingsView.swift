@@ -117,6 +117,8 @@ private struct SettingsDraft: Equatable {
     var showContextMetrics = false
     var skillInsightsEnabled = true
     var performanceMonitoringEnabled = false
+    var agySidecarAutomaticCanaryEnabled = false
+    var agySidecarAutomaticCanaryInterval = AGYSidecarHealthPolicy.defaultAutomaticCanaryInterval
     var codexRadarEnabled = true
     var codexRadarUsesAuthorizedAPI = false
     var codexRadarAPIToken = ""
@@ -151,6 +153,7 @@ private struct SettingsDraft: Equatable {
     var launchAtLoginEnabled = false
     var enablePulse = true
     var hudDisplayMode: HUDDisplayMode = .floatingHUD
+    var detailAppearance: HUDDetailAppearance = .system
     var secretStorageMode: SecretStorageMode = .keychain
 
     @MainActor
@@ -167,6 +170,8 @@ private struct SettingsDraft: Equatable {
         showContextMetrics = settings.showContextMetrics
         skillInsightsEnabled = settings.skillInsightsEnabled
         performanceMonitoringEnabled = settings.performanceMonitoringEnabled
+        agySidecarAutomaticCanaryEnabled = settings.agySidecarAutomaticCanaryEnabled
+        agySidecarAutomaticCanaryInterval = settings.agySidecarAutomaticCanaryInterval
         codexRadarEnabled = settings.codexRadarEnabled
         codexRadarUsesAuthorizedAPI = settings.codexRadarUsesAuthorizedAPI
         codexRadarAPIToken = settings.secretsAreLoaded ? settings.codexRadarAPIToken : ""
@@ -201,6 +206,7 @@ private struct SettingsDraft: Equatable {
         launchAtLoginEnabled = settings.launchAtLoginEnabled
         enablePulse = settings.enablePulse
         hudDisplayMode = settings.hudDisplayMode
+        detailAppearance = settings.detailAppearance
         secretStorageMode = settings.secretStorageMode
     }
 
@@ -228,6 +234,7 @@ struct SettingsView: View {
     @ObservedObject var subAPIViewModel: BalanceMonitorViewModel
     @ObservedObject var codexRadarViewModel: CodexRadarViewModel
     @ObservedObject var analyticsViewModel: CodexWebAnalyticsViewModel
+    @ObservedObject var agySidecarHealthViewModel: AGYSidecarHealthViewModel
     let onRefresh: () -> Void
 
     @State private var draft = SettingsDraft()
@@ -519,6 +526,271 @@ struct SettingsView: View {
             }
             .pickerStyle(.segmented)
         }
+
+        Section("AGY 旁路健康") {
+            VStack(alignment: .leading, spacing: 8) {
+                sidecarStatusRow(
+                    title: "Doctor",
+                    status: agySidecarHealthViewModel.isDoctorChecking
+                        ? "检查中"
+                        : agySidecarHealthViewModel.doctorSnapshot.status.rawValue,
+                    timestamp: agySidecarHealthViewModel.doctorSnapshot.checkedAt,
+                    color: doctorStatusColor
+                )
+                sidecarStatusRow(
+                    title: "E2E",
+                    status: agySidecarHealthViewModel.isCanaryRunning
+                        ? "验收中"
+                        : agySidecarHealthViewModel.e2eSnapshot.status.rawValue,
+                    timestamp: agySidecarHealthViewModel.e2eSnapshot.checkedAt,
+                    color: e2eStatusColor
+                )
+            }
+            .help(sidecarHealthHelp)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(sidecarHealthHelp)
+
+            HStack(spacing: 10) {
+                Button(agySidecarHealthViewModel.isDoctorChecking ? "取消自检" : "重新自检") {
+                    if agySidecarHealthViewModel.isDoctorChecking {
+                        agySidecarHealthViewModel.cancelDoctorCheck()
+                    } else {
+                        Task { await agySidecarHealthViewModel.checkDoctorNow() }
+                    }
+                }
+                .help("只执行固定的 agy_review.py doctor；不调用模型，也不随普通 Token 刷新重复执行。")
+                .accessibilityLabel(agySidecarHealthViewModel.isDoctorChecking
+                    ? "取消 AGY 旁路 Doctor 自检"
+                    : "重新运行 AGY 旁路 Doctor 自检")
+                .accessibilityHint(agySidecarHealthViewModel.isDoctorChecking
+                    ? "停止本次自检进程"
+                    : "不调用模型，只检查模型角色族与只读 repository 模式是否就绪")
+
+                Button(agySidecarHealthViewModel.isCanaryRunning ? "取消验收" : "立即验收") {
+                    if agySidecarHealthViewModel.isCanaryRunning {
+                        agySidecarHealthViewModel.cancelCanary()
+                    } else {
+                        Task { await agySidecarHealthViewModel.runCanaryNow() }
+                    }
+                }
+                .disabled(!agySidecarHealthViewModel.liveCanaryAuthorized)
+                .help(sidecarCanaryButtonHelp)
+                .accessibilityLabel(agySidecarHealthViewModel.isCanaryRunning
+                    ? "取消 AGY 旁路端到端验收"
+                    : "立即运行 AGY 旁路端到端验收")
+                .accessibilityHint(sidecarCanaryButtonHelp)
+
+                Spacer()
+
+                if !agySidecarHealthViewModel.liveCanaryAuthorized {
+                    Text("本构建未授权真实调用")
+                        .font(MonitorTheme.Typography.settingsCaption)
+                        .foregroundStyle(MonitorTheme.settingsTextSecondary)
+                }
+            }
+
+            Toggle(isOn: $draft.agySidecarAutomaticCanaryEnabled) {
+                HelpLabel(
+                    title: "低频自动验收",
+                    help: "默认关闭。显式开启后才按所选周期运行一次固定 repository-mode canary；每个计划只调用一次 wrapper，不自动重试。最短周期为 24 小时。"
+                )
+            }
+            .disabled(!agySidecarHealthViewModel.liveCanaryAuthorized)
+            .accessibilityHint("默认关闭，开启后最短每二十四小时运行一次固定只读验收")
+
+            Picker(selection: $draft.agySidecarAutomaticCanaryInterval) {
+                Text("24 小时").tag(TimeInterval(24 * 60 * 60))
+                Text("3 天").tag(TimeInterval(3 * 24 * 60 * 60))
+                Text("7 天").tag(TimeInterval(7 * 24 * 60 * 60))
+            } label: {
+                HelpLabel(title: "自动周期", help: "自动验收频率；任何保存值都会被限制为不短于 24 小时。")
+            }
+            .pickerStyle(.segmented)
+            .disabled(
+                !agySidecarHealthViewModel.liveCanaryAuthorized
+                    || !draft.agySidecarAutomaticCanaryEnabled
+            )
+
+            if !agySidecarHealthViewModel.doctorSnapshot.models.isEmpty {
+                Text("当前模型 · \(sidecarDoctorModelsSummary)")
+                    .font(MonitorTheme.Typography.settingsHelper)
+                    .foregroundStyle(MonitorTheme.settingsTextSecondary)
+                    .textSelection(.enabled)
+                    .help("展示 Doctor 实际发现的模型。具体版本升级不会单独判为故障；模型角色族与只读协议才决定健康。")
+                    .accessibilityLabel("Doctor 当前模型：\(sidecarDoctorModelsAccessibilitySummary)。具体版本只记录，不单独决定健康。")
+            }
+
+            if !agySidecarHealthViewModel.e2eSnapshot.attemptedModels.isEmpty {
+                Text("Attempted models · \(agySidecarHealthViewModel.e2eSnapshot.attemptedModels.joined(separator: " → "))")
+                    .font(MonitorTheme.Typography.settingsHelper)
+                    .foregroundStyle(MonitorTheme.settingsTextSecondary)
+                    .textSelection(.enabled)
+                    .help(sidecarHealthHelp)
+                    .accessibilityLabel("已尝试模型：\(agySidecarHealthViewModel.e2eSnapshot.attemptedModels.joined(separator: "，"))")
+            }
+
+            if agySidecarHealthViewModel.e2eSnapshot.wrapperStatus != nil {
+                DisclosureGroup("协议收据") {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(sidecarReceiptContractSummary)
+                        if agySidecarHealthViewModel.e2eSnapshot.source != nil {
+                            Text(sidecarSourceContractSummary)
+                        }
+                    }
+                    .font(MonitorTheme.Typography.settingsCaption.monospacedDigit())
+                    .foregroundStyle(MonitorTheme.settingsTextSecondary)
+                    .textSelection(.enabled)
+                }
+                .help(sidecarProtocolHelp)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(sidecarProtocolHelp)
+            }
+
+            if let audit = agySidecarHealthViewModel.e2eSnapshot.toolAudit {
+                Text("工具审计 · Diff \(audit.snapshotDiffReads) · 只读文件 \(audit.readOnlyFileCalls) · 其他 \(audit.otherToolCalls)")
+                    .font(MonitorTheme.Typography.settingsHelper.monospacedDigit())
+                    .foregroundStyle(audit.otherToolCalls == 0 ? MonitorTheme.settingsTextSecondary : MonitorTheme.settingsError)
+                    .help("Diff 表示读取 .agy-review/diff.patch 的成功次数；其他工具调用必须为 0。")
+                    .accessibilityLabel("工具审计：Diff 读取 \(audit.snapshotDiffReads) 次，只读文件调用 \(audit.readOnlyFileCalls) 次，其他工具调用 \(audit.otherToolCalls) 次")
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(sidecarTokenSummary)
+                    .font(MonitorTheme.Typography.settingsHelper.monospacedDigit())
+                    .foregroundStyle(MonitorTheme.settingsTextSecondary)
+                Text(agySidecarHealthViewModel.e2eSnapshot.codexTokenUsageLabel)
+                    .font(MonitorTheme.Typography.settingsCaption.monospacedDigit())
+                    .foregroundStyle(MonitorTheme.settingsTextSecondary)
+                Text(sidecarReceiptSummary)
+                    .font(MonitorTheme.Typography.settingsCaption.monospacedDigit())
+                    .foregroundStyle(MonitorTheme.settingsTextSecondary)
+            }
+            .help("仅展示 wrapper 明确返回的 Token；缺失字段固定为 UNAVAILABLE。receipt bytes 只是收据字节数，绝不作为 Token 使用。")
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(sidecarTokenAccessibilityLabel)
+
+            Text("夹具故意包含 clamp 边界错误；发现该 finding 才代表链路健康。模型具体版本只记录，角色族或协议未知时显示兼容待确认；配额与旁路状态相互独立。")
+                .font(MonitorTheme.Typography.settingsCaption)
+                .foregroundStyle(MonitorTheme.settingsTextSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .help("E2E 成功标准是安全地读取只读 Diff 并命中故意缺陷，不是返回 PASS。")
+                .accessibilityLabel("夹具故意包含 clamp 边界错误。成功发现该问题才表示旁路健康。具体模型版本只记录，角色族与协议决定健康；配额与旁路状态相互独立。")
+        }
+    }
+
+    private func sidecarStatusRow(title: String, status: String, timestamp: Date?, color: Color) -> some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(color)
+                .frame(width: 7, height: 7)
+                .accessibilityHidden(true)
+            Text(title)
+                .font(MonitorTheme.Typography.settingsControl)
+            Spacer()
+            Text(status)
+                .font(MonitorTheme.Typography.settingsStatus.monospacedDigit())
+                .foregroundStyle(color)
+            Text(sidecarTimestamp(timestamp))
+                .font(MonitorTheme.Typography.settingsCaption)
+                .foregroundStyle(MonitorTheme.settingsTextSecondary)
+        }
+    }
+
+    private var doctorStatusColor: Color {
+        if agySidecarHealthViewModel.isDoctorChecking { return MonitorTheme.radarBaseline }
+        return switch agySidecarHealthViewModel.doctorSnapshot.status {
+        case .ready: MonitorTheme.settingsSuccess
+        case .compatibilityWarning: MonitorTheme.settingsWarning
+        case .broken: MonitorTheme.settingsError
+        case .unavailable, .neverRun: MonitorTheme.settingsTextSecondary
+        }
+    }
+
+    private var e2eStatusColor: Color {
+        if agySidecarHealthViewModel.isCanaryRunning { return MonitorTheme.radarBaseline }
+        return switch agySidecarHealthViewModel.e2eSnapshot.status {
+        case .complete: MonitorTheme.settingsSuccess
+        case .partial: MonitorTheme.settingsWarning
+        case .broken: MonitorTheme.settingsError
+        case .unavailable, .neverRun: MonitorTheme.settingsTextSecondary
+        }
+    }
+
+    private func sidecarTimestamp(_ date: Date?) -> String {
+        date.map { "\(Formatters.relativeAge($0))前" } ?? "从未"
+    }
+
+    private var sidecarCanaryButtonHelp: String {
+        agySidecarHealthViewModel.liveCanaryAuthorized
+            ? "运行一次固定 repository-mode clamp canary；不重试、不修改生产仓库。"
+            : "LIVE_CANARY_AUTHORIZED=false：本构建禁止真实 AGY 模型调用，E2E 保持 NEVER_RUN。"
+    }
+
+    private var sidecarHealthHelp: String {
+        agySidecarHealthViewModel.accessibilitySummary
+    }
+
+    private var sidecarDoctorModelsSummary: String {
+        agySidecarHealthViewModel.doctorSnapshot.models.map { model in
+            "\(model.model) \(model.available ? "可用" : "不可用")"
+        }.joined(separator: " → ")
+    }
+
+    private var sidecarDoctorModelsAccessibilitySummary: String {
+        agySidecarHealthViewModel.doctorSnapshot.models.map { model in
+            "\(model.model)，\(model.available ? "可用" : "不可用")"
+        }.joined(separator: "；")
+    }
+
+    private var sidecarTokenSummary: String {
+        let usage = agySidecarHealthViewModel.e2eSnapshot.usage
+        return [
+            "input \(sidecarTokenValue(usage.input))",
+            "output \(sidecarTokenValue(usage.output))",
+            "thinking \(sidecarTokenValue(usage.thinking))",
+            "cache \(sidecarTokenValue(usage.cacheRead))",
+            "total \(sidecarTokenValue(usage.total))"
+        ].joined(separator: " · ")
+    }
+
+    private var sidecarReceiptSummary: String {
+        agySidecarHealthViewModel.e2eSnapshot.receiptBytes.map { "receipt bytes \($0)" }
+            ?? "receipt bytes UNAVAILABLE"
+    }
+
+    private var sidecarReceiptContractSummary: String {
+        let snapshot = agySidecarHealthViewModel.e2eSnapshot
+        return "status=\(snapshot.wrapperStatus ?? "UNAVAILABLE") · secondary_required=\(sidecarBoolean(snapshot.secondaryRequired))"
+    }
+
+    private var sidecarSourceContractSummary: String {
+        guard let source = agySidecarHealthViewModel.e2eSnapshot.source else {
+            return "source=UNAVAILABLE"
+        }
+        return [
+            "source.kind=\(source.kind)",
+            "diff_delivery=\(source.diffDelivery ?? "UNAVAILABLE")",
+            "original_repository_exposed=\(sidecarBoolean(source.originalRepositoryExposed))",
+            "git_metadata_exposed=\(sidecarBoolean(source.gitMetadataExposed))",
+            "snapshot_read_only=\(sidecarBoolean(source.snapshotReadOnly))",
+            "untracked_files_omitted=\(source.untrackedFilesOmitted.map(String.init) ?? "UNAVAILABLE")"
+        ].joined(separator: " · ")
+    }
+
+    private var sidecarProtocolHelp: String {
+        "AGY 旁路协议：\(sidecarReceiptContractSummary)。\(sidecarSourceContractSummary)。"
+    }
+
+    private func sidecarBoolean(_ value: Bool?) -> String {
+        value.map { $0 ? "true" : "false" } ?? "UNAVAILABLE"
+    }
+
+    private var sidecarTokenAccessibilityLabel: String {
+        "模型 Token 收据：\(sidecarTokenSummary)。\(agySidecarHealthViewModel.e2eSnapshot.codexTokenUsageLabel)。\(sidecarReceiptSummary)。"
+    }
+
+    private func sidecarTokenValue(_ value: Int?) -> String {
+        value.map(String.init) ?? "UNAVAILABLE"
     }
 
     @ViewBuilder
@@ -678,6 +950,20 @@ struct SettingsView: View {
         }
 
         Section("启动与外观") {
+            Picker(selection: $draft.detailAppearance) {
+                ForEach(HUDDetailAppearance.allCases) { appearance in
+                    Text(appearance.label).tag(appearance)
+                }
+            } label: {
+                HelpLabel(
+                    title: "详情外观",
+                    help: "控制展开详情面板的外观；默认跟随系统。设置窗口、菜单栏和收起胶囊不受影响，点击保存后生效。"
+                )
+            }
+            .pickerStyle(.segmented)
+            .accessibilityLabel("详情外观")
+            .accessibilityHint("选择跟随系统、浅色或深色；点击保存后生效")
+
             Picker(selection: $draft.secretStorageMode) {
                 ForEach(SecretStorageMode.allCases) { mode in
                     Text(mode.label).tag(mode)
@@ -1763,7 +2049,10 @@ struct SettingsView: View {
         settings.showContextMetrics = next.showContextMetrics
         settings.skillInsightsEnabled = next.skillInsightsEnabled
         settings.performanceMonitoringEnabled = next.performanceMonitoringEnabled
+        settings.agySidecarAutomaticCanaryEnabled = next.agySidecarAutomaticCanaryEnabled
+        settings.agySidecarAutomaticCanaryInterval = next.agySidecarAutomaticCanaryInterval
         settings.hudDisplayMode = next.hudDisplayMode
+        settings.detailAppearance = next.detailAppearance
         settings.codexRadarEnabled = next.codexRadarEnabled
         let radarModeChanged = next.codexRadarUsesAuthorizedAPI != settings.codexRadarUsesAuthorizedAPI
         let radarTokenChanged = codexRadarTokenLoadedForEditing

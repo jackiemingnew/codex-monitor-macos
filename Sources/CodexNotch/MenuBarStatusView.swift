@@ -60,7 +60,7 @@ struct MenuBarStatusView: View {
     private var statusColor: Color {
         switch effectiveDisplaySource {
         case .automatic, .codex:
-            viewModel.snapshot.isRunning ? MonitorTheme.running : Color.secondary
+            viewModel.snapshot.isRunning ? MonitorTheme.Pill.running : Color.secondary
         case .remoteCodex:
             severityColor(remoteViewModel.snapshot.panelSeverity)
         case .newAPI:
@@ -75,9 +75,9 @@ struct MenuBarStatusView: View {
         case .none:
             Color.primary
         case .warning:
-            MonitorTheme.warning
+            MonitorTheme.Pill.warning
         case .error:
-            MonitorTheme.critical
+            MonitorTheme.Pill.critical
         }
     }
 

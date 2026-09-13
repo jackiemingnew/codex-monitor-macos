@@ -56,6 +56,7 @@ swiftc \
   "$ROOT_DIR/Sources/CodexNotch/CodexRadarModels.swift" \
   "$ROOT_DIR/Sources/CodexNotch/CodexRadarClient.swift" \
   "$ROOT_DIR/Sources/CodexNotch/CodexRadarViewModel.swift" \
+  "$ROOT_DIR/Sources/CodexNotch/AGYSidecarHealthModels.swift" \
   "$ROOT_DIR/Sources/CodexNotch/CodexNotchSettings.swift" \
   "$ROOT_DIR/Sources/CodexNotch/CodexSessionFileLocator.swift" \
   "$ROOT_DIR/Sources/CodexNotch/SkillInsightsModels.swift" \

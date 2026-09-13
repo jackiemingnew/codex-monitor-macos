@@ -50,6 +50,24 @@ guard menuBarCompatibility.handleApplicationLifecycle(
 }
 
 let detailHeight: CGFloat = 488
+let detailWithoutAGY = IslandMetrics.detailHeight(
+    taskRows: IslandMetrics.visibleTaskRows,
+    showsPeriodUsage: true,
+    showsSparkQuota: true
+)
+let detailWithAGY = IslandMetrics.detailHeight(
+    taskRows: IslandMetrics.visibleTaskRows,
+    showsPeriodUsage: true,
+    showsSparkQuota: true,
+    showsAntigravityQuota: true
+)
+guard detailWithAGY == detailWithoutAGY + 8 + IslandMetrics.detailAntigravityQuotaHeight else {
+    fatalError("AGY visibility must add only the compact quota row and its spacing")
+}
+guard IslandMetrics.width == 520,
+      IslandMetrics.detailAntigravityQuotaHeight == 87 else {
+    fatalError("AGY four-window section must retain the 520pt panel and reserve its header plus two quota rows")
+}
 let verticalRange = IslandMetrics.floatingHUDTopEdgeRange(
     screenFrame: screenFrame,
     visibleFrame: visibleFrame,

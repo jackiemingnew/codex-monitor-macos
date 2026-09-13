@@ -489,7 +489,7 @@ private struct AnalyticsChartTooltip: View {
         .foregroundStyle(MonitorTheme.textSecondary)
         .padding(MonitorTheme.Spacing.row)
         .frame(width: 168)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous))
+        .background(MonitorTheme.routingTooltipSurface, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous)
                 .stroke(MonitorTheme.panelStroke, lineWidth: MonitorTheme.Stroke.hairline)

@@ -242,10 +242,15 @@ private struct SnapshotCommandOptions {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var overlayController: NotchOverlayController?
+    // AppDelegate owns this independently of Codex's usage store so AGY
+    // refreshes can never enter the Codex snapshot or its CLI contracts.
+    private var antigravityQuotaViewModel: AntigravityQuotaViewModel?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = makeMainMenu()
-        overlayController = NotchOverlayController()
+        let antigravityQuotaViewModel = AntigravityQuotaViewModel()
+        self.antigravityQuotaViewModel = antigravityQuotaViewModel
+        overlayController = NotchOverlayController(antigravityQuotaViewModel: antigravityQuotaViewModel)
         overlayController?.show()
     }
 
@@ -447,6 +452,7 @@ final class NotchOverlayController {
     private lazy var performanceViewModel = PerformanceMonitorViewModel(settings: settings)
     private lazy var analyticsProvider = CodexWebAnalyticsProvider()
     private lazy var analyticsViewModel = CodexWebAnalyticsViewModel(provider: analyticsProvider)
+    private lazy var agySidecarHealthViewModel = AGYSidecarHealthViewModel()
     // Kept by the overlay controller so its 21:00 local scheduler is independent of page visibility.
     private lazy var routingTelemetryViewModel = RoutingTelemetryViewModel()
     private lazy var analyticsBrowserController = CodexWebAnalyticsBrowserWindowController(
@@ -464,8 +470,9 @@ final class NotchOverlayController {
         subAPIViewModel: subAPIViewModel,
         codexRadarViewModel: codexRadarViewModel,
         analyticsViewModel: analyticsViewModel,
+        agySidecarHealthViewModel: agySidecarHealthViewModel,
         onRefresh: { [weak self] in
-            self?.viewModel.refreshAll()
+            self?.refreshLocalData()
         }
     )
     private var cancellables: Set<AnyCancellable> = []
@@ -480,7 +487,10 @@ final class NotchOverlayController {
     private var statusItem: NSStatusItem?
     private var statusItemHostingView: NSView?
 
-    init() {
+    private let antigravityQuotaViewModel: AntigravityQuotaViewModel
+
+    init(antigravityQuotaViewModel: AntigravityQuotaViewModel) {
+        self.antigravityQuotaViewModel = antigravityQuotaViewModel
         window = NSPanel(
             contentRect: NSRect(
                 x: 0,
@@ -507,6 +517,7 @@ final class NotchOverlayController {
         _ = skillInsightsCoordinator
         _ = performanceViewModel
         _ = analyticsViewModel
+        _ = agySidecarHealthViewModel
         // Instantiate at controller lifetime, not when the Analytics page first becomes visible.
         _ = routingTelemetryViewModel
         updateFrames()
@@ -560,7 +571,7 @@ final class NotchOverlayController {
             self?.showSettings()
         }
         hostingView.onRefresh = { [weak self] in
-            self?.viewModel.refreshAll()
+            self?.refreshLocalData()
         }
         hostingView.onMoveToMenuBar = { [weak self] in
             self?.scheduleDisplayMode(.menuBar)
@@ -693,7 +704,7 @@ final class NotchOverlayController {
     }
 
     @objc private func refreshFromMenu() {
-        viewModel.refreshAll()
+        refreshLocalData()
     }
 
     @objc private func quitFromMenu() {
@@ -723,9 +734,12 @@ final class NotchOverlayController {
             .stationary,
             .ignoresCycle
         ]
+        applyDetailAppearance(settings.detailAppearance, to: panel)
 
         let detailView = DetailPanelView(
             viewModel: viewModel,
+            antigravityQuotaViewModel: antigravityQuotaViewModel,
+            agySidecarHealthViewModel: agySidecarHealthViewModel,
             analyticsViewModel: analyticsViewModel,
             routingTelemetryViewModel: routingTelemetryViewModel,
             performanceViewModel: performanceViewModel,
@@ -745,7 +759,7 @@ final class NotchOverlayController {
                 self?.routingAssessmentReportController.show(assessment: assessment)
             },
             onLocalRefresh: { [weak self] in
-                self?.viewModel.refreshAll()
+                self?.refreshLocalData()
             },
             onRemoteRefresh: { [weak self] in
                 self?.remoteViewModel.refreshNow()
@@ -775,6 +789,17 @@ final class NotchOverlayController {
         return panel
     }
 
+    private func applyDetailAppearance(_ appearance: HUDDetailAppearance, to panel: DetailKeyboardPanel) {
+        panel.appearance = switch appearance {
+        case .system:
+            nil
+        case .light:
+            NSAppearance(named: .aqua)
+        case .dark:
+            NSAppearance(named: .darkAqua)
+        }
+    }
+
     private func observeState() {
         settings.$hudDisplayMode
             .removeDuplicates()
@@ -785,6 +810,20 @@ final class NotchOverlayController {
                         return
                     }
                     self.applyDisplayMode(mode)
+                }
+            }
+            .store(in: &cancellables)
+
+        settings.$detailAppearance
+            .removeDuplicates()
+            .sink { [weak self] appearance in
+                DispatchQueue.main.async {
+                    guard let self,
+                          self.settings.detailAppearance == appearance,
+                          let detailWindow = self.detailWindow as? DetailKeyboardPanel else {
+                        return
+                    }
+                    self.applyDetailAppearance(appearance, to: detailWindow)
                 }
             }
             .store(in: &cancellables)
@@ -812,6 +851,32 @@ final class NotchOverlayController {
                     self?.updateFrames()
                     self?.updateSourceVisibility()
                 }
+            }
+            .store(in: &cancellables)
+
+        antigravityQuotaViewModel.objectWillChange
+            .sink { [weak self] _ in
+                DispatchQueue.main.async {
+                    self?.updateFrames()
+                }
+            }
+            .store(in: &cancellables)
+
+        agySidecarHealthViewModel.objectWillChange
+            .sink { [weak self] _ in
+                DispatchQueue.main.async {
+                    self?.updateFrames()
+                }
+            }
+            .store(in: &cancellables)
+
+        settings.$agySidecarAutomaticCanaryEnabled
+            .combineLatest(settings.$agySidecarAutomaticCanaryInterval)
+            .sink { [weak self] enabled, interval in
+                self?.agySidecarHealthViewModel.configureAutomaticCanary(
+                    enabled: enabled,
+                    interval: interval
+                )
             }
             .store(in: &cancellables)
 
@@ -1052,6 +1117,7 @@ final class NotchOverlayController {
         switch selectedDetailPage {
         case .codex:
             viewModel.refreshWhenPresented()
+            antigravityQuotaViewModel.refreshWhenPresented()
         case .analytics:
             refreshSelectedAnalyticsModeWhenPresented()
         case .performance:
@@ -1299,8 +1365,17 @@ final class NotchOverlayController {
         IslandMetrics.detailHeight(
             taskRows: IslandMetrics.visibleTaskRows,
             showsPeriodUsage: settings.showPeriodUsage,
-            showsSparkQuota: settings.showSparkQuota
+            showsSparkQuota: settings.showSparkQuota,
+            showsAntigravityQuota: antigravityQuotaViewModel.snapshot.shouldDisplay
+                || agySidecarHealthViewModel.shouldDisplay
         )
+    }
+
+    private func refreshLocalData() {
+        // Start both lanes independently so a bounded AGY helper call cannot
+        // delay the existing Codex refresh.
+        viewModel.refreshAll()
+        antigravityQuotaViewModel.refreshNow()
     }
 }
 
@@ -1312,6 +1387,7 @@ final class SettingsWindowController {
     private let subAPIViewModel: BalanceMonitorViewModel
     private let codexRadarViewModel: CodexRadarViewModel
     private let analyticsViewModel: CodexWebAnalyticsViewModel
+    private let agySidecarHealthViewModel: AGYSidecarHealthViewModel
     private let onRefresh: () -> Void
     private var window: NSWindow?
 
@@ -1322,6 +1398,7 @@ final class SettingsWindowController {
         subAPIViewModel: BalanceMonitorViewModel,
         codexRadarViewModel: CodexRadarViewModel,
         analyticsViewModel: CodexWebAnalyticsViewModel,
+        agySidecarHealthViewModel: AGYSidecarHealthViewModel,
         onRefresh: @escaping () -> Void
     ) {
         self.settings = settings
@@ -1330,6 +1407,7 @@ final class SettingsWindowController {
         self.subAPIViewModel = subAPIViewModel
         self.codexRadarViewModel = codexRadarViewModel
         self.analyticsViewModel = analyticsViewModel
+        self.agySidecarHealthViewModel = agySidecarHealthViewModel
         self.onRefresh = onRefresh
     }
 
@@ -1349,6 +1427,7 @@ final class SettingsWindowController {
             subAPIViewModel: subAPIViewModel,
             codexRadarViewModel: codexRadarViewModel,
             analyticsViewModel: analyticsViewModel,
+            agySidecarHealthViewModel: agySidecarHealthViewModel,
             onRefresh: onRefresh
         )
         let hostingView = NSHostingView(rootView: view)
