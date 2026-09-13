@@ -120,9 +120,9 @@ struct NotchIslandView: View {
         ZStack {
             HUDVisualEffectView(material: .hudWindow)
             RoundedRectangle(cornerRadius: MonitorTheme.Radius.collapsedPill, style: .continuous)
-                .fill(MonitorTheme.pillTint)
+                .fill(MonitorTheme.Pill.tint)
             RoundedRectangle(cornerRadius: MonitorTheme.Radius.collapsedPill, style: .continuous)
-                .stroke(MonitorTheme.panelStroke, lineWidth: MonitorTheme.Stroke.panel)
+                .stroke(MonitorTheme.Pill.panelStroke, lineWidth: MonitorTheme.Stroke.panel)
         }
     }
 
@@ -190,15 +190,15 @@ struct NotchIslandView: View {
 
     private var collapsedTitleColor: Color {
         if effectiveDisplaySource == .codex {
-            return snapshot.isRunning ? .white.opacity(0.94) : .white.opacity(0.74)
+            return snapshot.isRunning ? MonitorTheme.Pill.textPrimary : MonitorTheme.Pill.textSecondary
         }
         switch collapsedSeverity {
         case .none:
-            return .white.opacity(0.80)
+            return MonitorTheme.Pill.textPrimary
         case .warning:
-            return MonitorTheme.warning
+            return MonitorTheme.Pill.warning
         case .error:
-            return MonitorTheme.critical
+            return MonitorTheme.Pill.critical
         }
     }
 
@@ -224,7 +224,7 @@ struct NotchIslandView: View {
                     id: "quota-\(window.id)",
                     label: window.compactLabel,
                     value: Formatters.percent(window.remainingPercent),
-                    color: MonitorTheme.quotaColor(for: window.remainingPercent),
+                    color: MonitorTheme.pillQuotaColor(for: window.remainingPercent),
                     labelWidth: 13,
                     valueWidth: 34
                 )
@@ -236,7 +236,7 @@ struct NotchIslandView: View {
                     value: todayUsage.tokenCount.map {
                         Formatters.compactTokensEnglish($0, isPartial: todayUsage.isPartial)
                     } ?? (todayUsage.isBackfilling ? "回填中" : "--"),
-                    color: MonitorTheme.textPrimary,
+                    color: MonitorTheme.Pill.textPrimary,
                     labelWidth: 28,
                     valueWidth: 50,
                     helpText: todayUsage.helpText(label: "Today")
@@ -246,8 +246,8 @@ struct NotchIslandView: View {
         case .remoteCodex:
             let remote = remoteViewModel.snapshot
             return [
-                CollapsedMetric(id: "ok", label: "正", value: "\(remote.healthyCount)", color: MonitorTheme.healthy, labelWidth: 10, valueWidth: 18),
-                CollapsedMetric(id: "bad", label: "异", value: "\(remote.quotaCount + remote.abnormalCount)", color: collapsedSeverity == .error ? MonitorTheme.critical : MonitorTheme.warning, labelWidth: 10, valueWidth: 18)
+                CollapsedMetric(id: "ok", label: "正", value: "\(remote.healthyCount)", color: MonitorTheme.Pill.healthy, labelWidth: 10, valueWidth: 18),
+                CollapsedMetric(id: "bad", label: "异", value: "\(remote.quotaCount + remote.abnormalCount)", color: collapsedSeverity == .error ? MonitorTheme.Pill.critical : MonitorTheme.Pill.warning, labelWidth: 10, valueWidth: 18)
             ]
         case .newAPI:
             return balanceCollapsedMetrics(newAPIViewModel.snapshot)
@@ -258,8 +258,8 @@ struct NotchIslandView: View {
 
     private func balanceCollapsedMetrics(_ snapshot: BalanceMonitorSnapshot) -> [CollapsedMetric] {
         [
-            CollapsedMetric(id: "\(snapshot.source.rawValue)-accounts", label: "账", value: "\(snapshot.accounts.count)", color: MonitorTheme.healthy, labelWidth: 10, valueWidth: 18),
-            CollapsedMetric(id: "\(snapshot.source.rawValue)-amount", label: "余", value: snapshot.totalAmountText, color: MonitorTheme.textPrimary, labelWidth: 10, valueWidth: 52)
+            CollapsedMetric(id: "\(snapshot.source.rawValue)-accounts", label: "账", value: "\(snapshot.accounts.count)", color: MonitorTheme.Pill.healthy, labelWidth: 10, valueWidth: 18),
+            CollapsedMetric(id: "\(snapshot.source.rawValue)-amount", label: "余", value: snapshot.totalAmountText, color: MonitorTheme.Pill.textPrimary, labelWidth: 10, valueWidth: 52)
         ]
     }
 
@@ -283,7 +283,7 @@ private struct CollapsedMetricRow: View {
         HStack(spacing: MonitorTheme.Spacing.compact) {
             Text(metric.label)
                 .font(.system(size: 8.4, weight: .medium))
-                .foregroundStyle(MonitorTheme.textTertiary)
+                .foregroundStyle(MonitorTheme.Pill.textTertiary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.70)
                 .frame(width: metric.labelWidth, alignment: .trailing)
@@ -324,6 +324,7 @@ struct DetailPanelView: View {
     let onAnalyticsModeSelected: (AnalyticsDataMode) -> Void
     @State private var detailPage: DetailPage = .codex
     @State private var analyticsMode: AnalyticsDataMode = .official
+    @State private var showsAllTaskRoots = false
 
     private var snapshot: UsageSnapshot {
         viewModel.snapshot
@@ -331,15 +332,12 @@ struct DetailPanelView: View {
 
     var body: some View {
         ZStack(alignment: .top) {
-            HUDVisualEffectView(material: .hudWindow)
-                .clipShape(BottomRoundedRectangle(radius: MonitorTheme.Radius.detailBottom))
-
             BottomRoundedRectangle(radius: MonitorTheme.Radius.detailBottom)
-                .fill(MonitorTheme.detailTint)
+                .fill(MonitorTheme.detailBackground)
 
             BottomRoundedRectangle(radius: MonitorTheme.Radius.detailBottom)
                 .stroke(MonitorTheme.panelStroke, lineWidth: MonitorTheme.Stroke.panel)
-                .shadow(color: .black.opacity(0.25), radius: 18, x: 0, y: 10)
+                .shadow(color: .black.opacity(0.10), radius: 16, x: 0, y: 8)
 
             VStack(spacing: MonitorTheme.Spacing.section) {
                 header
@@ -374,6 +372,7 @@ struct DetailPanelView: View {
         }
         .frame(width: IslandMetrics.width, height: detailHeight)
         .clipShape(BottomRoundedRectangle(radius: MonitorTheme.Radius.detailBottom))
+        .environment(\.colorScheme, .light)
         .onAppear {
             onPageSelected(selectedPage)
         }
@@ -383,7 +382,55 @@ struct DetailPanelView: View {
     }
 
     private var displayedTasks: [CodexTask] {
-        snapshot.tasks
+        HUDTaskPresentation.visibleRoots(
+            from: snapshot.tasks,
+            isExpanded: showsAllTaskRoots,
+            limit: HUDTaskPresentation.defaultVisibleRootLimit
+        )
+    }
+
+    private var totalRootCount: Int {
+        snapshot.tasks.count
+    }
+
+    private var allRunningRootCount: Int {
+        HUDTaskPresentation.runningRootCount(in: snapshot.tasks)
+    }
+
+    private var todayUsageDisplay: HUDTodayUsageDisplay {
+        HUDTodayUsageDisplay.resolve(snapshot: snapshot)
+    }
+
+    private var taskTodayDenominator: Int? {
+        HUDTaskPresentation.todayDenominator(snapshot: snapshot)
+    }
+
+    private var todayDayKey: String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: Date())
+    }
+
+    private var residualLocalTokenCount: Int? {
+        HUDTaskPresentation.residualLocalTokens(
+            summary: snapshot.costUsage,
+            tasks: snapshot.tasks,
+            todayKey: todayDayKey
+        )
+    }
+
+    private var showsResidualLocalRecord: Bool {
+        showsAllTaskRoots && (residualLocalTokenCount ?? 0) > 0
+    }
+
+    private var taskCountSummary: String {
+        HUDTaskPresentation.countSummary(
+            runningCount: allRunningRootCount,
+            visibleRootCount: displayedTasks.count,
+            totalRootCount: totalRootCount
+        )
     }
 
     private var detailHeight: CGFloat {
@@ -426,13 +473,19 @@ struct DetailPanelView: View {
                 .lineLimit(1)
                 .frame(height: IslandMetrics.detailHeaderHeight, alignment: .center)
 
-            Text(headerStatus)
-                .font(MonitorTheme.Typography.detailStatus)
-                .foregroundStyle(headerStatusColor)
-                .lineLimit(1)
-                .padding(.horizontal, 8)
-                .background(headerStatusColor.opacity(0.15), in: Capsule())
-                .frame(height: 20, alignment: .center)
+            HStack(spacing: MonitorTheme.Spacing.compact) {
+                Circle()
+                    .fill(headerStatusColor)
+                    .frame(width: 8, height: 8)
+                    .accessibilityHidden(true)
+                Text(headerStatus)
+                    .font(MonitorTheme.Typography.detailStatus)
+                    .foregroundStyle(headerStatusColor)
+                    .lineLimit(1)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("状态")
+            .accessibilityValue(headerStatus)
 
             Spacer(minLength: MonitorTheme.Spacing.row)
 
@@ -443,6 +496,7 @@ struct DetailPanelView: View {
                 .buttonStyle(IconButtonStyle())
                 .disabled(isCurrentPageRefreshing)
                 .help(refreshHelp)
+                .accessibilityLabel(refreshHelp)
 
                 Button(action: onSettings) {
                     Image(systemName: "gearshape")
@@ -450,6 +504,7 @@ struct DetailPanelView: View {
                 }
                 .buttonStyle(IconButtonStyle())
                 .help("设置")
+                .accessibilityLabel("打开监测设置")
             }
         }
         .frame(height: IslandMetrics.detailHeaderHeight, alignment: .center)
@@ -483,7 +538,7 @@ struct DetailPanelView: View {
     private var headerStatus: String {
         switch selectedPage {
         case .codex:
-            return snapshot.isRunning ? "Running" : "Idle"
+            return snapshot.isRunning ? "运行中" : "空闲"
         case .analytics:
             switch analyticsMode {
             case .official: return analyticsViewModel.state.label
@@ -630,9 +685,12 @@ struct DetailPanelView: View {
                 }
             }
         }
-        .padding(2)
         .frame(height: IslandMetrics.detailPageSwitcherHeight)
-        .background(MonitorTheme.controlFill, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.segment, style: .continuous))
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(MonitorTheme.separator)
+                .frame(height: MonitorTheme.Stroke.hairline)
+        }
     }
 
     private var availablePages: [DetailPage] {
@@ -685,31 +743,33 @@ struct DetailPanelView: View {
     }
 
     private var localContent: some View {
-        VStack(spacing: MonitorTheme.Spacing.row) {
-            localQuotaStrip
-            localDataProvenance
-            if settings.showSparkQuota {
-                sparkQuotaStrip
-            }
-            if antigravityQuotaViewModel.snapshot.shouldDisplay || agySidecarHealthViewModel.shouldDisplay {
-                antigravityQuotaStrip
-            }
-            localTaskTable
-                .frame(maxHeight: .infinity, alignment: .top)
+        ScrollView(.vertical, showsIndicators: false) {
+            LazyVStack(spacing: MonitorTheme.Spacing.row) {
+                localQuotaSummary
+                localDataProvenance
+                if settings.showPeriodUsage {
+                    costDisclosure
+                }
+                if settings.showSparkQuota {
+                    sparkQuotaStrip
+                }
+                localTaskTable
+                if antigravityQuotaViewModel.snapshot.shouldDisplay || agySidecarHealthViewModel.shouldDisplay {
+                    antigravityQuotaStrip
+                }
 
-            CodexWebAnalyticsPanelView(
-                viewModel: analyticsViewModel,
-                onOpenAnalytics: {
-                    detailPage = .analytics
-                },
-                onOpenBrowser: onAnalyticsBrowser
-            )
-
-            if settings.showPeriodUsage {
-                periodUsage
+                CodexWebAnalyticsPanelView(
+                    viewModel: analyticsViewModel,
+                    onOpenAnalytics: {
+                        detailPage = .analytics
+                    },
+                    onOpenBrowser: onAnalyticsBrowser
+                )
             }
+            .padding(.bottom, MonitorTheme.Spacing.compact)
         }
-        .frame(maxHeight: .infinity, alignment: .bottom)
+        .scrollIndicators(.hidden)
+        .frame(maxHeight: .infinity, alignment: .top)
     }
 
     private var performanceContent: some View {
@@ -725,7 +785,6 @@ struct DetailPanelView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .colorScheme(.dark)
             .accessibilityLabel("Analytics 数据源")
 
             Group {
@@ -843,40 +902,177 @@ struct DetailPanelView: View {
         }
     }
 
-    private var localQuotaStrip: some View {
-        HStack(spacing: MonitorTheme.Spacing.wide) {
-            ForEach(snapshot.mainQuotaWindows) { window in
-                QuotaBarCell(
-                    label: window.title,
-                    value: Formatters.percent(window.remainingPercent),
-                    percent: window.remainingPercent,
-                    metaText: quotaMetaText(for: window),
-                    color: quotaColor(for: window.remainingPercent)
-                )
-            }
-            CompactStatusCell(
-                label: "Running",
-                value: "\(runningTaskCount)",
-                detail: "\(displayedTasks.count) sessions"
-            )
-            .frame(width: 96)
-            if settings.showContextMetrics {
-                CompactStatusCell(
-                    label: "Ctx",
-                    value: currentContextPercentText,
-                    detail: currentContextTokenRatioText
-                )
-                .frame(width: 116)
+    private var localQuotaSummary: some View {
+        HStack(alignment: .top, spacing: 0) {
+            weeklyQuotaSummary
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Rectangle()
+                .fill(MonitorTheme.separator)
+                .frame(width: MonitorTheme.Stroke.hairline)
+                .padding(.vertical, MonitorTheme.Spacing.compact)
+                .padding(.horizontal, MonitorTheme.Spacing.wide)
+                .accessibilityHidden(true)
+
+            todayTokenSummary
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, MonitorTheme.Spacing.compact)
+        .padding(.vertical, MonitorTheme.Spacing.section)
+        .frame(height: snapshot.mainQuotaWindows.count > 1 ? 140 : 116)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("额度与今日 Token")
+        .accessibilityValue(quotaSummaryAccessibilityText)
+    }
+
+    private var weeklyQuotaSummary: some View {
+        let window = weeklyQuotaWindow
+        return VStack(alignment: .leading, spacing: MonitorTheme.Spacing.compact) {
+            Text(window.kind == .weekly ? "本周剩余额度" : "\(window.title)剩余额度")
+                .font(MonitorTheme.Typography.quotaLabel)
+                .foregroundStyle(MonitorTheme.textSecondary)
+            Text(Formatters.percent(window.remainingPercent))
+                .font(MonitorTheme.Typography.heroValue)
+                .foregroundStyle(quotaColor(for: window.remainingPercent))
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+            CapsuleQuotaBar(value: window.remainingPercent, color: quotaColor(for: window.remainingPercent))
+                .frame(maxWidth: 220)
+            Text(quotaMetaText(for: window) ?? "重置时间未知")
+                .font(MonitorTheme.Typography.quotaMeta)
+                .foregroundStyle(MonitorTheme.textSecondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+                .help(quotaHelp(for: window))
+            if let additional = snapshot.mainQuotaWindows.first(where: { $0.id != window.id }) {
+                Text("\(additional.compactLabel) 剩余 \(Formatters.percent(additional.remainingPercent))")
+                    .font(MonitorTheme.Typography.quotaMeta)
+                    .foregroundStyle(MonitorTheme.textSecondary)
+                    .help(quotaHelp(for: additional))
+                    .accessibilityLabel(quotaHelp(for: additional))
             }
         }
-        .padding(.horizontal, MonitorTheme.Spacing.panel)
-        .padding(.vertical, MonitorTheme.Spacing.section)
-        .frame(height: IslandMetrics.detailQuotaHeight)
-        .background(MonitorTheme.sectionFill, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.section, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: MonitorTheme.Radius.section, style: .continuous)
-                .stroke(MonitorTheme.hairline, lineWidth: MonitorTheme.Stroke.hairline)
-        )
+        .frame(maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var todayTokenSummary: some View {
+        let today = HUDTodayUsageDisplay.resolve(snapshot: snapshot)
+        return VStack(alignment: .leading, spacing: MonitorTheme.Spacing.compact) {
+            Text("今日 Token")
+                .font(MonitorTheme.Typography.quotaLabel)
+                .foregroundStyle(MonitorTheme.textSecondary)
+            Text(today.tokenCount.map { HUDTokenFormatter.compact($0) + (today.isPartial ? "*" : "") } ?? (today.isBackfilling ? "回填中" : "--"))
+                .font(MonitorTheme.Typography.heroValue)
+                .foregroundStyle(MonitorTheme.textPrimary)
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.64)
+                .help(todayTokenHelp)
+                .accessibilityLabel("今日 Token")
+                .accessibilityValue(todayTokenHelp)
+
+            if settings.showPeriodUsage {
+                VStack(alignment: .leading, spacing: MonitorTheme.Spacing.micro) {
+                    periodSummaryLine(label: "近 7 天", value: sevenDayTokenText, help: periodTokenHelp(isSevenDays: true))
+                    periodSummaryLine(label: "近 30 天", value: thirtyDayTokenText, help: periodTokenHelp(isSevenDays: false))
+                }
+            } else {
+                Text("周期统计未启用")
+                    .font(MonitorTheme.Typography.quotaMeta)
+                    .foregroundStyle(MonitorTheme.textSecondary)
+            }
+        }
+        .frame(maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func periodSummaryLine(label: String, value: String, help: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: MonitorTheme.Spacing.inline) {
+            Text(label)
+                .font(MonitorTheme.Typography.periodLabel)
+                .foregroundStyle(MonitorTheme.textSecondary)
+            Text(value)
+                .font(MonitorTheme.Typography.periodValue)
+                .foregroundStyle(MonitorTheme.textPrimary)
+                .monospacedDigit()
+        }
+        .help(help)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label)
+        .accessibilityValue(help)
+    }
+
+    private var weeklyQuotaWindow: MainQuotaWindow {
+        snapshot.mainQuotaWindows.first(where: { if case .weekly = $0.kind { return true }; return false })
+            ?? snapshot.mainQuotaWindows.first
+            ?? MainQuotaWindow(id: "weekly", fallbackKind: .weekly, remainingPercent: nil, resetsAt: nil, windowMinutes: 10_080)
+    }
+
+    private var sevenDayTokenText: String {
+        HUDTokenFormatter.compact(snapshot.costUsage.sevenDays.tokenCount ?? snapshot.usage7d)
+            + (snapshot.costUsage.sevenDays.tokenCount == nil && snapshot.periodUsageQuality.usage7dPartial ? "*" : "")
+    }
+
+    private var thirtyDayTokenText: String {
+        HUDTokenFormatter.compact(snapshot.costUsage.thirtyDays.tokenCount ?? snapshot.usage30d)
+            + (snapshot.costUsage.thirtyDays.tokenCount == nil && snapshot.periodUsageQuality.usage30dPartial ? "*" : "")
+    }
+
+    private var todayTokenHelp: String {
+        let today = todayUsageDisplay
+        let exact = today.tokenCount.map { "\($0) Token" } ?? "不可用"
+        return "今日精确值 \(exact)。\(today.helpText(label: "今日") ?? "本机已发布 Token 总量；任务归因是否对齐见列表说明。")"
+    }
+
+    private func periodTokenHelp(isSevenDays: Bool) -> String {
+        let window = isSevenDays ? snapshot.costUsage.sevenDays : snapshot.costUsage.thirtyDays
+        let tokens = window.tokenCount ?? (isSevenDays ? snapshot.usage7d : snapshot.usage30d)
+        let partial = window.tokenCount == nil && (isSevenDays ? snapshot.periodUsageQuality.usage7dPartial : snapshot.periodUsageQuality.usage30dPartial)
+        let missing = isSevenDays ? snapshot.periodUsageQuality.missing7dBaselines : snapshot.periodUsageQuality.missing30dBaselines
+        return "精确值 \(tokens) Token。\(Formatters.partialUsageHelp(label: isSevenDays ? "7天" : "30天", isPartial: partial, missingBaselineSessions: missing) ?? "本机本地自然日统计。")"
+    }
+
+    private var quotaSummaryAccessibilityText: String {
+        let windows = snapshot.mainQuotaWindows.map(quotaHelp).joined(separator: "；")
+        let periods = settings.showPeriodUsage ? "；近7天 \(periodTokenHelp(isSevenDays: true))；近30天 \(periodTokenHelp(isSevenDays: false))" : "；周期统计未启用"
+        return "\(windows)；\(todayTokenHelp)\(periods)"
+    }
+
+    private func quotaHelp(for window: MainQuotaWindow) -> String {
+        let value = window.remainingPercent.map { "剩余\($0)%" } ?? "剩余未知"
+        let reset = quotaMetaText(for: window) ?? "重置时间未知"
+        return "\(window.accessibilityLabel)：\(value)；\(reset)；来源 \(quotaSourceLabel)。"
+    }
+
+    private var costDisclosure: some View {
+        DisclosureGroup {
+            HStack(spacing: 0) {
+                LocalCostCell(label: "今日", value: Formatters.apiEquivalentCost(snapshot.costUsage.today), helpText: Formatters.apiEquivalentCostHelp(label: "今日费用", window: snapshot.costUsage.today, summary: snapshot.costUsage))
+                localPeriodDivider
+                LocalCostCell(label: "近 7 天", value: Formatters.apiEquivalentCost(snapshot.costUsage.sevenDays), helpText: Formatters.apiEquivalentCostHelp(label: "近7天费用", window: snapshot.costUsage.sevenDays, summary: snapshot.costUsage))
+                localPeriodDivider
+                LocalCostCell(label: "近 30 天", value: Formatters.apiEquivalentCost(snapshot.costUsage.thirtyDays), helpText: Formatters.apiEquivalentCostHelp(label: "近30天费用", window: snapshot.costUsage.thirtyDays, summary: snapshot.costUsage))
+            }
+            .padding(.top, MonitorTheme.Spacing.compact)
+        } label: {
+            HStack(spacing: MonitorTheme.Spacing.inline) {
+                Text("费用估算")
+                    .font(MonitorTheme.Typography.periodLabel.weight(.semibold))
+                    .foregroundStyle(MonitorTheme.accentBlue)
+                Text("API 等值，非订阅账单")
+                    .font(MonitorTheme.Typography.periodLabel)
+                    .foregroundStyle(MonitorTheme.textSecondary)
+                Spacer(minLength: 0)
+            }
+        }
+        .disclosureGroupStyle(FlatDisclosureGroupStyle())
+        .help(costDisclosureHelp)
+        .accessibilityLabel("费用估算，API 等值，非订阅账单")
+        .accessibilityHint(costDisclosureHelp)
+    }
+
+    private var costDisclosureHelp: String {
+        "费用估算仅为 OpenAI API 标准单价等值，不是 ChatGPT 或 Codex 订阅账单。\(Formatters.apiEquivalentCostHelp(label: "今日费用", window: snapshot.costUsage.today, summary: snapshot.costUsage))"
     }
 
     private var localDataProvenance: some View {
@@ -955,60 +1151,66 @@ struct DetailPanelView: View {
     }
 
     private var antigravityQuotaStrip: some View {
-        HStack(alignment: .center, spacing: MonitorTheme.Spacing.row) {
-            Text("AGY")
-                .font(MonitorTheme.Typography.sparkLabel)
-                .foregroundStyle(MonitorTheme.textPrimary)
-                .frame(width: 30, alignment: .leading)
-
-            if let primaryFiveHour = antigravityQuotaViewModel.snapshot.primaryFiveHour,
-               let secondaryFiveHour = antigravityQuotaViewModel.snapshot.secondaryFiveHour {
-                VStack(alignment: .leading, spacing: MonitorTheme.Spacing.micro) {
-                    AntigravityQuotaRow(
-                        pool: .primary,
-                        fiveHour: primaryFiveHour,
-                        sevenDay: antigravityQuotaViewModel.snapshot.primarySevenDay
-                    )
-                    AntigravityQuotaRow(
-                        pool: .secondary,
-                        fiveHour: secondaryFiveHour,
-                        sevenDay: antigravityQuotaViewModel.snapshot.secondarySevenDay
-                    )
+        VStack(spacing: 0) {
+            HStack(alignment: .firstTextBaseline, spacing: MonitorTheme.Spacing.inline) {
+                Text("AGY")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(MonitorTheme.textPrimary)
+                Text("剩余额度")
+                    .font(MonitorTheme.Typography.quotaLabel)
+                    .foregroundStyle(MonitorTheme.textSecondary)
+                Text(antigravityQuotaViewModel.snapshot.freshnessLabel)
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(antigravityQuotaColor)
+                    .lineLimit(1)
+                Spacer(minLength: MonitorTheme.Spacing.row)
+                HStack(spacing: MonitorTheme.Spacing.compact) {
+                    Image(systemName: agySidecarIndicatorSymbol)
+                        .font(.system(size: 15, weight: .semibold))
+                    Text("旁路 \(agySidecarHealthViewModel.indicatorLabel)")
+                        .font(MonitorTheme.Typography.detailStatus)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
-                Text(antigravityQuotaViewModel.snapshot.message ?? "不可用")
+                .foregroundStyle(agySidecarIndicatorColor)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("旁路状态")
+                .accessibilityValue(agySidecarHealthViewModel.accessibilitySummary)
+            }
+            .frame(height: 30)
+
+            Rectangle()
+                .fill(MonitorTheme.separator)
+                .frame(height: MonitorTheme.Stroke.hairline)
+
+            AntigravityQuotaRow(
+                pool: .primary,
+                fiveHour: antigravityQuotaViewModel.snapshot.primaryFiveHour,
+                sevenDay: antigravityQuotaViewModel.snapshot.primarySevenDay
+            )
+            AntigravityQuotaRow(
+                pool: .secondary,
+                fiveHour: antigravityQuotaViewModel.snapshot.secondaryFiveHour,
+                sevenDay: antigravityQuotaViewModel.snapshot.secondarySevenDay
+            )
+            if let message = antigravityQuotaViewModel.snapshot.message,
+               antigravityQuotaViewModel.snapshot.primaryFiveHour == nil {
+                Text(message)
                     .font(MonitorTheme.Typography.quotaMeta)
                     .foregroundStyle(MonitorTheme.textSecondary)
-                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, MonitorTheme.Spacing.compact)
             }
-
-            Spacer(minLength: 0)
-            Text(antigravityQuotaViewModel.snapshot.freshnessLabel)
-                .font(MonitorTheme.Typography.quotaMeta)
-                .foregroundStyle(antigravityQuotaColor)
-                .lineLimit(1)
-
-            HStack(spacing: MonitorTheme.Spacing.micro) {
-                Circle()
-                    .fill(agySidecarIndicatorColor)
-                    .frame(width: 5, height: 5)
-                    .accessibilityHidden(true)
-                Text("旁路 \(agySidecarHealthViewModel.indicatorLabel)")
-                    .font(MonitorTheme.Typography.quotaMeta)
-                    .foregroundStyle(agySidecarIndicatorColor)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.72)
-            }
-            .fixedSize(horizontal: true, vertical: false)
         }
         .padding(.horizontal, MonitorTheme.Spacing.panel)
-        .frame(height: IslandMetrics.detailAntigravityQuotaHeight)
-        .background(MonitorTheme.sectionFill, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous)
-                .stroke(MonitorTheme.hairline, lineWidth: MonitorTheme.Stroke.hairline)
-        )
+        .padding(.vertical, MonitorTheme.Spacing.compact)
+        .frame(minHeight: IslandMetrics.detailAntigravityQuotaHeight)
+        .background(MonitorTheme.detailBackground)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(MonitorTheme.separator)
+                .frame(height: MonitorTheme.Stroke.hairline)
+        }
         .help(antigravityQuotaHelp)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(antigravityQuotaHelp)
@@ -1058,6 +1260,19 @@ struct DetailPanelView: View {
         }
     }
 
+    private var agySidecarIndicatorSymbol: String {
+        switch agySidecarHealthViewModel.indicatorLabel {
+        case "COMPLETE", "自检通过":
+            return "checkmark.circle.fill"
+        case "验收中", "自检中":
+            return "arrow.triangle.2.circlepath"
+        case "BROKEN", "PARTIAL", "兼容待确认", "自检不可用", "验收不可用":
+            return "exclamationmark.triangle.fill"
+        default:
+            return "questionmark.circle"
+        }
+    }
+
     private var antigravityQuotaHelp: String {
         let snapshot = antigravityQuotaViewModel.snapshot
         let windows: [(AntigravityQuotaPool, AntigravityQuotaPeriod, AntigravityQuotaWindow?)] = [
@@ -1072,7 +1287,9 @@ struct DetailPanelView: View {
                 .map { "，重置 \($0)" } ?? ""
             return "\(pool.label) \(period.label) 剩余 \(percent)\(reset)"
         }
-        let status = [snapshot.freshnessLabel, snapshot.message].compactMap { value in
+        let timestamp = (snapshot.sourceUpdatedAt ?? snapshot.receivedAt)
+            .map { "数据时间：\(Formatters.relativeAge($0))前" }
+        let status = [snapshot.freshnessLabel, snapshot.message, timestamp].compactMap { value in
             guard let value, !value.isEmpty else { return nil }
             return value
         }.joined(separator: "，")
@@ -1082,6 +1299,19 @@ struct DetailPanelView: View {
 
     private var localTaskTable: some View {
         VStack(spacing: 0) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("任务")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(MonitorTheme.textPrimary)
+                Spacer(minLength: MonitorTheme.Spacing.row)
+                Text(taskCountSummary)
+                    .font(MonitorTheme.Typography.tableHeader)
+                    .foregroundStyle(MonitorTheme.textSecondary)
+                    .monospacedDigit()
+            }
+            .padding(.horizontal, MonitorTheme.Spacing.panel)
+            .frame(height: 34)
+
             TaskTableHeader(
                 showContextMetrics: settings.showContextMetrics,
                 usesPublishedTodayLedger: snapshot.costUsage.hasReconciledTodayLedger
@@ -1094,24 +1324,85 @@ struct DetailPanelView: View {
                 emptyState
                     .padding(.top, 8)
             } else {
-                ScrollView(.vertical, showsIndicators: false) {
-                    LazyVStack(spacing: 0) {
-                        ForEach(displayedTasks) { task in
-                            TaskTableRow(task: task, showContextMetrics: settings.showContextMetrics)
-                        }
+                LazyVStack(spacing: 0) {
+                    ForEach(displayedTasks) { task in
+                        TaskTableRow(
+                            task: task,
+                            todayTotalTokens: taskTodayDenominator,
+                            showContextMetrics: settings.showContextMetrics
+                        )
+                    }
+                    if showsResidualLocalRecord, let residualLocalTokenCount {
+                        OtherLocalRecordRow(
+                            tokenCount: residualLocalTokenCount,
+                            todayTotalTokens: taskTodayDenominator,
+                            showContextMetrics: settings.showContextMetrics
+                        )
                     }
                 }
-                .frame(height: IslandMetrics.visibleTaskRowsHeight, alignment: .top)
+                .frame(height: showsAllTaskRoots
+                    ? CGFloat(displayedTasks.count) * IslandMetrics.detailTaskRowHeight
+                        + (showsResidualLocalRecord ? IslandMetrics.detailTaskRowHeight : 0)
+                    : IslandMetrics.visibleTaskRowsHeight,
+                    alignment: .top)
             }
+
+            if HUDTaskPresentation.canExpand(rootCount: totalRootCount, residualTokens: residualLocalTokenCount) {
+                Button {
+                    showsAllTaskRoots.toggle()
+                } label: {
+                    HStack(spacing: MonitorTheme.Spacing.compact) {
+                        Text(showsAllTaskRoots ? "收起" : "查看全部")
+                            .font(.system(size: 12, weight: .medium))
+                        Image(systemName: showsAllTaskRoots ? "chevron.up" : "chevron.right")
+                            .font(.system(size: 10, weight: .bold))
+                    }
+                    .foregroundStyle(MonitorTheme.accentBlue)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .padding(.horizontal, MonitorTheme.Spacing.panel)
+                    .frame(height: 32)
+                }
+                .buttonStyle(.plain)
+                .focusable()
+                .accessibilityLabel(showsAllTaskRoots ? "收起任务根列表" : "查看全部任务根")
+                .accessibilityValue("当前显示 \(displayedTasks.count) / \(totalRootCount) 个根任务")
+                .accessibilityHint("只展开当前已发布快照中的根任务，不启动新的扫描")
+            }
+
+            Text(HUDTaskPresentation.todayCaption(isReconciled: snapshot.costUsage.hasReconciledTodayLedger))
+                .font(MonitorTheme.Typography.quotaMeta)
+                .foregroundStyle(MonitorTheme.textSecondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, MonitorTheme.Spacing.panel)
+                .frame(minHeight: 26, alignment: .center)
+                .help(taskTodayHelp)
+                .accessibilityLabel(taskTodayHelp)
 
             Spacer(minLength: 0)
         }
         .frame(minHeight: IslandMetrics.taskTableHeight(taskRows: IslandMetrics.visibleTaskRows))
-        .background(MonitorTheme.sectionFill, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.section, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: MonitorTheme.Radius.section, style: .continuous)
-                .stroke(MonitorTheme.hairline, lineWidth: MonitorTheme.Stroke.hairline)
-        )
+        .background(MonitorTheme.detailBackground)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(MonitorTheme.separator)
+                .frame(height: MonitorTheme.Stroke.hairline)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("任务列表")
+        .accessibilityValue(taskTodayHelp)
+    }
+
+    private var taskTodayHelp: String {
+        var text = HUDTaskPresentation.todayCaption(isReconciled: snapshot.costUsage.hasReconciledTodayLedger)
+        if snapshot.costUsage.hasReconciledTodayLedger {
+            text += "；当前显示 \(displayedTasks.count) / \(totalRootCount) 个可用根任务。"
+            if showsResidualLocalRecord {
+                text += "其他本地记录汇总行不计入任务个数。"
+            }
+        } else {
+            text += "；当前为现有本地日快照暂估值，尚未与完整发布账本对齐。"
+        }
+        return text
     }
 
     private var runningTaskCount: Int {
@@ -1352,9 +1643,9 @@ struct DetailPanelView: View {
             }
         } else {
             HStack(spacing: 8) {
-                PeriodUsageCell(label: "24小时", value: Formatters.compactTokens(remoteViewModel.snapshot.usage24h))
-                PeriodUsageCell(label: "7天", value: Formatters.compactTokens(remoteViewModel.snapshot.usage7d))
-                PeriodUsageCell(label: "30天", value: Formatters.compactTokens(remoteViewModel.snapshot.usage30d))
+                PeriodUsageCell(label: "24小时", value: HUDTokenFormatter.compact(remoteViewModel.snapshot.usage24h))
+                PeriodUsageCell(label: "7天", value: HUDTokenFormatter.compact(remoteViewModel.snapshot.usage7d))
+                PeriodUsageCell(label: "30天", value: HUDTokenFormatter.compact(remoteViewModel.snapshot.usage30d))
             }
         }
     }
@@ -1552,7 +1843,58 @@ private struct PageSwitcherButton: View {
         }
         .buttonStyle(.plain)
         .frame(maxWidth: .infinity)
-        .foregroundStyle(isSelected ? MonitorTheme.textPrimary : MonitorTheme.textSecondary)
+        .foregroundStyle(isSelected ? MonitorTheme.accentBlue : MonitorTheme.textSecondary)
+    }
+}
+
+private struct FlatDisclosureGroupStyle: DisclosureGroupStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                configuration.isExpanded.toggle()
+            } label: {
+                HStack(spacing: MonitorTheme.Spacing.inline) {
+                    configuration.label
+                    Spacer(minLength: MonitorTheme.Spacing.row)
+                    Image(systemName: configuration.isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(MonitorTheme.accentBlue)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .focusable()
+            .accessibilityValue(configuration.isExpanded ? "已展开" : "已折叠")
+
+            if configuration.isExpanded {
+                configuration.content
+            }
+        }
+    }
+}
+
+private struct LocalCostCell: View {
+    let label: String
+    let value: String
+    let helpText: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: MonitorTheme.Spacing.micro) {
+            Text(label)
+                .font(MonitorTheme.Typography.quotaMeta)
+                .foregroundStyle(MonitorTheme.textSecondary)
+            Text(value)
+                .font(MonitorTheme.Typography.periodValue)
+                .foregroundStyle(MonitorTheme.textPrimary)
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .help(helpText)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(label)费用")
+        .accessibilityValue("\(value)。\(helpText)")
     }
 }
 
@@ -1565,7 +1907,7 @@ private struct StatusDot: View {
         ZStack {
             if isRunning && enablePulse {
                 Circle()
-                    .stroke(MonitorTheme.healthy.opacity(0.18), lineWidth: 3)
+                    .stroke(MonitorTheme.Pill.running.opacity(0.18), lineWidth: 3)
                     .frame(width: 8, height: 8)
                     .scaleEffect(pulse ? 1.34 : 0.95)
                     .opacity(pulse ? 0.12 : 0.34)
@@ -1573,10 +1915,10 @@ private struct StatusDot: View {
             }
 
             Circle()
-                .fill(isRunning ? MonitorTheme.healthy : MonitorTheme.neutral)
+                .fill(isRunning ? MonitorTheme.Pill.running : MonitorTheme.Pill.neutral)
                 .frame(width: 8, height: 8)
                 .shadow(
-                    color: isRunning ? MonitorTheme.healthy.opacity(0.34) : .white.opacity(0.06),
+                    color: isRunning ? MonitorTheme.Pill.running.opacity(0.34) : .white.opacity(0.06),
                     radius: isRunning ? 4 : 1,
                     x: 0,
                     y: 0
@@ -1613,11 +1955,11 @@ private struct SeverityDot: View {
     private var color: Color {
         switch severity {
         case .none:
-            MonitorTheme.neutral
+            MonitorTheme.Pill.neutral
         case .warning:
-            MonitorTheme.warning
+            MonitorTheme.Pill.warning
         case .error:
-            MonitorTheme.critical
+            MonitorTheme.Pill.critical
         }
     }
 }
@@ -1710,20 +2052,21 @@ private struct QuotaBarCell: View {
 
 private struct AntigravityQuotaRow: View {
     let pool: AntigravityQuotaPool
-    let fiveHour: AntigravityQuotaWindow
+    let fiveHour: AntigravityQuotaWindow?
     let sevenDay: AntigravityQuotaWindow?
 
     var body: some View {
-        HStack(spacing: MonitorTheme.Spacing.row) {
+        HStack(spacing: MonitorTheme.Spacing.inline) {
             Text(pool.label)
-                .font(MonitorTheme.Typography.quotaMeta)
-                .foregroundStyle(MonitorTheme.textSecondary)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(MonitorTheme.textPrimary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.68)
-                .frame(width: 86, alignment: .leading)
+                .frame(width: 160, alignment: .leading)
             AntigravityQuotaCell(period: .fiveHour, window: fiveHour)
             AntigravityQuotaCell(period: .sevenDay, window: sevenDay)
         }
+        .frame(height: 24)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
@@ -1736,13 +2079,13 @@ private struct AntigravityQuotaCell: View {
         HStack(spacing: MonitorTheme.Spacing.compact) {
             Text(period.label)
                 .font(MonitorTheme.Typography.quotaMeta)
-                .foregroundStyle(MonitorTheme.textTertiary)
+                .foregroundStyle(MonitorTheme.textSecondary)
             Text(Formatters.percent(window?.remainingPercent))
                 .font(MonitorTheme.Typography.quotaMeta.weight(.semibold))
                 .foregroundStyle(MonitorTheme.quotaColor(for: window?.remainingPercent))
                 .monospacedDigit()
         }
-        .frame(minWidth: 60, alignment: .leading)
+        .frame(minWidth: 82, alignment: .leading)
     }
 }
 
@@ -1885,21 +2228,19 @@ private struct TaskTableHeader: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            tableHeaderText("Session")
+            tableHeaderText("任务")
                 .frame(maxWidth: .infinity, alignment: .leading)
-            tableHeaderText("Status")
-                .frame(width: 70, alignment: .center)
-            tableHeaderText("Today")
-                .frame(width: 80, alignment: .trailing)
+            tableHeaderText("今日 Token")
+                .frame(width: 106, alignment: .trailing)
                 .help(usesPublishedTodayLedger
                     ? "今日 Token 含已归因子代理；百分比按本机当天全部 Token 计算。"
                     : "今日 Token 为本机根任务快照的暂估值；尚未与子代理及当天总量完整对齐。")
             if showContextMetrics {
                 tableHeaderText("Ctx")
-                    .frame(width: 66, alignment: .trailing)
+                    .frame(width: 56, alignment: .trailing)
             }
-            tableHeaderText("Total")
-                .frame(width: 70, alignment: .trailing)
+            tableHeaderText("累计 Token")
+                .frame(width: 88, alignment: .trailing)
         }
         .padding(.horizontal, MonitorTheme.Spacing.panel)
         .frame(height: IslandMetrics.detailTaskHeaderHeight)
@@ -1914,82 +2255,91 @@ private struct TaskTableHeader: View {
 
 private struct TaskTableRow: View {
     let task: CodexTask
+    let todayTotalTokens: Int?
     let showContextMetrics: Bool
 
     var body: some View {
         HStack(spacing: 0) {
-            HStack(spacing: MonitorTheme.Spacing.inline) {
-                Circle()
-                    .fill(statusColor)
-                    .frame(width: 6, height: 6)
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: MonitorTheme.Spacing.inline) {
+                    Circle()
+                        .fill(statusColor)
+                        .frame(width: 7, height: 7)
 
-                Text(task.title)
-                    .font(MonitorTheme.Typography.tableBody)
-                    .foregroundStyle(MonitorTheme.textPrimary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-
-                if let badgeText = TaskBadgeFormatter.subagentBadgeText(for: task.activeSubagentCount) {
-                    Text(badgeText)
-                        .font(.system(size: 8.4, weight: .semibold))
-                        .foregroundStyle(MonitorTheme.running)
+                    Text(task.title)
+                        .font(MonitorTheme.Typography.tableBody)
+                        .foregroundStyle(MonitorTheme.textPrimary)
                         .lineLimit(1)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
-                        .background(
-                            MonitorTheme.running.opacity(0.12),
-                            in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.chip, style: .continuous)
-                        )
+                        .truncationMode(.tail)
+
+                    if let badgeText = TaskBadgeFormatter.subagentBadgeText(for: task.activeSubagentCount) {
+                        Text(badgeText)
+                            .font(.system(size: 8.4, weight: .semibold))
+                            .foregroundStyle(MonitorTheme.running)
+                            .lineLimit(1)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                    }
                 }
+                HStack(spacing: MonitorTheme.Spacing.compact) {
+                    Text(task.status.label)
+                        .font(MonitorTheme.Typography.tableStatus)
+                        .foregroundStyle(task.status == .running ? MonitorTheme.running : MonitorTheme.textSecondary)
+                }
+                .padding(.leading, 14)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            StatusPill(status: task.status)
-                .frame(width: 70, alignment: .center)
-
-            Text(Formatters.compactTokensWithShare(tokens: task.todayTokens, sharePercent: task.todaySharePercent))
-                .font(MonitorTheme.Typography.tableValue)
-                .foregroundStyle(todayColor)
-                .frame(width: 80, alignment: .trailing)
-                .lineLimit(1)
-                .minimumScaleFactor(0.56)
-                .monospacedDigit()
-                .help(todayUsageHelp)
-                .accessibilityLabel(todayAccessibilityLabel)
+            VStack(alignment: .trailing, spacing: 0) {
+                Text(HUDTokenFormatter.compact(task.todayTokens))
+                    .font(MonitorTheme.Typography.tableValue)
+                    .foregroundStyle(todayColor)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.56)
+                    .monospacedDigit()
+                Text(HUDTokenFormatter.sharePercent(tokens: task.todayTokens, total: todayTotalTokens))
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(MonitorTheme.textSecondary)
+                    .lineLimit(1)
+                    .monospacedDigit()
+            }
+            .frame(width: 106, alignment: .trailing)
+            .help(todayUsageHelp)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("今日 Token")
+            .accessibilityValue(todayAccessibilityLabel)
 
             if showContextMetrics {
                 Text(Formatters.percent(task.contextPercent))
                     .font(.system(size: 10.2, weight: .semibold))
                     .foregroundStyle(task.contextPercent == nil ? MonitorTheme.textTertiary : MonitorTheme.textPrimary)
-                    .frame(width: 66, alignment: .trailing)
+                    .frame(width: 56, alignment: .trailing)
                     .lineLimit(1)
                     .minimumScaleFactor(0.62)
                     .monospacedDigit()
+                    .help("上下文使用率 \(Formatters.percent(task.contextPercent))；输入 \(HUDTokenFormatter.compact(task.contextInputTokens)) / 窗口 \(HUDTokenFormatter.compact(task.contextWindowTokens))；精确原始值：输入 \(task.contextInputTokens.map(String.init) ?? "不可用") / 窗口 \(task.contextWindowTokens.map(String.init) ?? "不可用")")
             }
 
-            Text(Formatters.compactTokens(task.tokenCount))
+            Text(HUDTokenFormatter.compact(task.tokenCount))
                 .font(MonitorTheme.Typography.tableValue)
                 .foregroundStyle(MonitorTheme.textPrimary)
-                .frame(width: 70, alignment: .trailing)
+                .frame(width: 88, alignment: .trailing)
                 .lineLimit(1)
                 .minimumScaleFactor(0.62)
                 .monospacedDigit()
+                .help("累计 Token 为现有快照中的根任务值，不包含子代理；精确原始值：\(task.tokenCount)。")
+                .accessibilityLabel("累计 Token")
+                .accessibilityValue("\(HUDTokenFormatter.compact(task.tokenCount))，精确原始值 \(task.tokenCount)，根任务快照")
         }
         .padding(.horizontal, MonitorTheme.Spacing.panel)
         .frame(height: IslandMetrics.detailTaskRowHeight)
-        .background(isRunning ? MonitorTheme.rowSelectedFill : Color.clear)
+        .background(Color.clear)
         .overlay(alignment: .bottom) {
             Rectangle()
                 .fill(MonitorTheme.separator)
                 .frame(height: MonitorTheme.Stroke.hairline)
         }
-        .overlay(alignment: .leading) {
-            if isRunning {
-                Rectangle()
-                    .fill(MonitorTheme.running)
-                    .frame(width: MonitorTheme.Spacing.micro)
-            }
-        }
+        .accessibilityElement(children: .contain)
     }
 
     private var isRunning: Bool {
@@ -2013,18 +2363,78 @@ private struct TaskTableRow: View {
     }
 
     private var todayAccessibilityLabel: String {
-        let tokens = task.todayTokens.map { Formatters.compactTokens($0) } ?? "不可用"
-        let share = task.todaySharePercent.map { Formatters.wholePercent($0) } ?? "不可用"
+        let tokens = task.todayTokens.map(HUDTokenFormatter.compact) ?? "不可用"
+        let exactTokens = task.todayTokens.map(String.init) ?? "不可用"
+        let share = HUDTokenFormatter.sharePercent(tokens: task.todayTokens, total: todayTotalTokens)
         if task.todayUsageIsReconciled {
-            return "今日 Token \(tokens)，占当天 \(share)，包含已归因子代理"
+            return "今日 Token \(tokens)，\(share == "--" ? "暂无占比" : "占当天 \(share)")，精确原始值 \(exactTokens)，包含已归因子代理"
         }
-        return "今日 Token \(tokens)，为根任务本机快照暂估；不含未对齐的子代理与全天分母"
+        return "今日 Token \(tokens)，\(share == "--" ? "暂无占比" : "占当天 \(share)")，精确原始值 \(exactTokens)，为根任务本机快照暂估；不含未对齐的子代理"
     }
 
     private var todayUsageHelp: String {
         task.todayUsageIsReconciled
-            ? "今日 Token 已包含归属于此任务的子代理；百分比按本机当天全部 Token 计算。"
-            : "今日 Token 为根任务本机快照的暂估值；尚未与子代理及当天总量完整对齐。"
+            ? "今日 Token 已包含归属于此任务的子代理；百分比按本机当天全部 Token 计算。精确原始值：\(task.todayTokens.map(String.init) ?? "不可用")。"
+            : "今日 Token 为根任务本机快照的暂估值；尚未与子代理及当天总量完整对齐。精确原始值：\(task.todayTokens.map(String.init) ?? "不可用")。"
+    }
+}
+
+private struct OtherLocalRecordRow: View {
+    let tokenCount: Int
+    let todayTotalTokens: Int?
+    let showContextMetrics: Bool
+
+    var body: some View {
+        HStack(spacing: 0) {
+            HStack(spacing: MonitorTheme.Spacing.inline) {
+                Circle()
+                    .fill(MonitorTheme.textTertiary)
+                    .frame(width: 7, height: 7)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("其他本地记录")
+                        .font(MonitorTheme.Typography.tableBody)
+                        .foregroundStyle(MonitorTheme.textPrimary)
+                    Text("仅今日汇总 · 不计入根任务")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(MonitorTheme.textSecondary)
+                        .padding(.leading, 14)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            VStack(alignment: .trailing, spacing: 0) {
+                Text(HUDTokenFormatter.compact(tokenCount))
+                    .font(MonitorTheme.Typography.tableValue)
+                    .foregroundStyle(MonitorTheme.textPrimary)
+                    .monospacedDigit()
+                Text(HUDTokenFormatter.sharePercent(tokens: tokenCount, total: todayTotalTokens))
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(MonitorTheme.textSecondary)
+                    .monospacedDigit()
+            }
+            .frame(width: 106, alignment: .trailing)
+            .help("其他本地记录，今日精确 Token \(tokenCount)，\(HUDTokenFormatter.shareAccessibility(tokens: tokenCount, total: todayTotalTokens))；累计不可用。")
+
+            if showContextMetrics {
+                Spacer(minLength: 56)
+            }
+            Text("--")
+                .font(MonitorTheme.Typography.tableValue)
+                .foregroundStyle(MonitorTheme.textTertiary)
+                .frame(width: 88, alignment: .trailing)
+                .accessibilityLabel("累计 Token")
+                .accessibilityValue("不可用")
+        }
+        .padding(.horizontal, MonitorTheme.Spacing.panel)
+        .frame(height: IslandMetrics.detailTaskRowHeight)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(MonitorTheme.separator)
+                .frame(height: MonitorTheme.Stroke.hairline)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("其他本地记录")
+        .accessibilityValue("今日 \(tokenCount) Token，\(HUDTokenFormatter.shareAccessibility(tokens: tokenCount, total: todayTotalTokens))，累计不可用，不计入根任务")
     }
 }
 

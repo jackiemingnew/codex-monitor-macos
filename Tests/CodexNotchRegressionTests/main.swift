@@ -702,12 +702,12 @@ runner.check(
     IslandMetrics.overlayCenterX(normalizedPosition: 1, in: narrowOverlayScreenFrame) == narrowOverlayScreenFrame.midX,
     "screens narrower than the detail panel should force the overlay to center"
 )
-runner.check(fullCodexDetailHeight == 610, "five-row Codex detail should preserve five tasks plus the 48 point Analytics entry")
+runner.check(fullCodexDetailHeight == 666, "light Codex detail should preserve five 44 point task rows plus the compact Analytics entry")
 runner.check(fullCodexDetailHeight - codexDetailWithoutSpark == 40, "Spark strip should add 40 points including its section gap")
 runner.check(fullCodexDetailHeight - codexDetailWithoutPeriod == 56, "period footer should add 56 points including its section gap")
 runner.check(IslandMetrics.detailAnalyticsHeight == 48, "web Analytics should use the fixed compact entry height")
-runner.check(IslandMetrics.visibleTaskRowsHeight == 170, "task viewport should expose exactly five 34 point rows")
-runner.check(IslandMetrics.taskTableHeight(taskRows: IslandMetrics.visibleTaskRows) == 248, "task table should reserve 50 points below the five-row viewport")
+runner.check(IslandMetrics.visibleTaskRowsHeight == 220, "task viewport should expose exactly five 44 point rows")
+runner.check(IslandMetrics.taskTableHeight(taskRows: IslandMetrics.visibleTaskRows) == 298, "task table should retain its header and caption space around the five-row viewport")
 
 let diagnosticsTestRoot = URL(fileURLWithPath: NSTemporaryDirectory())
     .appendingPathComponent("CodexNotchDiagnostics-\(UUID().uuidString)")

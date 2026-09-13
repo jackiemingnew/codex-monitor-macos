@@ -48,7 +48,6 @@ struct RoutingTelemetryView: View {
             .padding(.bottom, MonitorTheme.Spacing.compact)
         }
         .scrollIndicators(.hidden)
-        .colorScheme(.dark)
         .onChange(of: viewModel.assessment?.generatedAt) { _, generatedAt in
             guard generatedAt != nil, viewModel.manualState == .success, let assessment = viewModel.assessment else { return }
             onOpenAssessmentReport(assessment)
@@ -248,7 +247,7 @@ struct RoutingTelemetryView: View {
                 HStack {
                     Text("子任务 \(metric.childThreads)/\(metric.sourceThreads)")
                     Spacer()
-                    Text("全部新增 \(Formatters.compactTokens(metric.tokenDelta))")
+                    Text("全部新增 \(HUDTokenFormatter.compact(metric.tokenDelta))")
                     Spacer()
                     Text("身份 \(metric.roleMetadataCovered)/\(metric.childThreads)")
                 }
@@ -466,7 +465,7 @@ struct RoutingTelemetryView: View {
         HStack(spacing: MonitorTheme.Spacing.compact) {
             Text(label)
                 .foregroundStyle(MonitorTheme.textTertiary)
-            Text(Formatters.compactTokens(value))
+            Text(HUDTokenFormatter.compact(value))
                 .fontWeight(.semibold)
                 .foregroundStyle(MonitorTheme.textSecondary)
         }
@@ -884,7 +883,7 @@ private struct RoutingRoleBreakdownRow: View {
                         .foregroundStyle(MonitorTheme.textPrimary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.85)
-                    Text("累计 \(Formatters.compactTokens(bucket.cumulativeTokens)) · 相邻新增 +\(Formatters.compactTokens(bucket.tokenDelta))")
+                    Text("累计 \(HUDTokenFormatter.compact(bucket.cumulativeTokens)) · 相邻新增 +\(HUDTokenFormatter.compact(bucket.tokenDelta))")
                         .font(.system(size: 8.5, weight: .medium, design: .monospaced))
                         .foregroundStyle(MonitorTheme.textTertiary)
                         .lineLimit(1)
@@ -1229,7 +1228,7 @@ private struct RoutingTrendTooltip: View {
     }
 
     private func tokenDelta(_ value: Int?) -> String {
-        value.map { "+\(Formatters.compactTokens($0))" } ?? "--"
+        value.map { "+\(HUDTokenFormatter.compact($0))" } ?? "--"
     }
 
     private func tokenPair(_ root: Int?, _ child: Int?) -> String {
