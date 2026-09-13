@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+mkdir -p "$ROOT_DIR/.build"
 BUILD_DIR="$(mktemp -d "$ROOT_DIR/.build/codex-notch-freshness.XXXXXX")"
 trap 'rm -rf "${BUILD_DIR}"' EXIT
 export COST_USAGE_FRESHNESS_TMP="$BUILD_DIR"
