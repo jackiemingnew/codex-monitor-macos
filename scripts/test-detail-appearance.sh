@@ -19,7 +19,7 @@ swiftc \
 assert_contains() {
     local needle="$1"
     local path="$2"
-    if ! rg -Fq "$needle" "$path"; then
+    if ! /usr/bin/grep -Fq -- "$needle" "$path"; then
         echo "FAILED: expected '$needle' in $path" >&2
         exit 1
     fi
@@ -30,7 +30,7 @@ assert_contains "settings.\$detailAppearance" "$APP_DELEGATE"
 assert_contains "panel.appearance" "$APP_DELEGATE"
 assert_contains "NSAppearance(named: .aqua)" "$APP_DELEGATE"
 assert_contains "NSAppearance(named: .darkAqua)" "$APP_DELEGATE"
-if rg -q 'NSApp\.appearance|window\.appearance' "$APP_DELEGATE"; then
+if /usr/bin/grep -Eq 'NSApp\.appearance|window\.appearance' "$APP_DELEGATE"; then
     echo "FAILED: detail appearance must not override NSApp or the collapsed window" >&2
     exit 1
 fi

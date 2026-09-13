@@ -20,7 +20,7 @@ swiftc \
 assert_contains() {
     local needle="$1"
     local path="$2"
-    if ! rg -Fq "$needle" "$path"; then
+    if ! /usr/bin/grep -Fq -- "$needle" "$path"; then
         echo "FAILED: expected '$needle' in $path" >&2
         exit 1
     fi
@@ -63,15 +63,15 @@ assert_contains "snapshot.periodUsageQuality.usage7dPartial" "$NOTCH"
 assert_contains "snapshot.periodUsageQuality.usage30dPartial" "$NOTCH"
 assert_contains "周期统计未启用" "$NOTCH"
 
-if rg -q '\.colorScheme\(\.dark\)' "$NOTCH" "$LOCAL" "$ROUTING"; then
+if /usr/bin/grep -Eq '\.colorScheme\(\.dark\)' "$NOTCH" "$LOCAL" "$ROUTING"; then
     echo "FAILED: detail pages still force a dark color scheme" >&2
     exit 1
 fi
-if rg -Fq '.environment(\.colorScheme' "$NOTCH"; then
+if /usr/bin/grep -Fq '.environment(\.colorScheme' "$NOTCH"; then
     echo "FAILED: detail pages must inherit the detail panel appearance" >&2
     exit 1
 fi
-if rg -q 'ultraThinMaterial' "$CHART" "$LOCAL" "$ROUTING"; then
+if /usr/bin/grep -Fq 'ultraThinMaterial' "$CHART" "$LOCAL" "$ROUTING"; then
     echo "FAILED: detail chart tooltip still uses material" >&2
     exit 1
 fi
