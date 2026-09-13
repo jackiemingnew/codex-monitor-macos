@@ -372,7 +372,6 @@ struct DetailPanelView: View {
         }
         .frame(width: IslandMetrics.width, height: detailHeight)
         .clipShape(BottomRoundedRectangle(radius: MonitorTheme.Radius.detailBottom))
-        .environment(\.colorScheme, .light)
         .onAppear {
             onPageSelected(selectedPage)
         }

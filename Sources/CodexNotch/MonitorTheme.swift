@@ -1,9 +1,27 @@
+import AppKit
 import SwiftUI
 
 enum MonitorTheme {
+    private static func rgb(_ red: Int, _ green: Int, _ blue: Int) -> NSColor {
+        NSColor(
+            srgbRed: CGFloat(red) / 255,
+            green: CGFloat(green) / 255,
+            blue: CGFloat(blue) / 255,
+            alpha: 1
+        )
+    }
+
+    private static func adaptiveColor(light: NSColor, dark: NSColor) -> Color {
+        Color(
+            nsColor: NSColor(name: nil) { appearance in
+                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
+            }
+        )
+    }
+
     /// Tokens used by the collapsed capsule only.  The detail panel has a
-    /// deliberately independent, opaque light palette below; keeping these
-    /// values namespaced prevents a light-panel change from reducing HUD
+    /// deliberately independent, opaque adaptive palette below; keeping these
+    /// values namespaced prevents a detail-panel change from reducing HUD
     /// contrast on a mixed desktop background.
     enum Pill {
         static let tint = Color.black.opacity(0.48)
@@ -85,27 +103,27 @@ enum MonitorTheme {
 
     // Detail surfaces are opaque by design.  Do not replace these with a
     // material: the panel must remain readable over any desktop wallpaper.
-    static let detailBackground = Color(red: 248 / 255, green: 249 / 255, blue: 247 / 255)
+    static let detailBackground = adaptiveColor(light: rgb(248, 249, 247), dark: rgb(30, 32, 36))
     static let detailTint = detailBackground
-    static let panelStroke = Color(red: 225 / 255, green: 229 / 255, blue: 233 / 255)
+    static let panelStroke = adaptiveColor(light: rgb(225, 229, 233), dark: rgb(59, 65, 75))
     static let hairline = panelStroke
-    static let sectionFill = Color(red: 252 / 255, green: 253 / 255, blue: 252 / 255)
+    static let sectionFill = adaptiveColor(light: rgb(252, 253, 252), dark: rgb(37, 40, 45))
     static let rowFill = detailBackground
-    static let rowSelectedFill = Color(red: 248 / 255, green: 249 / 255, blue: 247 / 255)
-    static let controlFill = Color(red: 241 / 255, green: 243 / 255, blue: 245 / 255)
-    static let controlSelectedFill = Color(red: 234 / 255, green: 240 / 255, blue: 255 / 255)
-    static let separator = Color(red: 225 / 255, green: 229 / 255, blue: 233 / 255)
-    static let progressTrack = Color(red: 225 / 255, green: 229 / 255, blue: 233 / 255)
-    static let textPrimary = Color(red: 37 / 255, green: 42 / 255, blue: 49 / 255)
-    static let textSecondary = Color(red: 97 / 255, green: 107 / 255, blue: 118 / 255)
-    static let textTertiary = Color(red: 97 / 255, green: 107 / 255, blue: 118 / 255)
-    static let accentBlue = Color(red: 54 / 255, green: 93 / 255, blue: 199 / 255)
-    static let paleBlue = Color(red: 234 / 255, green: 240 / 255, blue: 255 / 255)
-    static let healthy = Color(red: 40 / 255, green: 121 / 255, blue: 79 / 255)
+    static let rowSelectedFill = adaptiveColor(light: rgb(248, 249, 247), dark: rgb(38, 56, 83))
+    static let controlFill = adaptiveColor(light: rgb(241, 243, 245), dark: rgb(43, 48, 55))
+    static let controlSelectedFill = adaptiveColor(light: rgb(234, 240, 255), dark: rgb(38, 56, 83))
+    static let separator = adaptiveColor(light: rgb(225, 229, 233), dark: rgb(59, 65, 75))
+    static let progressTrack = adaptiveColor(light: rgb(225, 229, 233), dark: rgb(60, 68, 79))
+    static let textPrimary = adaptiveColor(light: rgb(37, 42, 49), dark: rgb(231, 234, 240))
+    static let textSecondary = adaptiveColor(light: rgb(97, 107, 118), dark: rgb(168, 176, 188))
+    static let textTertiary = adaptiveColor(light: rgb(97, 107, 118), dark: rgb(160, 169, 181))
+    static let accentBlue = adaptiveColor(light: rgb(54, 93, 199), dark: rgb(138, 172, 255))
+    static let paleBlue = adaptiveColor(light: rgb(234, 240, 255), dark: rgb(38, 56, 83))
+    static let healthy = adaptiveColor(light: rgb(40, 121, 79), dark: rgb(120, 201, 154))
     static let running = accentBlue
     static let radarBaseline = accentBlue
-    static let warning = Color(red: 166 / 255, green: 95 / 255, blue: 0 / 255)
-    static let critical = Color(red: 180 / 255, green: 35 / 255, blue: 24 / 255)
+    static let warning = adaptiveColor(light: rgb(166, 95, 0), dark: rgb(233, 184, 106))
+    static let critical = adaptiveColor(light: rgb(180, 35, 24), dark: rgb(241, 138, 138))
     static let neutral = textSecondary
 
     // Compatibility aliases for code that still belongs to the collapsed
@@ -116,35 +134,35 @@ enum MonitorTheme {
     // Ultra comparison trend, and a separate green guidance role. Amber here
     // identifies a series; it must not be interpreted as warning status.
     static let routingTrend = accentBlue
-    static let routingTrendPoint = Color(red: 85 / 255, green: 123 / 255, blue: 219 / 255)
-    static let routingUltraTrend = Color(red: 161 / 255, green: 92 / 255, blue: 0 / 255)
-    static let routingUltraTrendPoint = Color(red: 200 / 255, green: 128 / 255, blue: 24 / 255)
+    static let routingTrendPoint = adaptiveColor(light: rgb(85, 123, 219), dark: rgb(175, 200, 255))
+    static let routingUltraTrend = adaptiveColor(light: rgb(161, 92, 0), dark: rgb(255, 208, 138))
+    static let routingUltraTrendPoint = adaptiveColor(light: rgb(200, 128, 24), dark: rgb(255, 224, 178))
     static let routingGuidance = healthy
     static let routingGuidanceFill = routingGuidance.opacity(0.12)
     static let routingGuidanceBandFill = routingGuidance.opacity(0.42)
     static let routingGuidanceBoundary = routingGuidance.opacity(0.72)
     static let routingCardHairline = separator
-    static let routingTooltipSurface = Color.white
+    static let routingTooltipSurface = adaptiveColor(light: rgb(255, 255, 255), dark: rgb(37, 40, 45))
     static let routingTooltipStroke = separator
     static let analyticsTurnsPalette = [
-        Color(red: 149 / 255, green: 176 / 255, blue: 230 / 255),
+        adaptiveColor(light: rgb(149, 176, 230), dark: rgb(192, 212, 255)),
         accentBlue,
-        Color(red: 45 / 255, green: 76 / 255, blue: 145 / 255),
-        Color(red: 129 / 255, green: 93 / 255, blue: 173 / 255),
-        Color(red: 91 / 255, green: 56 / 255, blue: 151 / 255),
-        Color(red: 64 / 255, green: 48 / 255, blue: 118 / 255),
+        adaptiveColor(light: rgb(45, 76, 145), dark: rgb(126, 165, 255)),
+        adaptiveColor(light: rgb(129, 93, 173), dark: rgb(215, 167, 255)),
+        adaptiveColor(light: rgb(91, 56, 151), dark: rgb(201, 139, 255)),
+        adaptiveColor(light: rgb(64, 48, 118), dark: rgb(183, 124, 255)),
         textTertiary
     ]
     static let analyticsSkillsPalette = [
-        Color(red: 152 / 255, green: 178 / 255, blue: 228 / 255),
-        Color(red: 80 / 255, green: 126 / 255, blue: 203 / 255),
+        adaptiveColor(light: rgb(152, 178, 228), dark: rgb(194, 214, 255)),
+        adaptiveColor(light: rgb(80, 126, 203), dark: rgb(145, 184, 255)),
         accentBlue,
-        Color(red: 49 / 255, green: 86 / 255, blue: 157 / 255),
-        Color(red: 127 / 255, green: 100 / 255, blue: 179 / 255),
-        Color(red: 101 / 255, green: 64 / 255, blue: 156 / 255),
-        Color(red: 180 / 255, green: 73 / 255, blue: 117 / 255),
-        Color(red: 175 / 255, green: 102 / 255, blue: 26 / 255),
-        Color(red: 161 / 255, green: 125 / 255, blue: 22 / 255)
+        adaptiveColor(light: rgb(49, 86, 157), dark: rgb(167, 195, 255)),
+        adaptiveColor(light: rgb(127, 100, 179), dark: rgb(214, 166, 255)),
+        adaptiveColor(light: rgb(101, 64, 156), dark: rgb(199, 141, 255)),
+        adaptiveColor(light: rgb(180, 73, 117), dark: rgb(255, 159, 197)),
+        adaptiveColor(light: rgb(175, 102, 26), dark: rgb(246, 183, 121)),
+        adaptiveColor(light: rgb(161, 125, 22), dark: rgb(244, 210, 126))
     ]
 
     static let settingsSidebarFill = Color.secondary.opacity(0.055)

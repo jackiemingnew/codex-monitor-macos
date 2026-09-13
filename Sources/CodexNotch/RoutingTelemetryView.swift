@@ -69,7 +69,7 @@ struct RoutingTelemetryView: View {
                 .font(.system(size: 8.5, weight: .bold, design: .rounded))
                 .foregroundStyle(statusColor)
                 .padding(5)
-                .background(statusColor.opacity(0.15), in: Capsule())
+                .background(MonitorTheme.sectionFill, in: Capsule())
         }
         .padding(.horizontal, MonitorTheme.Spacing.row)
         .frame(height: 42)

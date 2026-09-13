@@ -2,7 +2,7 @@
 
 ## Intent
 
-Codex Monitor is a compact macOS HUD for people who keep Codex running all day. The collapsed capsule stays dark for desktop contrast; the expanded 520pt detail panel is opaque, light, calm, and precise. This separation is intentional, not a system-appearance toggle.
+Codex Monitor is a compact macOS HUD for people who keep Codex running all day. The collapsed capsule stays dark for desktop contrast; the expanded 520pt detail panel is opaque, calm, and precise in both light and dark appearances. Detail appearance defaults to following macOS, with explicit light and dark overrides.
 
 The product is not a marketing site. Do not use oversized hero typography, decorative gradient backgrounds, brand mascots, or landing-page card stacks inside the app.
 
@@ -17,7 +17,7 @@ This project uses public `DESIGN.md` systems from `VoltAgent/awesome-design-md` 
 ## Atmosphere
 
 - Native macOS utility, not web app chrome.
-- HUD first: a translucent near-black collapsed capsule and an opaque warm-white detail panel; compact tables and restrained depth.
+- HUD first: a translucent near-black collapsed capsule and an opaque warm-white or charcoal detail panel; compact tables and restrained depth.
 - The floating HUD is the default identity. The optional menu-bar mode removes the pill surface, uses a high-contrast custom monitor mark, and prioritizes the remaining 5-hour quota; full metrics remain available in the detail panel.
 - Developer tool: values, quota windows, task rows, and error states must be more legible than decorative.
 - Quiet polish: detail hierarchy comes from spacing, typography and separators, not translucent grey layers or decorative gradients.
@@ -27,18 +27,18 @@ This project uses public `DESIGN.md` systems from `VoltAgent/awesome-design-md` 
 ### HUD Surfaces
 
 - `hud.pill`: near-black translucent surface for the collapsed notch capsule.
-- `hud.detail`: opaque `#F8F9F7`, with no visual-effect material behind detail content.
-- `hud.section` / `hud.row`: quiet, nearly white neutral surfaces; prefer separators to nested cards.
+- `hud.detail`: opaque `#F8F9F7` in light and `#1E2024` in dark, with no visual-effect material behind detail content.
+- `hud.section` / `hud.row`: quiet neutral surfaces; dark elevated content uses `#25282D`. Prefer separators to nested cards.
 - `hud.rowSelected`: pale neutral hover/selection, never a full green running row.
 - `hud.control`: neutral compact controls.
-- `hud.controlSelected`: pale blue `#EAF0FF` with blue `#365DC7` labels.
+- `hud.controlSelected`: pale blue `#EAF0FF` with blue `#365DC7` labels in light; muted navy `#263853` with `#8AACFF` labels in dark.
 - `hud.hairline` / `hud.separator`: subtle neutral-grey boundaries.
 - Collapsed-only tokens must preserve their original white-on-dark contrast independently of these detail tokens.
 
 ### Text
 
-- `text.primary`: `#252A31` for labels and important values.
-- `text.secondary`: `#616B76` for table headers and secondary metadata.
+- `text.primary`: `#252A31` in light, soft off-white `#E7EAF0` in dark, for labels and important values.
+- `text.secondary`: `#616B76` in light, `#A8B0BC` in dark, for table headers and secondary metadata.
 - `text.tertiary`: sufficiently contrasting neutral grey; do not fade meaningful metadata below readable contrast.
 
 ### Status
@@ -50,6 +50,8 @@ This project uses public `DESIGN.md` systems from `VoltAgent/awesome-design-md` 
 - `status.neutral`: inactive, unknown, or disabled.
 
 Use status color only where it communicates state. Avoid broad colored backgrounds.
+
+Dark healthy/warning/critical colors are `#78C99A`, `#E9B86A`, and `#F18A8A`. Dark controls use `#2B3037`, separators `#3B414B`, and progress tracks `#3C444F`. Meaningful text must maintain at least 4.5:1 contrast on its actual surface. Dark mode is a separately tuned palette, not an inversion or the old translucent grey stack.
 
 ## Typography
 
@@ -94,7 +96,7 @@ Do not scale font size with viewport width. Do not use negative letter spacing.
 
 ### Detail Panel
 
-- Treat it as a native light utility panel with tabs. Apply a light color scheme only to the expanded panel; settings remain semantic and the collapsed capsule remains dark.
+- Treat it as one native utility panel with tabs and two appearance palettes. Apply the selected appearance at the detail window boundary, so native controls, all detail pages, charts, and tooltips agree. Settings remain system-semantic, the menu-bar mark follows its existing policy, and the collapsed capsule remains dark.
 - Use separators and whitespace before adding section backgrounds or borders.
 - Keep `Codex`, `Skills`, `Codex Radar`, `CLIProxyAPI`, `NewAPI`, and `Sub2API` visually related.
 - Keep Skill Insights in the expanded detail panel; never add its weekly metrics
@@ -151,6 +153,8 @@ Do not scale font size with viewport width. Do not use negative letter spacing.
 
 ### Settings
 
+- Offer only `跟随系统` (default), `浅色`, and `深色` for `详情外观`, using the existing draft/save/cancel flow. Follow macOS appearance instead of maintaining a separate schedule or changing global macOS preferences.
+- Appearance changes must not create a new timer, scanner, network request, model call, or data cache. Use native appearance propagation; do not recreate the detail view or reset selected tabs/disclosures when switching.
 - Settings may use macOS semantic colors so the window remains native in light and dark mode.
 - Settings should share radius, typography, and hierarchy tokens with the HUD where practical.
 - Sidebar selection should be subtle and precise, not a bright brand block.

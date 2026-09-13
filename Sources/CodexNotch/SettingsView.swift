@@ -153,6 +153,7 @@ private struct SettingsDraft: Equatable {
     var launchAtLoginEnabled = false
     var enablePulse = true
     var hudDisplayMode: HUDDisplayMode = .floatingHUD
+    var detailAppearance: HUDDetailAppearance = .system
     var secretStorageMode: SecretStorageMode = .keychain
 
     @MainActor
@@ -205,6 +206,7 @@ private struct SettingsDraft: Equatable {
         launchAtLoginEnabled = settings.launchAtLoginEnabled
         enablePulse = settings.enablePulse
         hudDisplayMode = settings.hudDisplayMode
+        detailAppearance = settings.detailAppearance
         secretStorageMode = settings.secretStorageMode
     }
 
@@ -948,6 +950,20 @@ struct SettingsView: View {
         }
 
         Section("启动与外观") {
+            Picker(selection: $draft.detailAppearance) {
+                ForEach(HUDDetailAppearance.allCases) { appearance in
+                    Text(appearance.label).tag(appearance)
+                }
+            } label: {
+                HelpLabel(
+                    title: "详情外观",
+                    help: "控制展开详情面板的外观；默认跟随系统。设置窗口、菜单栏和收起胶囊不受影响，点击保存后生效。"
+                )
+            }
+            .pickerStyle(.segmented)
+            .accessibilityLabel("详情外观")
+            .accessibilityHint("选择跟随系统、浅色或深色；点击保存后生效")
+
             Picker(selection: $draft.secretStorageMode) {
                 ForEach(SecretStorageMode.allCases) { mode in
                     Text(mode.label).tag(mode)
@@ -2036,6 +2052,7 @@ struct SettingsView: View {
         settings.agySidecarAutomaticCanaryEnabled = next.agySidecarAutomaticCanaryEnabled
         settings.agySidecarAutomaticCanaryInterval = next.agySidecarAutomaticCanaryInterval
         settings.hudDisplayMode = next.hudDisplayMode
+        settings.detailAppearance = next.detailAppearance
         settings.codexRadarEnabled = next.codexRadarEnabled
         let radarModeChanged = next.codexRadarUsesAuthorizedAPI != settings.codexRadarUsesAuthorizedAPI
         let radarTokenChanged = codexRadarTokenLoadedForEditing

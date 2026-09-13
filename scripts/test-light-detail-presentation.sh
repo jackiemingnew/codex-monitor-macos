@@ -36,14 +36,14 @@ assert_contains "MonitorTheme.Pill.running" "$ROOT_DIR/Sources/CodexNotch/MenuBa
 assert_contains "MonitorTheme.Pill.warning" "$ROOT_DIR/Sources/CodexNotch/MenuBarStatusView.swift"
 assert_contains "MonitorTheme.Pill.critical" "$ROOT_DIR/Sources/CodexNotch/MenuBarStatusView.swift"
 assert_contains "static let tint = Color.black.opacity(0.48)" "$THEME"
-assert_contains "Color(red: 248 / 255" "$THEME"
-assert_contains "Color(red: 37 / 255" "$THEME"
-assert_contains "Color(red: 54 / 255" "$THEME"
-assert_contains "Color(red: 234 / 255" "$THEME"
-assert_contains "Color(red: 40 / 255" "$THEME"
+assert_contains "private static func adaptiveColor" "$THEME"
+assert_contains "static let detailBackground = adaptiveColor(light: rgb(248, 249, 247), dark: rgb(30, 32, 36))" "$THEME"
+assert_contains "static let textPrimary = adaptiveColor(light: rgb(37, 42, 49), dark: rgb(231, 234, 240))" "$THEME"
+assert_contains "static let accentBlue = adaptiveColor(light: rgb(54, 93, 199), dark: rgb(138, 172, 255))" "$THEME"
+assert_contains "static let controlSelectedFill = adaptiveColor(light: rgb(234, 240, 255), dark: rgb(38, 56, 83))" "$THEME"
+assert_contains "static let healthy = adaptiveColor(light: rgb(40, 121, 79), dark: rgb(120, 201, 154))" "$THEME"
 assert_contains "static let heroValue" "$THEME"
 assert_contains "static let quotaValue = Font.system(size: 13" "$THEME"
-assert_contains ".environment(\\.colorScheme, .light)" "$NOTCH"
 assert_contains "查看全部" "$NOTCH"
 assert_contains "其他本地记录" "$NOTCH"
 assert_contains "API 等值，非订阅账单" "$NOTCH"
@@ -64,6 +64,10 @@ assert_contains "周期统计未启用" "$NOTCH"
 
 if rg -q '\.colorScheme\(\.dark\)' "$NOTCH" "$LOCAL" "$ROUTING"; then
     echo "FAILED: detail pages still force a dark color scheme" >&2
+    exit 1
+fi
+if rg -Fq '.environment(\.colorScheme' "$NOTCH"; then
+    echo "FAILED: detail pages must inherit the detail panel appearance" >&2
     exit 1
 fi
 if rg -q 'ultraThinMaterial' "$CHART" "$LOCAL" "$ROUTING"; then

@@ -4071,6 +4071,40 @@ runner.check(
 runner.check(settings.codexRadarEnabled, "Codex Radar should default to enabled")
 runner.check(!settings.codexRadarUsesAuthorizedAPI, "Codex Radar should default to Public without reading Keychain")
 runner.check(!settings.performanceMonitoringEnabled, "background performance monitoring should default to off")
+runner.check(settings.detailAppearance == .system, "detail appearance should default to following macOS")
+runner.check(
+    HUDDetailAppearance.allCases == [.system, .light, .dark],
+    "detail appearance should expose system, light and dark choices in order"
+)
+runner.check(
+    HUDDetailAppearance.allCases.map(\.label) == ["跟随系统", "浅色", "深色"],
+    "detail appearance labels should be concise and localized"
+)
+settings.detailAppearance = .dark
+runner.check(
+    settingsDefaults.string(forKey: "detailAppearance") == "dark",
+    "detail appearance should persist its raw value"
+)
+let persistedDetailAppearanceSettings = CodexNotchSettings(
+    defaults: settingsDefaults,
+    secretStores: SecretStoreFactory(keychain: MemorySecretStore(), database: MemorySecretStore()),
+    launchAtLoginManager: FakeLaunchAtLoginManager()
+)
+runner.check(
+    persistedDetailAppearanceSettings.detailAppearance == .dark,
+    "detail appearance should reload from persisted defaults"
+)
+settingsDefaults.set("unsupported-appearance", forKey: "detailAppearance")
+let invalidDetailAppearanceSettings = CodexNotchSettings(
+    defaults: settingsDefaults,
+    secretStores: SecretStoreFactory(keychain: MemorySecretStore(), database: MemorySecretStore()),
+    launchAtLoginManager: FakeLaunchAtLoginManager()
+)
+runner.check(
+    invalidDetailAppearanceSettings.detailAppearance == .system,
+    "invalid persisted detail appearance should fail closed to system"
+)
+settings.detailAppearance = .system
 settings.performanceMonitoringEnabled = true
 runner.check(settingsDefaults.object(forKey: "performanceMonitoringEnabled") as? Bool == true, "performance monitoring opt-in should persist")
 settings.performanceMonitoringEnabled = false

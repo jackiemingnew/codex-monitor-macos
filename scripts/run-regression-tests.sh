@@ -17,6 +17,7 @@ bash "$ROOT_DIR/scripts/test-antigravity-quota.sh"
 bash "$ROOT_DIR/scripts/test-refresh-environment-notifications.sh"
 bash "$ROOT_DIR/scripts/test-cost-usage-freshness.sh"
 bash "$ROOT_DIR/scripts/test-light-detail-presentation.sh"
+bash "$ROOT_DIR/scripts/test-detail-appearance.sh"
 
 swiftc \
   -swift-version 6 \

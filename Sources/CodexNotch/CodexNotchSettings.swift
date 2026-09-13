@@ -18,6 +18,25 @@ enum HUDDisplayMode: String, CaseIterable, Identifiable {
     }
 }
 
+enum HUDDetailAppearance: String, CaseIterable, Identifiable, Sendable {
+    case system
+    case light
+    case dark
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .system:
+            "跟随系统"
+        case .light:
+            "浅色"
+        case .dark:
+            "深色"
+        }
+    }
+}
+
 enum CodexRadarCredentialSource: Equatable, Sendable {
     case environment
     case secretStore
@@ -79,6 +98,7 @@ final class CodexNotchSettings: ObservableObject {
         static let codexRadarUsesAuthorizedAPI = "codexRadarUsesAuthorizedAPI"
         static let enablePulse = "enablePulse"
         static let hudDisplayMode = "hudDisplayMode"
+        static let detailAppearance = "detailAppearance"
         static let overlayHorizontalPosition = "overlayHorizontalPosition"
         static let overlayVerticalPosition = "overlayVerticalPosition"
         static let taskHistoryRange = "taskHistoryRange"
@@ -238,6 +258,12 @@ final class CodexNotchSettings: ObservableObject {
     @Published var hudDisplayMode: HUDDisplayMode {
         didSet {
             defaults.set(hudDisplayMode.rawValue, forKey: Keys.hudDisplayMode)
+        }
+    }
+
+    @Published var detailAppearance: HUDDetailAppearance {
+        didSet {
+            defaults.set(detailAppearance.rawValue, forKey: Keys.detailAppearance)
         }
     }
 
@@ -548,6 +574,7 @@ final class CodexNotchSettings: ObservableObject {
         self.codexRadarUsesAuthorizedAPI = defaults.object(forKey: Keys.codexRadarUsesAuthorizedAPI) as? Bool ?? false
         self.enablePulse = defaults.object(forKey: Keys.enablePulse) as? Bool ?? true
         self.hudDisplayMode = HUDDisplayMode(rawValue: defaults.string(forKey: Keys.hudDisplayMode) ?? "") ?? .floatingHUD
+        self.detailAppearance = HUDDetailAppearance(rawValue: defaults.string(forKey: Keys.detailAppearance) ?? "") ?? .system
         self.overlayHorizontalPosition = Self.clampedOverlayHorizontalPosition(
             defaults.object(forKey: Keys.overlayHorizontalPosition) as? Double ?? 0
         )

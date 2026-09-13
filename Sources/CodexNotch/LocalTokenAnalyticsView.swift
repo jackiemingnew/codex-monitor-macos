@@ -201,7 +201,7 @@ private struct LocalTokenQualityBadge: View {
             .foregroundStyle(color)
             .padding(.horizontal, 5)
             .padding(.vertical, 2)
-            .background(color.opacity(0.14), in: Capsule())
+            .background(MonitorTheme.sectionFill, in: Capsule())
     }
 }
 

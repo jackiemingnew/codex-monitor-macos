@@ -734,6 +734,7 @@ final class NotchOverlayController {
             .stationary,
             .ignoresCycle
         ]
+        applyDetailAppearance(settings.detailAppearance, to: panel)
 
         let detailView = DetailPanelView(
             viewModel: viewModel,
@@ -788,6 +789,17 @@ final class NotchOverlayController {
         return panel
     }
 
+    private func applyDetailAppearance(_ appearance: HUDDetailAppearance, to panel: DetailKeyboardPanel) {
+        panel.appearance = switch appearance {
+        case .system:
+            nil
+        case .light:
+            NSAppearance(named: .aqua)
+        case .dark:
+            NSAppearance(named: .darkAqua)
+        }
+    }
+
     private func observeState() {
         settings.$hudDisplayMode
             .removeDuplicates()
@@ -798,6 +810,20 @@ final class NotchOverlayController {
                         return
                     }
                     self.applyDisplayMode(mode)
+                }
+            }
+            .store(in: &cancellables)
+
+        settings.$detailAppearance
+            .removeDuplicates()
+            .sink { [weak self] appearance in
+                DispatchQueue.main.async {
+                    guard let self,
+                          self.settings.detailAppearance == appearance,
+                          let detailWindow = self.detailWindow as? DetailKeyboardPanel else {
+                        return
+                    }
+                    self.applyDetailAppearance(appearance, to: detailWindow)
                 }
             }
             .store(in: &cancellables)
