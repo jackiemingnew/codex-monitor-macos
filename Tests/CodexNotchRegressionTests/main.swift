@@ -4166,7 +4166,7 @@ var partialDailyHUDSnapshot = UsageSnapshot.empty
 partialDailyHUDSnapshot.dailyUsage = DailyUsage(
     usageTodayTokens: 12_345,
     dayStartedAt: Date(),
-    timeZoneIdentifier: "Asia/Shanghai",
+    timeZoneIdentifier: TimeZone.current.identifier,
     isPartial: true,
     missingBaselineSessions: 2
 )
