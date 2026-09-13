@@ -33,10 +33,7 @@ final class PerformanceMonitorViewModel: ObservableObject {
                     self?.applyBackgroundMonitoring(enabled)
                 }
             }
-        Publishers.Merge(
-            NotificationCenter.default.publisher(for: .NSProcessInfoPowerStateDidChange),
-            NotificationCenter.default.publisher(for: ProcessInfo.thermalStateDidChangeNotification)
-        )
+        RefreshEnvironmentNotifications.publisher()
         .sink { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.rescheduleForCurrentCadence()

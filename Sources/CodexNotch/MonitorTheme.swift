@@ -77,6 +77,21 @@ enum MonitorTheme {
     static let warning = Color(red: 0.92, green: 0.68, blue: 0.42)
     static let critical = Color(red: 0.88, green: 0.45, blue: 0.45)
     static let neutral = Color.white.opacity(0.34)
+
+    // Routing telemetry uses a restrained blue/teal primary trend, an amber
+    // Ultra comparison trend, and a separate green guidance role. Amber here
+    // identifies a series; it must not be interpreted as warning status.
+    static let routingTrend = Color(red: 0.34, green: 0.72, blue: 0.88)
+    static let routingTrendPoint = Color(red: 0.61, green: 0.86, blue: 0.96)
+    static let routingUltraTrend = Color(red: 0.93, green: 0.63, blue: 0.30)
+    static let routingUltraTrendPoint = Color(red: 0.98, green: 0.80, blue: 0.52)
+    static let routingGuidance = Color(red: 0.45, green: 0.78, blue: 0.53)
+    static let routingGuidanceFill = routingGuidance.opacity(0.12)
+    static let routingGuidanceBandFill = routingGuidance.opacity(0.42)
+    static let routingGuidanceBoundary = routingGuidance.opacity(0.72)
+    static let routingCardHairline = Color.white.opacity(0.10)
+    static let routingTooltipSurface = Color.black.opacity(0.88)
+    static let routingTooltipStroke = Color.white.opacity(0.18)
     static let analyticsTurnsPalette = [
         Color(red: 0.76, green: 0.86, blue: 0.98),
         Color(red: 0.23, green: 0.49, blue: 0.93),

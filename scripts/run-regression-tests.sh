@@ -13,6 +13,9 @@ fi
 unset CODEX_USAGE_DELTA_DB
 
 bash "$ROOT_DIR/scripts/test-notarize-release-contract.sh"
+bash "$ROOT_DIR/scripts/test-antigravity-quota.sh"
+bash "$ROOT_DIR/scripts/test-refresh-environment-notifications.sh"
+bash "$ROOT_DIR/scripts/test-cost-usage-freshness.sh"
 
 swiftc \
   -swift-version 6 \
@@ -52,6 +55,7 @@ swiftc \
   "${ROOT_DIR}/Sources/CodexNotch/CodexRadarModels.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/CodexRadarClient.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/CodexRadarViewModel.swift" \
+  "${ROOT_DIR}/Sources/CodexNotch/AGYSidecarHealthModels.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/CodexNotchSettings.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/CodexSessionFileLocator.swift" \
   "${ROOT_DIR}/Sources/CodexNotch/SkillInsightsModels.swift" \
@@ -106,3 +110,5 @@ swiftc \
   -o "${BUILD_DIR}/RoutingTelemetryViewModelTests"
 
 "${BUILD_DIR}/RoutingTelemetryViewModelTests"
+
+bash "${ROOT_DIR}/scripts/test-agy-sidecar-health.sh"

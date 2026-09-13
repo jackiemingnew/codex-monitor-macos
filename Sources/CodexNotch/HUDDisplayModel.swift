@@ -1,3 +1,5 @@
+import Foundation
+
 enum HUDDisplaySourceResolver {
     static func resolve(
         selected: NotchDisplaySource,
@@ -70,23 +72,44 @@ struct HUDTodayUsageDisplay: Equatable {
     let tokenCount: Int?
     let isPartial: Bool
     let missingBaselineSessions: Int
+    let isBackfilling: Bool
 
     static func resolve(snapshot: UsageSnapshot) -> HUDTodayUsageDisplay {
-        if let publishedTokenCount = snapshot.costUsage.today.tokenCount {
+        if snapshot.costUsage.tokenQuality == .complete,
+           let publishedTokenCount = snapshot.costUsage.today.tokenCount {
             return HUDTodayUsageDisplay(
                 tokenCount: publishedTokenCount,
                 isPartial: false,
-                missingBaselineSessions: 0
+                missingBaselineSessions: 0,
+                isBackfilling: false
             )
         }
 
         let dailyUsage = snapshot.dailyUsage
+        let usesCurrentLocalDay = dailyUsage.timeZoneIdentifier == TimeZone.current.identifier
+            && Calendar.current.isDateInToday(dailyUsage.dayStartedAt)
+        let hasFallback = usesCurrentLocalDay
+            && (dailyUsage.usageTodayTokens > 0
+                || dailyUsage.isPartial
+                || dailyUsage.missingBaselineSessions > 0)
         return HUDTodayUsageDisplay(
-            tokenCount: dailyUsage.usageTodayTokens > 0 || dailyUsage.isPartial
-                ? dailyUsage.usageTodayTokens
-                : nil,
-            isPartial: dailyUsage.isPartial,
-            missingBaselineSessions: dailyUsage.missingBaselineSessions
+            tokenCount: hasFallback ? dailyUsage.usageTodayTokens : nil,
+            isPartial: hasFallback,
+            missingBaselineSessions: hasFallback ? dailyUsage.missingBaselineSessions : 0,
+            isBackfilling: !hasFallback && snapshot.costUsage.today.isPartial
         )
+    }
+
+    func helpText(label: String) -> String? {
+        if isBackfilling {
+            return "\(label)正在核验本地完整历史，完成前不显示零值。"
+        }
+        guard isPartial else {
+            return nil
+        }
+        if missingBaselineSessions > 0 {
+            return "\(label)有 \(missingBaselineSessions) 个会话缺少历史基线；当前为本地日快照暂估值，尚未与完整发布账本对齐。"
+        }
+        return "\(label)为现有本地日快照的暂估值，尚未与完整发布账本对齐。"
     }
 }

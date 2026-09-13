@@ -165,6 +165,15 @@ struct CostEstimateWindow: Equatable, Sendable {
     static let backfilling = CostEstimateWindow(usd: nil, isPartial: true, tokenCount: nil)
 }
 
+struct CostUsageThreadDayBucket: Equatable, Sendable {
+    let dayKey: String
+    let threadID: String
+    let tokenCount: Int
+    let ownTokenCount: Int
+    let subagentTokenCount: Int
+    let sessionCount: Int
+}
+
 struct CostUsageSummary: Equatable, Sendable {
     let today: CostEstimateWindow
     let sevenDays: CostEstimateWindow
@@ -174,6 +183,7 @@ struct CostUsageSummary: Equatable, Sendable {
     let usesSparkProxy: Bool
     let tokenQuality: CostUsageQuality
     let modelBuckets: [CostUsageModelDayBucket]
+    let threadDayBuckets: [CostUsageThreadDayBucket]
 
     init(
         today: CostEstimateWindow,
@@ -183,7 +193,8 @@ struct CostUsageSummary: Equatable, Sendable {
         lastUpdated: Date?,
         usesSparkProxy: Bool,
         tokenQuality: CostUsageQuality? = nil,
-        modelBuckets: [CostUsageModelDayBucket] = []
+        modelBuckets: [CostUsageModelDayBucket] = [],
+        threadDayBuckets: [CostUsageThreadDayBucket] = []
     ) {
         self.today = today
         self.sevenDays = sevenDays
@@ -193,6 +204,7 @@ struct CostUsageSummary: Equatable, Sendable {
         self.usesSparkProxy = usesSparkProxy
         self.tokenQuality = tokenQuality ?? quality
         self.modelBuckets = modelBuckets
+        self.threadDayBuckets = threadDayBuckets
     }
 
     static let unavailable = CostUsageSummary(
@@ -215,6 +227,39 @@ struct CostUsageSummary: Equatable, Sendable {
             usesSparkProxy: false,
             tokenQuality: .partial
         )
+    }
+
+    var hasReconciledTodayLedger: Bool {
+        guard tokenQuality == .complete,
+              let totalTokens = today.tokenCount,
+              totalTokens >= 0 else {
+            return false
+        }
+
+        let publishedTotal = threadDayBuckets.reduce(0) { partial, bucket in
+            let (sum, overflow) = partial.addingReportingOverflow(max(0, bucket.tokenCount))
+            return overflow ? Int.max : sum
+        }
+        return publishedTotal == totalTokens
+    }
+
+    func applyingPublishedTodayLedger(to tasks: [CodexTask]) -> [CodexTask]? {
+        guard hasReconciledTodayLedger,
+              let totalTokens = today.tokenCount else {
+            return nil
+        }
+
+        let tokensByThread = threadDayBuckets.reduce(into: [String: Int]()) { result, bucket in
+            let key = bucket.threadID.lowercased()
+            let (sum, overflow) = result[key, default: 0].addingReportingOverflow(max(0, bucket.tokenCount))
+            result[key] = overflow ? Int.max : sum
+        }
+        return tasks.map { task in
+            task.withTodayUsage(
+                tokens: tokensByThread[task.id.lowercased()] ?? 0,
+                totalTokens: totalTokens
+            )
+        }
     }
 }
 
@@ -442,6 +487,7 @@ struct CodexTask: Identifiable, Equatable {
     let delta1hTokens: Int?
     let todayTokens: Int?
     let todaySharePercent: Double?
+    let todayUsageIsReconciled: Bool
     let contextInputTokens: Int?
     let contextWindowTokens: Int?
     let contextPercent: Double?
@@ -459,6 +505,7 @@ struct CodexTask: Identifiable, Equatable {
         delta1hTokens: Int? = nil,
         todayTokens: Int? = nil,
         todaySharePercent: Double? = nil,
+        todayUsageIsReconciled: Bool = false,
         contextInputTokens: Int? = nil,
         contextWindowTokens: Int? = nil,
         contextPercent: Double? = nil,
@@ -475,6 +522,7 @@ struct CodexTask: Identifiable, Equatable {
         self.delta1hTokens = delta1hTokens
         self.todayTokens = todayTokens
         self.todaySharePercent = todaySharePercent
+        self.todayUsageIsReconciled = todayUsageIsReconciled
         self.contextInputTokens = contextInputTokens
         self.contextWindowTokens = contextWindowTokens
         self.contextPercent = contextPercent
@@ -494,6 +542,28 @@ struct CodexTask: Identifiable, Equatable {
             delta1hTokens: delta1hTokens,
             todayTokens: todayTokens,
             todaySharePercent: Self.sharePercent(tokens: todayTokens, totalTokens: totalTokens),
+            todayUsageIsReconciled: false,
+            contextInputTokens: contextInputTokens,
+            contextWindowTokens: contextWindowTokens,
+            contextPercent: contextPercent,
+            contextUpdatedAt: contextUpdatedAt
+        )
+    }
+
+    func withTodayUsage(tokens: Int, totalTokens: Int) -> CodexTask {
+        CodexTask(
+            id: id,
+            title: title,
+            status: status,
+            detail: detail,
+            tokenCount: tokenCount,
+            updatedAt: updatedAt,
+            activeSubagentCount: activeSubagentCount,
+            delta10mTokens: delta10mTokens,
+            delta1hTokens: delta1hTokens,
+            todayTokens: max(0, tokens),
+            todaySharePercent: Self.sharePercent(tokens: max(0, tokens), totalTokens: totalTokens),
+            todayUsageIsReconciled: true,
             contextInputTokens: contextInputTokens,
             contextWindowTokens: contextWindowTokens,
             contextPercent: contextPercent,

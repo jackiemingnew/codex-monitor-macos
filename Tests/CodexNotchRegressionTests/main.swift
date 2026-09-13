@@ -1606,7 +1606,7 @@ try appendCostFixture(
 )
 let appendedCostScan = costEstimator.scanSlice(now: costUsageNow.addingTimeInterval(2), bypassCadence: true)
 runner.check(appendedCostScan.jsonlBytesRead > 0, "an appended cost scan should resume from its complete-line checkpoint")
-let appendedCostSummary = costEstimator.loadSummary(now: costUsageNow)
+let appendedCostSummary = costEstimator.loadSummary(now: costUsageNow.addingTimeInterval(2))
 runner.check(
     abs((appendedCostSummary.today.usd ?? -1) - 0.7485) < 0.000_000_1,
     "checkpoint resume should add only the appended model delta"
@@ -1627,7 +1627,7 @@ try appendCostFixture(
     to: costSessionURL
 )
 _ = costEstimator.scanSlice(now: costUsageNow.addingTimeInterval(3), bypassCadence: true)
-let unknownModelSummary = costEstimator.loadSummary(now: costUsageNow)
+let unknownModelSummary = costEstimator.loadSummary(now: costUsageNow.addingTimeInterval(3))
 runner.check(unknownModelSummary.quality == .partial, "unknown-model tokens should make the relevant windows partial")
 runner.check(unknownModelSummary.tokenQuality == .complete, "unknown-model pricing must not downgrade published Token completeness")
 runner.check(unknownModelSummary.today.isPartial, "unknown-model cost should display with a partial marker")
@@ -1875,7 +1875,7 @@ runner.check(
     "the appended scan should publish after the full corpus catches up"
 )
 runner.check(
-    abs((resumeEstimator.loadSummary(now: costUsageNow).today.usd ?? -1) - 2.48) < 0.000_000_1,
+    abs((resumeEstimator.loadSummary(now: costUsageNow.addingTimeInterval(3)).today.usd ?? -1) - 2.48) < 0.000_000_1,
     "a completed incremental scan should atomically publish the new total"
 )
 
@@ -2003,6 +2003,145 @@ runner.checkEqual(terraForkBuckets["gpt-5.6-sol"]?.totalTokens, 110_000, "the pa
 runner.checkEqual(terraForkBuckets["gpt-5.6-terra"]?.totalTokens, 22_000, "the child-only fork delta should remain attributed to Terra")
 runner.checkEqual(terraForkBuckets["codex-auto-review"]?.totalTokens, 33_000, "Auto-review should remain an independent model bucket")
 runner.check(terraForkBuckets["codex-auto-review"]?.apiEquivalentUSD == nil, "Auto-review should remain explicitly unpriced")
+let terraThreadBuckets = Dictionary(
+    uniqueKeysWithValues: terraForkSummary.threadDayBuckets.map { ($0.threadID, $0) }
+)
+let terraParentThreadBucket = runner.require(
+    terraThreadBuckets[terraParentID],
+    "the published Today ledger should retain the root Terra parent thread"
+)
+runner.checkEqual(
+    terraParentThreadBucket.tokenCount,
+    132_000,
+    "the parent Today bucket should include its 22k Terra subagent delta"
+)
+runner.checkEqual(terraParentThreadBucket.ownTokenCount, 110_000, "the parent Today bucket should retain own Token")
+runner.checkEqual(terraParentThreadBucket.subagentTokenCount, 22_000, "the parent Today bucket should disclose subagent Token")
+runner.checkEqual(terraParentThreadBucket.sessionCount, 2, "the parent Today bucket should count parent and child sessions")
+runner.checkEqual(
+    terraThreadBuckets[autoReviewSessionID]?.tokenCount,
+    33_000,
+    "an independent Auto-review session should remain its own Today thread bucket"
+)
+runner.checkEqual(
+    terraForkSummary.threadDayBuckets.reduce(0) { $0 + $1.tokenCount },
+    terraForkSummary.today.tokenCount,
+    "published Today thread buckets must reconcile exactly with the published Today total"
+)
+let publishedLedgerTasks = [
+    CodexTask(
+        id: terraParentID,
+        title: "Terra parent",
+        status: .running,
+        detail: "",
+        tokenCount: 1,
+        updatedAt: costUsageNow,
+        todayTokens: 110_000,
+        todaySharePercent: 100
+    ),
+    CodexTask(
+        id: autoReviewSessionID,
+        title: "Auto-review",
+        status: .recent,
+        detail: "",
+        tokenCount: 1,
+        updatedAt: costUsageNow,
+        todayTokens: 33_000,
+        todaySharePercent: 100
+    ),
+    CodexTask(
+        id: "61616161-6161-4161-8161-616161616161",
+        title: "No usage today",
+        status: .recent,
+        detail: "",
+        tokenCount: 1,
+        updatedAt: costUsageNow,
+        todayTokens: 9_999,
+        todaySharePercent: 100
+    )
+]
+let alignedPublishedLedgerTasks = runner.require(
+    terraForkSummary.applyingPublishedTodayLedger(to: publishedLedgerTasks),
+    "a reconciled published Today ledger should be applicable to task rows"
+)
+runner.checkEqual(alignedPublishedLedgerTasks[0].todayTokens, 132_000, "UI task Today should include subagent Token")
+runner.checkEqual(alignedPublishedLedgerTasks[0].todaySharePercent, 80, "parent share should use the published 165k denominator")
+runner.checkEqual(alignedPublishedLedgerTasks[1].todaySharePercent, 20, "Auto-review share should use the same published denominator")
+runner.checkEqual(alignedPublishedLedgerTasks[2].todayTokens, 0, "a task absent from a complete Today ledger should display zero")
+runner.checkEqual(alignedPublishedLedgerTasks[2].todaySharePercent, 0, "a zero-usage task should retain a zero share")
+let unreconciledLedger = CostUsageSummary(
+    today: CostEstimateWindow(usd: nil, isPartial: false, tokenCount: 200_000),
+    sevenDays: .unavailable,
+    thirtyDays: .unavailable,
+    quality: .complete,
+    lastUpdated: costUsageNow,
+    usesSparkProxy: false,
+    tokenQuality: .complete,
+    threadDayBuckets: terraForkSummary.threadDayBuckets
+)
+runner.check(
+    unreconciledLedger.applyingPublishedTodayLedger(to: publishedLedgerTasks) == nil,
+    "a mismatched published Thread numerator and Today denominator must fail closed"
+)
+
+let sourceParentID = "62626262-6262-4262-8262-626262626262"
+let sourceChildID = "63636363-6363-4363-8363-636363636363"
+let sourceParentURL = costUsageRoot.appendingPathComponent("rollout-\(sourceParentID).jsonl")
+let sourceChildURL = costUsageRoot.appendingPathComponent("rollout-\(sourceChildID).jsonl")
+try writeCostFixture(
+    [
+        costSessionMetaLine(timestamp: costEventEpoch, sessionID: sourceParentID),
+        costTurnContextLine(timestamp: costEventEpoch, model: "gpt-5.6-sol"),
+        costTokenLine(
+            timestamp: costEventEpoch + 1,
+            input: 100_000,
+            cached: 40_000,
+            output: 10_000,
+            lastInput: 100_000,
+            lastCached: 40_000,
+            lastOutput: 10_000
+        )
+    ],
+    to: sourceParentURL
+)
+try writeCostFixture(
+    [
+        #"{"timestamp":\#(costEventEpoch + 1),"type":"session_meta","payload":{"id":"\#(sourceChildID)","parent_thread_id":"\#(sourceParentID)","source":{"subagent":{"thread_spawn":{"parent_thread_id":"\#(sourceParentID)"}}},"thread_source":"subagent"}}"#,
+        costTurnContextLine(timestamp: costEventEpoch + 1, model: "gpt-5.6-terra"),
+        costTokenLine(
+            timestamp: costEventEpoch + 2,
+            input: 20_000,
+            cached: 5_000,
+            output: 2_000,
+            lastInput: 20_000,
+            lastCached: 5_000,
+            lastOutput: 2_000
+        )
+    ],
+    to: sourceChildURL
+)
+let sourceRelationEstimator = CostUsageEstimator(
+    databasePath: costUsageRoot.appendingPathComponent("source-relation-usage-deltas.sqlite").path
+)
+sourceRelationEstimator.updateCandidates(
+    [
+        CostUsageSessionCandidate(sessionID: sourceParentID, path: sourceParentURL.path),
+        CostUsageSessionCandidate(sessionID: sourceChildID, path: sourceChildURL.path)
+    ],
+    inventoryTruncated: false
+)
+runner.check(
+    sourceRelationEstimator.scanSlice(now: costUsageNow, bypassCadence: true).isComplete,
+    "a source-only child relationship should publish in one bounded scan"
+)
+let sourceRelationSummary = sourceRelationEstimator.loadSummary(now: costUsageNow)
+let sourceRelationBucket = runner.require(
+    sourceRelationSummary.threadDayBuckets.first { $0.threadID == sourceParentID },
+    "source.subagent.thread_spawn should attribute the child to its root Thread"
+)
+runner.checkEqual(sourceRelationBucket.tokenCount, 132_000, "source-only child Token should roll into the parent Today bucket")
+runner.checkEqual(sourceRelationBucket.subagentTokenCount, 22_000, "source-only child Token should remain auditable")
+runner.checkEqual(sourceRelationBucket.sessionCount, 2, "source-only attribution should count both sessions")
 
 let grandchildSessionID = "45454545-4545-4545-8545-454545454545"
 let grandchildSessionURL = costUsageRoot.appendingPathComponent("rollout-\(grandchildSessionID).jsonl")
@@ -2214,6 +2353,12 @@ runner.check(
 runner.check(
     abs((duplicateRowsEstimator.loadSummary(now: costUsageNow).today.usd ?? -1) - 0.24) < 0.000_000_1,
     "CodexBar-equivalent row identities should count duplicated fork history only once"
+)
+let duplicateRowsSummary = duplicateRowsEstimator.loadSummary(now: costUsageNow)
+runner.checkEqual(
+    duplicateRowsSummary.threadDayBuckets.reduce(0) { $0 + $1.tokenCount },
+    duplicateRowsSummary.today.tokenCount,
+    "deduplicated Session buckets should preserve the same Today invariant as the global ledger"
 )
 let duplicateRowCount = try Shell.run(
     "/usr/bin/sqlite3",
@@ -2439,7 +2584,7 @@ let removedSessionScan = removedSessionEstimator.scanSlice(
 )
 runner.check(removedSessionScan.isComplete, "a removed cost file should publish a complete replacement inventory")
 runner.check(
-    abs((removedSessionEstimator.loadSummary(now: costUsageNow).today.usd ?? -1) - 0.62) < 0.000_000_1,
+    abs((removedSessionEstimator.loadSummary(now: costUsageNow.addingTimeInterval(1)).today.usd ?? -1) - 0.62) < 0.000_000_1,
     "a removed session file must subtract its cached Token and cost contribution"
 )
 
@@ -2639,7 +2784,7 @@ runner.check(
     "the next generation should resume and count a completed deferred boundary row"
 )
 runner.checkEqual(
-    incompleteBoundaryEstimator.loadSummary(now: costUsageNow).today.tokenCount,
+    incompleteBoundaryEstimator.loadSummary(now: costUsageNow.addingTimeInterval(1)).today.tokenCount,
     220_000,
     "a deferred boundary row should be counted exactly once after completion"
 )

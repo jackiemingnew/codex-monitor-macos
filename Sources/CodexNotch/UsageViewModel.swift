@@ -154,9 +154,11 @@ final class UsageViewModel: ObservableObject {
                 mergedSnapshot.periodUsageQuality = self.snapshot.periodUsageQuality
                 mergedSnapshot.dailyUsage = self.snapshot.dailyUsage
                 mergedSnapshot.costUsage = self.snapshot.costUsage
-                mergedSnapshot.tasks = mergedSnapshot.tasks.map {
-                    $0.withTodaySharePercent(totalTokens: mergedSnapshot.dailyUsage.usageTodayTokens)
-                }
+                mergedSnapshot.tasks = self.tasksUsingBestTodayLedger(
+                    mergedSnapshot.tasks,
+                    costUsage: mergedSnapshot.costUsage,
+                    fallbackDailyUsage: mergedSnapshot.dailyUsage
+                )
                 mergedSnapshot.monitorStats.lastUsageDurationMs = self.snapshot.monitorStats.lastUsageDurationMs
                 mergedSnapshot.monitorStats.watchedPathCount = self.snapshot.monitorStats.watchedPathCount
                 self.snapshot = mergedSnapshot
@@ -198,6 +200,11 @@ final class UsageViewModel: ObservableObject {
         let generation = publishedCostLoadGeneration
         guard settings.showPeriodUsage else {
             snapshot.costUsage = .unavailable
+            snapshot.tasks = tasksUsingBestTodayLedger(
+                snapshot.tasks,
+                costUsage: .unavailable,
+                fallbackDailyUsage: snapshot.dailyUsage
+            )
             return
         }
         let store = store
@@ -211,6 +218,11 @@ final class UsageViewModel: ObservableObject {
                 return
             }
             self.snapshot.costUsage = summary
+            self.snapshot.tasks = self.tasksUsingBestTodayLedger(
+                self.snapshot.tasks,
+                costUsage: summary,
+                fallbackDailyUsage: self.snapshot.dailyUsage
+            )
         }
     }
 
@@ -218,6 +230,11 @@ final class UsageViewModel: ObservableObject {
         publishedCostLoadGeneration += 1
         guard settings.showPeriodUsage else {
             snapshot.costUsage = .unavailable
+            snapshot.tasks = tasksUsingBestTodayLedger(
+                snapshot.tasks,
+                costUsage: .unavailable,
+                fallbackDailyUsage: snapshot.dailyUsage
+            )
             return
         }
         refreshCostUsage(reason: .manual, mode: .replace, invalidatePublishedCostLoad: false)
@@ -260,11 +277,13 @@ final class UsageViewModel: ObservableObject {
                 self.snapshot.usage30d = usageHistory.usage.month
                 self.snapshot.periodUsageQuality = usageHistory.quality
                 self.snapshot.dailyUsage = usageHistory.daily
-                self.snapshot.tasks = self.snapshot.tasks.map {
-                    $0.withTodaySharePercent(totalTokens: usageHistory.daily.usageTodayTokens)
-                }
                 self.lastUsageSuccessfulAt = Date()
                 self.snapshot.costUsage = costUsage
+                self.snapshot.tasks = self.tasksUsingBestTodayLedger(
+                    self.snapshot.tasks,
+                    costUsage: costUsage,
+                    fallbackDailyUsage: usageHistory.daily
+                )
                 self.snapshot.monitorStats.lastUsageDurationMs = durationMs
                 self.updateRefreshingState()
                 if completion.shouldRunPending {
@@ -286,20 +305,32 @@ final class UsageViewModel: ObservableObject {
         if invalidatePublishedCostLoad {
             publishedCostLoadGeneration += 1
         }
-        costUsageContinuationTimer?.invalidate()
-        costUsageContinuationTimer = nil
         let environment = RefreshEnvironment.current
-        guard CostUsageRefreshPolicy.shouldRequestRefresh(
+        let requestAllowed = CostUsageRefreshPolicy.shouldRequestRefresh(
             showsPeriodUsage: settings.showPeriodUsage,
             reason: reason,
             environment: environment
-        ) else {
+        )
+        if CostUsageContinuationSchedulingPolicy.timerDisposition(
+            reason: reason,
+            mode: mode,
+            requestAllowed: requestAllowed
+        ) == .cancel {
+            costUsageContinuationTimer?.invalidate()
+            costUsageContinuationTimer = nil
+        }
+        guard requestAllowed else {
             if !settings.showPeriodUsage || environment.isConstrained {
                 refreshCoordinator.invalidate(.costUsage)
                 isCostUsageRefreshing = false
             }
             if !settings.showPeriodUsage {
                 snapshot.costUsage = .unavailable
+                snapshot.tasks = tasksUsingBestTodayLedger(
+                    snapshot.tasks,
+                    costUsage: .unavailable,
+                    fallbackDailyUsage: snapshot.dailyUsage
+                )
             }
             return
         }
@@ -325,10 +356,24 @@ final class UsageViewModel: ObservableObject {
             }
             isCostUsageRefreshing = false
             snapshot.costUsage = result.summary
-            if completion.shouldRunPending {
-                refreshCostUsage(reason: reason)
-            } else if let delay = CostUsageRefreshPolicy.continuationDelay(after: result.metrics) {
+            snapshot.tasks = tasksUsingBestTodayLedger(
+                snapshot.tasks,
+                costUsage: result.summary,
+                fallbackDailyUsage: snapshot.dailyUsage
+            )
+            switch CostUsageContinuationSchedulingPolicy.completionDisposition(
+                metrics: result.metrics,
+                hasPendingRequest: completion.shouldRunPending
+            ) {
+            case .scheduleContinuation:
+                guard let delay = CostUsageRefreshPolicy.continuationDelay(after: result.metrics) else {
+                    return
+                }
                 scheduleCostUsageContinuation(after: delay)
+            case .runPending:
+                refreshCostUsage(reason: reason)
+            case .idle:
+                break
             }
         }
         refreshCoordinator.attach(task, to: token)
@@ -633,10 +678,7 @@ final class UsageViewModel: ObservableObject {
     }
 
     private func observeRefreshEnvironment() {
-        Publishers.Merge(
-            NotificationCenter.default.publisher(for: .NSProcessInfoPowerStateDidChange),
-            NotificationCenter.default.publisher(for: ProcessInfo.thermalStateDidChangeNotification)
-        )
+        RefreshEnvironmentNotifications.publisher()
         .sink { [weak self] _ in
             Task { @MainActor in
                 self?.refreshEnvironmentDidChange()
@@ -781,6 +823,16 @@ final class UsageViewModel: ObservableObject {
         isRefreshing = refreshCoordinator.hasAnyInFlight(in: [.localSnapshot, .usageTotals])
     }
 
+    private func tasksUsingBestTodayLedger(
+        _ tasks: [CodexTask],
+        costUsage: CostUsageSummary,
+        fallbackDailyUsage: DailyUsage
+    ) -> [CodexTask] {
+        costUsage.applyingPublishedTodayLedger(to: tasks) ?? tasks.map {
+            $0.withTodaySharePercent(totalTokens: fallbackDailyUsage.usageTodayTokens)
+        }
+    }
+
     private func stabilizedSnapshot(_ next: UsageSnapshot) -> UsageSnapshot {
         var snapshot = next
         let previous = self.snapshot
@@ -823,6 +875,7 @@ final class UsageViewModel: ObservableObject {
                         delta1hTokens: task.delta1hTokens,
                         todayTokens: task.todayTokens,
                         todaySharePercent: task.todaySharePercent,
+                        todayUsageIsReconciled: task.todayUsageIsReconciled,
                         contextInputTokens: task.contextInputTokens,
                         contextWindowTokens: task.contextWindowTokens,
                         contextPercent: task.contextPercent,

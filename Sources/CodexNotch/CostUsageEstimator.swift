@@ -149,6 +149,59 @@ enum CostUsageRefreshPolicy {
     }
 }
 
+enum CostUsagePublicationFreshness {
+    static func isCurrent(
+        coverageAt: Date,
+        requestedAt: Date,
+        calendar: Calendar = .current,
+        timeZone: TimeZone = .current
+    ) -> Bool {
+        guard coverageAt <= requestedAt else {
+            return false
+        }
+        var localCalendar = calendar
+        localCalendar.timeZone = timeZone
+        return localCalendar.isDate(coverageAt, inSameDayAs: requestedAt)
+    }
+}
+
+enum CostUsageContinuationTimerDisposition: Equatable, Sendable {
+    case preserve
+    case cancel
+}
+
+enum CostUsageCompletionDisposition: Equatable, Sendable {
+    case scheduleContinuation
+    case runPending
+    case idle
+}
+
+enum CostUsageContinuationSchedulingPolicy {
+    static func timerDisposition(
+        reason: RefreshReason,
+        mode: RefreshRequestMode,
+        requestAllowed: Bool
+    ) -> CostUsageContinuationTimerDisposition {
+        guard requestAllowed else {
+            return reason == .presentation ? .preserve : .cancel
+        }
+        if mode == .coalesce {
+            return .preserve
+        }
+        return .cancel
+    }
+
+    static func completionDisposition(
+        metrics: CostUsageScanMetrics,
+        hasPendingRequest: Bool
+    ) -> CostUsageCompletionDisposition {
+        if CostUsageRefreshPolicy.continuationDelay(after: metrics) != nil {
+            return .scheduleContinuation
+        }
+        return hasPendingRequest ? .runPending : .idle
+    }
+}
+
 enum CostUsagePricing {
     struct Price: Equatable, Sendable {
         let inputPerMillion: Double
@@ -290,12 +343,13 @@ final class CostUsageEstimator: @unchecked Sendable {
         static let publishedPricingVersion = "cost_published_pricing_version"
         static let publishedTimeZoneFingerprint = "cost_published_timezone_fingerprint"
         static let publishedAtMS = "cost_published_at_ms"
+        static let publishedCoverageAtMS = "cost_published_coverage_at_ms"
         static let generationCursor = "cost_generation_cursor"
         static let generationInventoryTruncated = "cost_generation_inventory_truncated"
         static let generationStartedMS = "cost_generation_started_ms"
     }
 
-    private static let schemaVersion: Int64 = 5
+    private static let schemaVersion: Int64 = 6
     private static let retentionDays = 31
 
     private let databasePath: String
@@ -501,6 +555,26 @@ final class CostUsageEstimator: @unchecked Sendable {
                 if liveSnapshotIsComplete,
                    databaseWrites == 0,
                    publishedSemanticsMatch {
+                    let coverageAt = metadataValue(MetadataKey.publishedCoverageAtMS, in: database).map {
+                        Date(timeIntervalSince1970: TimeInterval($0) / 1_000)
+                    }
+                    if coverageAt.map({
+                        CostUsagePublicationFreshness.isCurrent(
+                            coverageAt: $0,
+                            requestedAt: now
+                        )
+                    }) != true {
+                        try updatePublishedCoverage(now: now, in: database)
+                        inventoryRequiresScan = false
+                        return CostUsageScanMetrics(
+                            jsonlBytesRead: 0,
+                            filesAdvanced: 0,
+                            databaseWrites: 1,
+                            skippedOversizedRows: 0,
+                            stopReason: .caughtUp,
+                            isComplete: true
+                        )
+                    }
                     inventoryRequiresScan = false
                     return CostUsageScanMetrics(
                         jsonlBytesRead: 0,
@@ -828,6 +902,9 @@ final class CostUsageEstimator: @unchecked Sendable {
             let lastWorkingUpdate = metadataValue(MetadataKey.lastUpdateMS, in: database).map {
                 Date(timeIntervalSince1970: TimeInterval($0) / 1_000)
             }
+            let lastUpdated = metadataValue(MetadataKey.publishedAtMS, in: database).map {
+                Date(timeIntervalSince1970: TimeInterval($0) / 1_000)
+            }
             guard metadataValue(MetadataKey.publishedSchemaVersion, in: database) == Self.schemaVersion,
                   metadataValue(MetadataKey.publishedPricingVersion, in: database) == Int64(CostUsagePricing.version),
                   metadataValue(MetadataKey.publishedTimeZoneFingerprint, in: database) == timeZoneFingerprint else {
@@ -835,6 +912,13 @@ final class CostUsageEstimator: @unchecked Sendable {
                     return .backfilling(lastUpdated: lastWorkingUpdate)
                 }
                 return .unavailable
+            }
+            guard let coverageMS = metadataValue(MetadataKey.publishedCoverageAtMS, in: database),
+                  CostUsagePublicationFreshness.isCurrent(
+                    coverageAt: Date(timeIntervalSince1970: TimeInterval(coverageMS) / 1_000),
+                    requestedAt: now
+                  ) else {
+                return .backfilling(lastUpdated: lastUpdated)
             }
 
             let today = Self.dayKey(for: now)
@@ -848,6 +932,10 @@ final class CostUsageEstimator: @unchecked Sendable {
             let modelBuckets = try loadPublishedModelBuckets(
                 sinceDay: thirtyDayStart,
                 untilDay: today,
+                from: database
+            )
+            let publishedThreadDayBuckets = try loadPublishedThreadDayBuckets(
+                day: today,
                 from: database
             )
             let todayWindow = Self.makeWindow(
@@ -868,8 +956,14 @@ final class CostUsageEstimator: @unchecked Sendable {
             } else {
                 quality = .partial
             }
-            let lastUpdated = metadataValue(MetadataKey.publishedAtMS, in: database).map {
-                Date(timeIntervalSince1970: TimeInterval($0) / 1_000)
+            let reconciledThreadDayBuckets: [CostUsageThreadDayBucket]
+            if let todayTokens = todayWindow.tokenCount,
+               publishedThreadDayBuckets.reduce(0, { $0 + $1.tokenCount }) == todayTokens {
+                reconciledThreadDayBuckets = publishedThreadDayBuckets
+            } else {
+                // Never expose a task ledger whose numerator cannot reconcile
+                // with the atomically published Today denominator.
+                reconciledThreadDayBuckets = []
             }
 
             return CostUsageSummary(
@@ -880,7 +974,8 @@ final class CostUsageEstimator: @unchecked Sendable {
                 lastUpdated: lastUpdated,
                 usesSparkProxy: rows.contains(where: \.usesSparkProxy),
                 tokenQuality: .complete,
-                modelBuckets: modelBuckets
+                modelBuckets: modelBuckets,
+                threadDayBuckets: reconciledThreadDayBuckets
             )
         } catch {
             return .unavailable
@@ -933,6 +1028,10 @@ final class CostUsageEstimator: @unchecked Sendable {
               uses_spark_proxy INTEGER NOT NULL,
               PRIMARY KEY(session_id, row_key)
             );
+            CREATE TABLE IF NOT EXISTS cost_usage_session_relations (
+              session_id TEXT PRIMARY KEY,
+              parent_session_id TEXT
+            );
             CREATE TABLE IF NOT EXISTS cost_usage_published_buckets (
               session_id TEXT NOT NULL,
               day_key TEXT NOT NULL,
@@ -944,6 +1043,19 @@ final class CostUsageEstimator: @unchecked Sendable {
               is_priced INTEGER NOT NULL,
               uses_spark_proxy INTEGER NOT NULL,
               PRIMARY KEY(session_id, day_key, model)
+            );
+            CREATE TABLE IF NOT EXISTS cost_usage_published_session_buckets (
+              root_session_id TEXT NOT NULL,
+              session_id TEXT NOT NULL,
+              day_key TEXT NOT NULL,
+              model TEXT NOT NULL,
+              input_tokens INTEGER NOT NULL,
+              cached_input_tokens INTEGER NOT NULL,
+              output_tokens INTEGER NOT NULL,
+              cost_nanos INTEGER NOT NULL,
+              is_priced INTEGER NOT NULL,
+              uses_spark_proxy INTEGER NOT NULL,
+              PRIMARY KEY(root_session_id, session_id, day_key, model)
             );
             CREATE TABLE IF NOT EXISTS cost_usage_lineage_points (
               session_id TEXT NOT NULL,
@@ -968,6 +1080,8 @@ final class CostUsageEstimator: @unchecked Sendable {
               ON cost_usage_rows(row_key);
             CREATE INDEX IF NOT EXISTS idx_cost_usage_published_buckets_day
               ON cost_usage_published_buckets(day_key);
+            CREATE INDEX IF NOT EXISTS idx_cost_usage_published_session_buckets_day
+              ON cost_usage_published_session_buckets(day_key, root_session_id);
             CREATE INDEX IF NOT EXISTS idx_cost_usage_lineage_lookup
               ON cost_usage_lineage_points(session_id, event_at_ms DESC, event_index DESC);
             """
@@ -1079,7 +1193,7 @@ final class CostUsageEstimator: @unchecked Sendable {
             )
             try setMetadata(
                 MetadataKey.generationStartedMS,
-                value: Int64((now.timeIntervalSince1970 * 1_000).rounded()),
+                value: Int64((now.timeIntervalSince1970 * 1_000).rounded(.down)),
                 in: database
             )
             try database.execute("COMMIT;")
@@ -1149,6 +1263,8 @@ final class CostUsageEstimator: @unchecked Sendable {
             try database.execute("DELETE FROM cost_usage_rows;")
             try database.execute("DELETE FROM cost_usage_buckets;")
             try database.execute("DELETE FROM cost_usage_published_buckets;")
+            try database.execute("DELETE FROM cost_usage_published_session_buckets;")
+            try database.execute("DELETE FROM cost_usage_session_relations;")
             try database.execute("DELETE FROM cost_usage_checkpoints;")
             try database.execute("DELETE FROM cost_usage_scan_targets;")
             for key in [
@@ -1156,6 +1272,7 @@ final class CostUsageEstimator: @unchecked Sendable {
                 MetadataKey.publishedPricingVersion,
                 MetadataKey.publishedTimeZoneFingerprint,
                 MetadataKey.publishedAtMS,
+                MetadataKey.publishedCoverageAtMS,
                 MetadataKey.generationCursor,
                 MetadataKey.generationInventoryTruncated,
                 MetadataKey.generationStartedMS
@@ -1204,6 +1321,18 @@ final class CostUsageEstimator: @unchecked Sendable {
             if resetSession {
                 try deleteSession(checkpoint.sessionID, in: database, insideTransaction: true)
             }
+
+            let relationStatement = try database.statement(
+                """
+                INSERT INTO cost_usage_session_relations(session_id, parent_session_id)
+                VALUES(?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                  parent_session_id = excluded.parent_session_id;
+                """
+            )
+            relationStatement.bind(checkpoint.sessionID, at: 1)
+            relationStatement.bind(checkpoint.tracker.attributionParentID, at: 2)
+            try relationStatement.run()
 
             let bucketStatement = try database.statement(
                 """
@@ -1335,7 +1464,8 @@ final class CostUsageEstimator: @unchecked Sendable {
         do {
             for table in [
                 "cost_usage_lineage_points", "cost_usage_rows",
-                "cost_usage_buckets", "cost_usage_checkpoints"
+                "cost_usage_buckets", "cost_usage_session_relations",
+                "cost_usage_checkpoints"
             ] {
                 let statement = try database.statement("DELETE FROM \(table) WHERE session_id = ?;")
                 statement.bind(sessionID, at: 1)
@@ -1384,6 +1514,7 @@ final class CostUsageEstimator: @unchecked Sendable {
         try database.execute("BEGIN IMMEDIATE;")
         do {
             try database.execute("DELETE FROM cost_usage_published_buckets;")
+            try database.execute("DELETE FROM cost_usage_published_session_buckets;")
             try database.execute(
                 """
                 INSERT INTO cost_usage_published_buckets(
@@ -1410,6 +1541,79 @@ final class CostUsageEstimator: @unchecked Sendable {
                 GROUP BY day_key, model;
                 """
             )
+            try database.execute(
+                """
+                INSERT INTO cost_usage_published_session_buckets(
+                  root_session_id, session_id, day_key, model,
+                  input_tokens, cached_input_tokens, output_tokens,
+                  cost_nanos, is_priced, uses_spark_proxy
+                )
+                WITH RECURSIVE
+                ranked_rows AS (
+                  SELECT rows.session_id, rows.row_key, rows.day_key, rows.model,
+                         rows.input_tokens, rows.cached_input_tokens,
+                         rows.output_tokens, rows.cost_nanos, rows.is_priced,
+                         rows.uses_spark_proxy,
+                         ROW_NUMBER() OVER (
+                           PARTITION BY rows.row_key
+                           ORDER BY COALESCE(checkpoints.source_modified_at_ms, 0) DESC,
+                                    rows.session_id DESC
+                         ) AS occurrence_rank
+                  FROM cost_usage_rows AS rows
+                  LEFT JOIN cost_usage_checkpoints AS checkpoints
+                    ON checkpoints.session_id = rows.session_id
+                ),
+                unique_rows AS (
+                  SELECT session_id, day_key, model, input_tokens,
+                         cached_input_tokens, output_tokens, cost_nanos,
+                         is_priced, uses_spark_proxy
+                  FROM ranked_rows
+                  WHERE occurrence_rank = 1
+                ),
+                lineage(session_id, ancestor_id, depth, path) AS (
+                  SELECT session_id, session_id, 0, '|' || session_id || '|'
+                  FROM cost_usage_session_relations
+                  UNION ALL
+                  SELECT lineage.session_id, relations.parent_session_id,
+                         lineage.depth + 1,
+                         lineage.path || relations.parent_session_id || '|'
+                  FROM lineage
+                  JOIN cost_usage_session_relations AS relations
+                    ON relations.session_id = lineage.ancestor_id
+                  WHERE relations.parent_session_id IS NOT NULL
+                    AND relations.parent_session_id != ''
+                    AND lineage.depth < 16
+                    AND INSTR(
+                      lineage.path,
+                      '|' || relations.parent_session_id || '|'
+                    ) = 0
+                ),
+                roots AS (
+                  SELECT lineage.session_id,
+                         lineage.ancestor_id AS root_session_id
+                  FROM lineage
+                  WHERE lineage.depth = (
+                    SELECT MAX(candidate.depth)
+                    FROM lineage AS candidate
+                    WHERE candidate.session_id = lineage.session_id
+                  )
+                )
+                SELECT COALESCE(roots.root_session_id, unique_rows.session_id),
+                       unique_rows.session_id, unique_rows.day_key,
+                       unique_rows.model,
+                       SUM(unique_rows.input_tokens),
+                       SUM(unique_rows.cached_input_tokens),
+                       SUM(unique_rows.output_tokens),
+                       SUM(unique_rows.cost_nanos),
+                       MIN(unique_rows.is_priced),
+                       MAX(unique_rows.uses_spark_proxy)
+                FROM unique_rows
+                LEFT JOIN roots ON roots.session_id = unique_rows.session_id
+                GROUP BY COALESCE(roots.root_session_id, unique_rows.session_id),
+                         unique_rows.session_id, unique_rows.day_key,
+                         unique_rows.model;
+                """
+            )
             try setMetadata(
                 MetadataKey.publishedSchemaVersion,
                 value: Self.schemaVersion,
@@ -1426,6 +1630,12 @@ final class CostUsageEstimator: @unchecked Sendable {
                 in: database
             )
             try setMetadata(MetadataKey.publishedAtMS, value: nowMS, in: database)
+            try setMetadata(
+                MetadataKey.publishedCoverageAtMS,
+                value: metadataValue(MetadataKey.generationStartedMS, in: database)
+                    ?? Int64((now.timeIntervalSince1970 * 1_000).rounded(.down)),
+                in: database
+            )
             if clearsGeneration {
                 try clearGeneration(in: database, insideTransaction: true)
             }
@@ -1433,6 +1643,24 @@ final class CostUsageEstimator: @unchecked Sendable {
             try setMetadata(MetadataKey.pricingVersion, value: Int64(CostUsagePricing.version), in: database)
             try setMetadata(MetadataKey.timeZoneFingerprint, value: timeZoneFingerprint, in: database)
             try setMetadata(MetadataKey.scanStatus, value: 2, in: database)
+            try setMetadata(MetadataKey.lastSliceMS, value: nowMS, in: database)
+            try setMetadata(MetadataKey.lastUpdateMS, value: nowMS, in: database)
+            try database.execute("COMMIT;")
+        } catch {
+            try? database.execute("ROLLBACK;")
+            throw error
+        }
+    }
+
+    private func updatePublishedCoverage(
+        now: Date,
+        in database: CostUsageSQLiteDatabase
+    ) throws {
+        let nowMS = Int64((now.timeIntervalSince1970 * 1_000).rounded(.down))
+        try database.execute("BEGIN IMMEDIATE;")
+        do {
+            try setMetadata(MetadataKey.publishedAtMS, value: nowMS, in: database)
+            try setMetadata(MetadataKey.publishedCoverageAtMS, value: nowMS, in: database)
             try setMetadata(MetadataKey.lastSliceMS, value: nowMS, in: database)
             try setMetadata(MetadataKey.lastUpdateMS, value: nowMS, in: database)
             try database.execute("COMMIT;")
@@ -1593,6 +1821,49 @@ final class CostUsageEstimator: @unchecked Sendable {
                     costNanos: statement.int64(at: 5),
                     isPriced: statement.int64(at: 6) != 0,
                     usesSparkProxy: statement.int64(at: 7) != 0
+                )
+            )
+        }
+        return buckets
+    }
+
+    private func loadPublishedThreadDayBuckets(
+        day: String,
+        from database: CostUsageSQLiteDatabase
+    ) throws -> [CostUsageThreadDayBucket] {
+        let statement = try database.statement(
+            """
+            SELECT day_key,
+                   root_session_id,
+                   SUM(input_tokens + output_tokens),
+                   SUM(
+                     CASE WHEN session_id = root_session_id
+                       THEN input_tokens + output_tokens ELSE 0 END
+                   ),
+                   COUNT(DISTINCT session_id)
+            FROM cost_usage_published_session_buckets
+            WHERE day_key = ?
+            GROUP BY day_key, root_session_id
+            ORDER BY SUM(input_tokens + output_tokens) DESC, root_session_id;
+            """
+        )
+        statement.bind(day, at: 1)
+        var buckets: [CostUsageThreadDayBucket] = []
+        while try statement.step() {
+            guard let dayKey = statement.string(at: 0),
+                  let threadID = statement.string(at: 1) else {
+                continue
+            }
+            let total = max(0, Int(statement.int64(at: 2)))
+            let own = min(total, max(0, Int(statement.int64(at: 3))))
+            buckets.append(
+                CostUsageThreadDayBucket(
+                    dayKey: dayKey,
+                    threadID: threadID,
+                    tokenCount: total,
+                    ownTokenCount: own,
+                    subagentTokenCount: max(0, total - own),
+                    sessionCount: max(1, Int(statement.int64(at: 4)))
                 )
             )
         }
@@ -1852,6 +2123,7 @@ private struct CostUsageTrackerState: Codable, Equatable {
     var forkSnapshotSawInterleavedTotals = false
     var forkSnapshotEventIndex = 0
     var primarySessionMetadataID: String?
+    var attributionParentID: String?
     var forkParentID: String?
     var forkAtMS: Int64?
     var inheritedTotals: CostUsageTokenTotals?
@@ -1956,11 +2228,26 @@ private final class CostUsageFileAccumulator {
                     // lookup and cross-file usage-row deduplication.
                     state.primarySessionMetadataID = metadataID
                 }
-                let parentID = [
+                let forkParentID = [
                     payload["forked_from_id"], payload["forkedFromId"],
                     payload["parent_session_id"], payload["parentSessionId"]
                 ].lazy.compactMap(Self.nonEmptyString).first?.lowercased()
-                guard let parentID else {
+                let source = payload["source"] as? [String: Any]
+                let subagent = source?["subagent"] as? [String: Any]
+                let threadSpawn = subagent?["thread_spawn"] as? [String: Any]
+                let attributionParentID = [
+                    forkParentID,
+                    Self.nonEmptyString(payload["parent_thread_id"]),
+                    Self.nonEmptyString(payload["parentThreadId"]),
+                    Self.nonEmptyString(threadSpawn?["parent_thread_id"]),
+                    Self.nonEmptyString(threadSpawn?["parentThreadId"])
+                ].compactMap { $0?.lowercased() }.first
+                if state.attributionParentID == nil,
+                   let attributionParentID,
+                   attributionParentID != sessionID {
+                    state.attributionParentID = attributionParentID
+                }
+                guard let parentID = forkParentID else {
                     return .continueReading
                 }
                 let timestamp = Self.timestampMilliseconds(payload["timestamp"])

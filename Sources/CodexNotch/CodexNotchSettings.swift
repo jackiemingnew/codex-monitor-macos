@@ -73,6 +73,8 @@ final class CodexNotchSettings: ObservableObject {
         static let showContextMetrics = "showContextMetrics"
         static let skillInsightsEnabled = "skillInsightsEnabled"
         static let performanceMonitoringEnabled = "performanceMonitoringEnabled"
+        static let agySidecarAutomaticCanaryEnabled = "agySidecarAutomaticCanaryEnabled"
+        static let agySidecarAutomaticCanaryInterval = "agySidecarAutomaticCanaryInterval"
         static let codexRadarEnabled = "codexRadarEnabled"
         static let codexRadarUsesAuthorizedAPI = "codexRadarUsesAuthorizedAPI"
         static let enablePulse = "enablePulse"
@@ -195,6 +197,23 @@ final class CodexNotchSettings: ObservableObject {
     @Published var performanceMonitoringEnabled: Bool {
         didSet {
             defaults.set(performanceMonitoringEnabled, forKey: Keys.performanceMonitoringEnabled)
+        }
+    }
+
+    @Published var agySidecarAutomaticCanaryEnabled: Bool {
+        didSet {
+            defaults.set(agySidecarAutomaticCanaryEnabled, forKey: Keys.agySidecarAutomaticCanaryEnabled)
+        }
+    }
+
+    @Published var agySidecarAutomaticCanaryInterval: TimeInterval {
+        didSet {
+            let normalized = AGYSidecarHealthPolicy.automaticInterval(agySidecarAutomaticCanaryInterval)
+            if normalized != agySidecarAutomaticCanaryInterval {
+                agySidecarAutomaticCanaryInterval = normalized
+                return
+            }
+            defaults.set(normalized, forKey: Keys.agySidecarAutomaticCanaryInterval)
         }
     }
 
@@ -518,6 +537,13 @@ final class CodexNotchSettings: ObservableObject {
         self.showContextMetrics = defaults.object(forKey: Keys.showContextMetrics) as? Bool ?? false
         self.skillInsightsEnabled = defaults.object(forKey: Keys.skillInsightsEnabled) as? Bool ?? true
         self.performanceMonitoringEnabled = defaults.object(forKey: Keys.performanceMonitoringEnabled) as? Bool ?? false
+        self.agySidecarAutomaticCanaryEnabled = defaults.object(forKey: Keys.agySidecarAutomaticCanaryEnabled) as? Bool ?? false
+        self.agySidecarAutomaticCanaryInterval = Self.clamped(
+            defaults.object(forKey: Keys.agySidecarAutomaticCanaryInterval) as? TimeInterval
+                ?? AGYSidecarHealthPolicy.defaultAutomaticCanaryInterval,
+            min: AGYSidecarHealthPolicy.minimumAutomaticCanaryInterval,
+            max: AGYSidecarHealthPolicy.maximumAutomaticCanaryInterval
+        )
         self.codexRadarEnabled = defaults.object(forKey: Keys.codexRadarEnabled) as? Bool ?? true
         self.codexRadarUsesAuthorizedAPI = defaults.object(forKey: Keys.codexRadarUsesAuthorizedAPI) as? Bool ?? false
         self.enablePulse = defaults.object(forKey: Keys.enablePulse) as? Bool ?? true

@@ -235,15 +235,11 @@ struct NotchIslandView: View {
                     label: "Today",
                     value: todayUsage.tokenCount.map {
                         Formatters.compactTokensEnglish($0, isPartial: todayUsage.isPartial)
-                    } ?? "--",
+                    } ?? (todayUsage.isBackfilling ? "回填中" : "--"),
                     color: MonitorTheme.textPrimary,
                     labelWidth: 28,
                     valueWidth: 50,
-                    helpText: Formatters.partialUsageHelp(
-                        label: "Today",
-                        isPartial: todayUsage.isPartial,
-                        missingBaselineSessions: todayUsage.missingBaselineSessions
-                    )
+                    helpText: todayUsage.helpText(label: "Today")
                 )
             )
             return metrics
@@ -305,6 +301,8 @@ private struct CollapsedMetricRow: View {
 
 struct DetailPanelView: View {
     @ObservedObject var viewModel: UsageViewModel
+    @ObservedObject var antigravityQuotaViewModel: AntigravityQuotaViewModel
+    @ObservedObject var agySidecarHealthViewModel: AGYSidecarHealthViewModel
     @ObservedObject var analyticsViewModel: CodexWebAnalyticsViewModel
     @ObservedObject var routingTelemetryViewModel: RoutingTelemetryViewModel
     @ObservedObject var performanceViewModel: PerformanceMonitorViewModel
@@ -392,7 +390,9 @@ struct DetailPanelView: View {
         let localHeight = IslandMetrics.detailHeight(
             taskRows: IslandMetrics.visibleTaskRows,
             showsPeriodUsage: settings.showPeriodUsage,
-            showsSparkQuota: settings.showSparkQuota
+            showsSparkQuota: settings.showSparkQuota,
+            showsAntigravityQuota: antigravityQuotaViewModel.snapshot.shouldDisplay
+                || agySidecarHealthViewModel.shouldDisplay
         )
         guard settings.remoteMonitorEnabled else {
             let balanceRows = [
@@ -691,6 +691,9 @@ struct DetailPanelView: View {
             if settings.showSparkQuota {
                 sparkQuotaStrip
             }
+            if antigravityQuotaViewModel.snapshot.shouldDisplay || agySidecarHealthViewModel.shouldDisplay {
+                antigravityQuotaStrip
+            }
             localTaskTable
                 .frame(maxHeight: .infinity, alignment: .top)
 
@@ -722,6 +725,7 @@ struct DetailPanelView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
+            .colorScheme(.dark)
             .accessibilityLabel("Analytics 数据源")
 
             Group {
@@ -950,9 +954,138 @@ struct DetailPanelView: View {
         )
     }
 
+    private var antigravityQuotaStrip: some View {
+        HStack(alignment: .center, spacing: MonitorTheme.Spacing.row) {
+            Text("AGY")
+                .font(MonitorTheme.Typography.sparkLabel)
+                .foregroundStyle(MonitorTheme.textPrimary)
+                .frame(width: 30, alignment: .leading)
+
+            if let primaryFiveHour = antigravityQuotaViewModel.snapshot.primaryFiveHour,
+               let secondaryFiveHour = antigravityQuotaViewModel.snapshot.secondaryFiveHour {
+                VStack(alignment: .leading, spacing: MonitorTheme.Spacing.micro) {
+                    AntigravityQuotaRow(
+                        pool: .primary,
+                        fiveHour: primaryFiveHour,
+                        sevenDay: antigravityQuotaViewModel.snapshot.primarySevenDay
+                    )
+                    AntigravityQuotaRow(
+                        pool: .secondary,
+                        fiveHour: secondaryFiveHour,
+                        sevenDay: antigravityQuotaViewModel.snapshot.secondarySevenDay
+                    )
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                Text(antigravityQuotaViewModel.snapshot.message ?? "不可用")
+                    .font(MonitorTheme.Typography.quotaMeta)
+                    .foregroundStyle(MonitorTheme.textSecondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 0)
+            Text(antigravityQuotaViewModel.snapshot.freshnessLabel)
+                .font(MonitorTheme.Typography.quotaMeta)
+                .foregroundStyle(antigravityQuotaColor)
+                .lineLimit(1)
+
+            HStack(spacing: MonitorTheme.Spacing.micro) {
+                Circle()
+                    .fill(agySidecarIndicatorColor)
+                    .frame(width: 5, height: 5)
+                    .accessibilityHidden(true)
+                Text("旁路 \(agySidecarHealthViewModel.indicatorLabel)")
+                    .font(MonitorTheme.Typography.quotaMeta)
+                    .foregroundStyle(agySidecarIndicatorColor)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+            }
+            .fixedSize(horizontal: true, vertical: false)
+        }
+        .padding(.horizontal, MonitorTheme.Spacing.panel)
+        .frame(height: IslandMetrics.detailAntigravityQuotaHeight)
+        .background(MonitorTheme.sectionFill, in: RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: MonitorTheme.Radius.row, style: .continuous)
+                .stroke(MonitorTheme.hairline, lineWidth: MonitorTheme.Stroke.hairline)
+        )
+        .help(antigravityQuotaHelp)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(antigravityQuotaHelp)
+    }
+
+    private var antigravityQuotaColor: Color {
+        switch antigravityQuotaViewModel.snapshot.availability {
+        case .fresh:
+            MonitorTheme.healthy
+        case .stale:
+            MonitorTheme.warning
+        case .hidden, .loading, .unavailable:
+            MonitorTheme.textTertiary
+        }
+    }
+
+    private var agySidecarIndicatorColor: Color {
+        if agySidecarHealthViewModel.isDoctorChecking || agySidecarHealthViewModel.isCanaryRunning {
+            return MonitorTheme.radarBaseline
+        }
+        if agySidecarHealthViewModel.e2eSnapshot.status == .broken
+            || agySidecarHealthViewModel.doctorSnapshot.status == .broken {
+            return MonitorTheme.critical
+        }
+        if agySidecarHealthViewModel.doctorSnapshot.status == .unavailable {
+            return MonitorTheme.textTertiary
+        }
+        if agySidecarHealthViewModel.doctorSnapshot.status == .compatibilityWarning {
+            return MonitorTheme.warning
+        }
+        switch agySidecarHealthViewModel.e2eSnapshot.status {
+        case .complete:
+            return MonitorTheme.healthy
+        case .partial:
+            return MonitorTheme.warning
+        case .broken:
+            return MonitorTheme.critical
+        case .unavailable:
+            return MonitorTheme.textTertiary
+        case .neverRun:
+            switch agySidecarHealthViewModel.doctorSnapshot.status {
+            case .ready: return MonitorTheme.healthy
+            case .compatibilityWarning: return MonitorTheme.warning
+            case .broken: return MonitorTheme.critical
+            case .unavailable, .neverRun: return MonitorTheme.textTertiary
+            }
+        }
+    }
+
+    private var antigravityQuotaHelp: String {
+        let snapshot = antigravityQuotaViewModel.snapshot
+        let windows: [(AntigravityQuotaPool, AntigravityQuotaPeriod, AntigravityQuotaWindow?)] = [
+            (.primary, .fiveHour, snapshot.primaryFiveHour),
+            (.primary, .sevenDay, snapshot.primarySevenDay),
+            (.secondary, .fiveHour, snapshot.secondaryFiveHour),
+            (.secondary, .sevenDay, snapshot.secondarySevenDay)
+        ]
+        let descriptions = windows.map { pool, period, window in
+            let percent = window?.remainingPercent.map { "\($0)%" } ?? "暂无"
+            let reset = window.flatMap { Formatters.quotaResetText($0.resetsAt, style: .time) }
+                .map { "，重置 \($0)" } ?? ""
+            return "\(pool.label) \(period.label) 剩余 \(percent)\(reset)"
+        }
+        let status = [snapshot.freshnessLabel, snapshot.message].compactMap { value in
+            guard let value, !value.isEmpty else { return nil }
+            return value
+        }.joined(separator: "，")
+        let statusText = status.isEmpty ? "状态暂无" : "状态：\(status)"
+        return "AGY 配额：\(descriptions.joined(separator: "；"))。\(statusText)。仅通过本轮 AGY 本地会话的 127.0.0.1 探测读取；不读取或保存账号、身份、令牌或原始输出。\(agySidecarHealthViewModel.accessibilitySummary)"
+    }
+
     private var localTaskTable: some View {
         VStack(spacing: 0) {
-            TaskTableHeader(showContextMetrics: settings.showContextMetrics)
+            TaskTableHeader(
+                showContextMetrics: settings.showContextMetrics,
+                usesPublishedTodayLedger: snapshot.costUsage.hasReconciledTodayLedger
+            )
             Rectangle()
                 .fill(MonitorTheme.separator)
                 .frame(height: MonitorTheme.Stroke.hairline)
@@ -1322,21 +1455,14 @@ struct DetailPanelView: View {
     }
 
     private var periodUsage: some View {
-        HStack(spacing: 0) {
+        let todayUsage = HUDTodayUsageDisplay.resolve(snapshot: snapshot)
+        return HStack(spacing: 0) {
             LocalPeriodUsageCell(
                 label: "今日",
-                value: Formatters.compactTokens(
-                    snapshot.costUsage.today.tokenCount
-                        ?? snapshot.dailyUsage.usageTodayTokens,
-                    isPartial: snapshot.costUsage.today.tokenCount == nil
-                        && snapshot.dailyUsage.isPartial
-                ),
-                helpText: Formatters.partialUsageHelp(
-                    label: "今日",
-                    isPartial: snapshot.costUsage.today.tokenCount == nil
-                        && snapshot.dailyUsage.isPartial,
-                    missingBaselineSessions: snapshot.dailyUsage.missingBaselineSessions
-                ),
+                value: todayUsage.tokenCount.map {
+                    Formatters.compactTokens($0, isPartial: todayUsage.isPartial)
+                } ?? (todayUsage.isBackfilling ? "回填中" : "--"),
+                helpText: todayUsage.helpText(label: "今日"),
                 costValue: Formatters.apiEquivalentCost(snapshot.costUsage.today),
                 costHelpText: Formatters.apiEquivalentCostHelp(
                     label: "今日费用",
@@ -1582,6 +1708,44 @@ private struct QuotaBarCell: View {
     }
 }
 
+private struct AntigravityQuotaRow: View {
+    let pool: AntigravityQuotaPool
+    let fiveHour: AntigravityQuotaWindow
+    let sevenDay: AntigravityQuotaWindow?
+
+    var body: some View {
+        HStack(spacing: MonitorTheme.Spacing.row) {
+            Text(pool.label)
+                .font(MonitorTheme.Typography.quotaMeta)
+                .foregroundStyle(MonitorTheme.textSecondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.68)
+                .frame(width: 86, alignment: .leading)
+            AntigravityQuotaCell(period: .fiveHour, window: fiveHour)
+            AntigravityQuotaCell(period: .sevenDay, window: sevenDay)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct AntigravityQuotaCell: View {
+    let period: AntigravityQuotaPeriod
+    let window: AntigravityQuotaWindow?
+
+    var body: some View {
+        HStack(spacing: MonitorTheme.Spacing.compact) {
+            Text(period.label)
+                .font(MonitorTheme.Typography.quotaMeta)
+                .foregroundStyle(MonitorTheme.textTertiary)
+            Text(Formatters.percent(window?.remainingPercent))
+                .font(MonitorTheme.Typography.quotaMeta.weight(.semibold))
+                .foregroundStyle(MonitorTheme.quotaColor(for: window?.remainingPercent))
+                .monospacedDigit()
+        }
+        .frame(minWidth: 60, alignment: .leading)
+    }
+}
+
 private struct SparkQuotaChip: View {
     let window: SparkQuotaWindow
 
@@ -1717,6 +1881,7 @@ private struct CompactStatusCell: View {
 
 private struct TaskTableHeader: View {
     let showContextMetrics: Bool
+    let usesPublishedTodayLedger: Bool
 
     var body: some View {
         HStack(spacing: 0) {
@@ -1726,6 +1891,9 @@ private struct TaskTableHeader: View {
                 .frame(width: 70, alignment: .center)
             tableHeaderText("Today")
                 .frame(width: 80, alignment: .trailing)
+                .help(usesPublishedTodayLedger
+                    ? "今日 Token 含已归因子代理；百分比按本机当天全部 Token 计算。"
+                    : "今日 Token 为本机根任务快照的暂估值；尚未与子代理及当天总量完整对齐。")
             if showContextMetrics {
                 tableHeaderText("Ctx")
                     .frame(width: 66, alignment: .trailing)
@@ -1786,6 +1954,8 @@ private struct TaskTableRow: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.56)
                 .monospacedDigit()
+                .help(todayUsageHelp)
+                .accessibilityLabel(todayAccessibilityLabel)
 
             if showContextMetrics {
                 Text(Formatters.percent(task.contextPercent))
@@ -1840,6 +2010,21 @@ private struct TaskTableRow: View {
             return MonitorTheme.textTertiary
         }
         return tokens > 0 ? MonitorTheme.textPrimary : MonitorTheme.textSecondary
+    }
+
+    private var todayAccessibilityLabel: String {
+        let tokens = task.todayTokens.map { Formatters.compactTokens($0) } ?? "不可用"
+        let share = task.todaySharePercent.map { Formatters.wholePercent($0) } ?? "不可用"
+        if task.todayUsageIsReconciled {
+            return "今日 Token \(tokens)，占当天 \(share)，包含已归因子代理"
+        }
+        return "今日 Token \(tokens)，为根任务本机快照暂估；不含未对齐的子代理与全天分母"
+    }
+
+    private var todayUsageHelp: String {
+        task.todayUsageIsReconciled
+            ? "今日 Token 已包含归属于此任务的子代理；百分比按本机当天全部 Token 计算。"
+            : "今日 Token 为根任务本机快照的暂估值；尚未与子代理及当天总量完整对齐。"
     }
 }
 
